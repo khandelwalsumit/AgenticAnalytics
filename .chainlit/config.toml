@@ -1,0 +1,21 @@
+[project]
+enable_telemetry = false
+
+[features]
+prompt_playground = false
+multi_modal = true
+
+[features.spontaneous_file_upload]
+enabled = true
+accept = ["text/csv", "application/vnd.ms-excel"]
+max_files = 1
+max_size_mb = 100
+
+[UI]
+name = "AgenticAnalytics"
+description = "Multi-agent customer experience analytics system"
+default_collapse_content = true
+hide_cot = false
+
+[UI.theme]
+layout = "wide"

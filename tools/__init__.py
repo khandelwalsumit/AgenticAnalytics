@@ -1,0 +1,300 @@
+"""Tool registry — aggregates all tools by agent name."""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import pandas as pd
+from langchain_core.tools import tool
+
+from config.settings import TOP_N_DEFAULT
+from core.data_store import DataStore
+from core.skill_loader import SkillLoader
+from tools.data_tools import (
+    DATA_TOOLS,
+    bucket_data,
+    filter_data,
+    get_distribution,
+    load_dataset,
+    sample_data,
+)
+from tools.metrics import MetricsEngine
+from tools.report_tools import REPORT_TOOLS, export_to_pptx, generate_markdown_report
+
+# ------------------------------------------------------------------
+# Shared references — set by the graph at session init
+# ------------------------------------------------------------------
+
+_data_store_ref: DataStore | None = None
+_skill_loader_ref: SkillLoader | None = None
+_findings_accumulator: list[dict] = []
+
+
+def set_analysis_deps(store: DataStore, skill_loader: SkillLoader) -> None:
+    """Bind session dependencies for analysis tools."""
+    global _data_store_ref, _skill_loader_ref
+    _data_store_ref = store
+    _skill_loader_ref = skill_loader
+
+
+def reset_findings() -> None:
+    """Clear accumulated findings (for new session)."""
+    global _findings_accumulator
+    _findings_accumulator = []
+
+
+def add_finding(finding: dict) -> None:
+    """Add a finding to the accumulator."""
+    _findings_accumulator.append(finding)
+
+
+# ------------------------------------------------------------------
+# Business Analyst tools
+# ------------------------------------------------------------------
+
+
+@tool
+def analyze_bucket(bucket: str, questions: list[str]) -> str:
+    """Analyze a data bucket against specific questions.
+
+    Args:
+        bucket: DataStore key for the bucket.
+        questions: List of analysis questions to investigate.
+
+    Returns:
+        JSON with bucket metadata, distributions, and sample data for analysis.
+    """
+    if _data_store_ref is None:
+        return json.dumps({"error": "DataStore not initialized"})
+
+    store = _data_store_ref
+    df = store.get_dataframe(bucket)
+    meta = store.get_metadata(bucket)
+
+    analysis_context: dict[str, Any] = {
+        "bucket": bucket,
+        "metadata": meta,
+        "questions": questions,
+        "row_count": len(df),
+    }
+
+    # Auto-generate distributions for text columns
+    text_cols = [c for c in df.columns if df[c].dtype == "object"]
+    distributions = {}
+    for col in text_cols[:5]:
+        dist = MetricsEngine.get_distribution(df, col)
+        if "distribution" in dist:
+            dist["distribution"] = dist["distribution"][:10]
+        distributions[col] = dist
+
+    analysis_context["distributions"] = distributions
+
+    # Sample rows for qualitative review
+    sample = df.sample(n=min(10, len(df)), random_state=42)
+    rows = []
+    for _, row in sample.iterrows():
+        row_dict = {}
+        for col, val in row.items():
+            s = str(val)
+            row_dict[col] = s[:300] + "..." if len(s) > 300 else s
+        rows.append(row_dict)
+    analysis_context["sample_rows"] = rows
+
+    return json.dumps(analysis_context, indent=2)
+
+
+@tool
+def apply_skill(skill_name: str, bucket: str) -> str:
+    """Load a skill and provide its analysis framework alongside bucket data.
+
+    Args:
+        skill_name: Name of the skill (e.g., 'payment_transfer').
+        bucket: DataStore key for the data bucket to analyze.
+
+    Returns:
+        JSON with skill content and bucket context for LLM analysis.
+    """
+    if _skill_loader_ref is None:
+        return json.dumps({"error": "SkillLoader not initialized"})
+    if _data_store_ref is None:
+        return json.dumps({"error": "DataStore not initialized"})
+
+    skill_content = _skill_loader_ref.load_skill(skill_name)
+    meta = _data_store_ref.get_metadata(bucket)
+    df = _data_store_ref.get_dataframe(bucket)
+
+    top_problems = (
+        MetricsEngine.top_n(df, "exact_problem_statement", n=10)
+        if "exact_problem_statement" in df.columns
+        else []
+    )
+
+    return json.dumps(
+        {
+            "skill": skill_name,
+            "skill_content": skill_content,
+            "bucket": bucket,
+            "bucket_metadata": meta,
+            "row_count": len(df),
+            "top_problems": top_problems,
+        },
+        indent=2,
+    )
+
+
+@tool
+def get_findings_summary() -> str:
+    """Aggregate and rank all findings accumulated so far.
+
+    Returns:
+        JSON with ranked findings list.
+    """
+    ranked = MetricsEngine.rank_findings(list(_findings_accumulator))
+    return json.dumps({"total_findings": len(ranked), "findings": ranked}, indent=2)
+
+
+# ------------------------------------------------------------------
+# Critique tools
+# ------------------------------------------------------------------
+
+
+@tool
+def validate_findings(findings: list[dict]) -> str:
+    """Validate findings for completeness and consistency.
+
+    Args:
+        findings: List of RankedFinding dicts to validate.
+
+    Returns:
+        JSON with validation results and issues found.
+    """
+    issues = []
+    required_fields = [
+        "finding", "category", "volume", "impact_score",
+        "ease_score", "confidence", "recommended_action",
+    ]
+
+    for i, f in enumerate(findings):
+        for field in required_fields:
+            if field not in f:
+                issues.append({
+                    "finding_index": i, "severity": "high",
+                    "issue": f"Missing required field: {field}",
+                })
+        if "volume" in f and not (0 <= f["volume"] <= 100):
+            issues.append({
+                "finding_index": i, "severity": "medium",
+                "issue": f"Volume {f['volume']}% out of range [0, 100]",
+            })
+        if "confidence" in f and not (0 <= f["confidence"] <= 1):
+            issues.append({
+                "finding_index": i, "severity": "medium",
+                "issue": f"Confidence {f['confidence']} out of range [0, 1]",
+            })
+        if "recommended_action" in f and len(str(f["recommended_action"])) < 10:
+            issues.append({
+                "finding_index": i, "severity": "low",
+                "issue": "Recommendation too vague (< 10 chars)",
+            })
+
+    return json.dumps({
+        "total_findings": len(findings),
+        "issues_found": len(issues),
+        "issues": issues,
+        "valid": len(issues) == 0,
+    }, indent=2)
+
+
+@tool
+def score_quality(
+    findings_count: int,
+    coverage_score: float,
+    actionability_score: float,
+    consistency_score: float,
+    data_accuracy_score: float,
+) -> str:
+    """Compute an overall quality score for the analysis.
+
+    Args:
+        findings_count: Number of findings produced.
+        coverage_score: How well major themes are covered (0-1).
+        actionability_score: How actionable recommendations are (0-1).
+        consistency_score: How consistent findings are across buckets (0-1).
+        data_accuracy_score: How accurately data is cited (0-1).
+
+    Returns:
+        JSON with overall quality score and breakdown.
+    """
+    weights = {
+        "coverage": 0.25,
+        "actionability": 0.30,
+        "consistency": 0.20,
+        "data_accuracy": 0.25,
+    }
+    scores = {
+        "coverage": coverage_score,
+        "actionability": actionability_score,
+        "consistency": consistency_score,
+        "data_accuracy": data_accuracy_score,
+    }
+    overall = sum(scores[k] * weights[k] for k in weights)
+
+    return json.dumps({
+        "overall_quality_score": round(overall, 3),
+        "breakdown": scores,
+        "weights": weights,
+        "findings_count": findings_count,
+        "grade": (
+            "A" if overall >= 0.9 else
+            "B" if overall >= 0.75 else
+            "C" if overall >= 0.6 else "D"
+        ),
+    }, indent=2)
+
+
+# ------------------------------------------------------------------
+# Supervisor tool (delegate_to_agent is a conceptual routing tool)
+# ------------------------------------------------------------------
+
+
+@tool
+def delegate_to_agent(agent_name: str, task_description: str) -> str:
+    """Delegate a task to a specific agent. Used by the Supervisor.
+
+    Args:
+        agent_name: Target agent (data_analyst, business_analyst, report_analyst, critique).
+        task_description: Description of what the agent should do.
+
+    Returns:
+        Confirmation of delegation.
+    """
+    valid_agents = ["data_analyst", "business_analyst", "report_analyst", "critique"]
+    if agent_name not in valid_agents:
+        return json.dumps({"error": f"Unknown agent: {agent_name}", "valid": valid_agents})
+    return json.dumps({"delegated_to": agent_name, "task": task_description})
+
+
+# ------------------------------------------------------------------
+# Aggregated registries
+# ------------------------------------------------------------------
+
+ANALYSIS_TOOLS = [analyze_bucket, apply_skill, get_findings_summary]
+CRITIQUE_TOOLS = [validate_findings, score_quality]
+SUPERVISOR_TOOLS = [delegate_to_agent]
+
+TOOL_REGISTRY: dict[str, Any] = {
+    "load_dataset": load_dataset,
+    "filter_data": filter_data,
+    "bucket_data": bucket_data,
+    "sample_data": sample_data,
+    "get_distribution": get_distribution,
+    "analyze_bucket": analyze_bucket,
+    "apply_skill": apply_skill,
+    "get_findings_summary": get_findings_summary,
+    "generate_markdown_report": generate_markdown_report,
+    "export_to_pptx": export_to_pptx,
+    "validate_findings": validate_findings,
+    "score_quality": score_quality,
+    "delegate_to_agent": delegate_to_agent,
+}
