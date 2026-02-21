@@ -92,7 +92,7 @@ reaction_on_message_received = false
 
 [UI]
 # Name of the assistant.
-name = "Assistant"
+name = "AgenticAnalytics"
 
 # default_theme = "dark"
 
@@ -100,9 +100,11 @@ name = "Assistant"
 # If not set, the browser's language will be used
 # language = "en-US"
 
-# layout = "wide"
+# Wide layout for more space
+layout = "wide"
 
-# default_sidebar_state = "open"
+# Open sidebar by default so chat history is visible
+default_sidebar_state = "open"
 
 # Chat settings display location: "message_composer" (default) or "sidebar" (header)
 # chat_settings_location = "message_composer"

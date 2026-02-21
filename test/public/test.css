@@ -1,0 +1,62 @@
+/* ── AgenticAnalytics Custom Styles ─────────────────────────────────── */
+
+/* Blinking pulse dot for "Awaiting Input" messages */
+.awaiting-input {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 18px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.08), rgba(168, 85, 247, 0.08));
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  font-weight: 500;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  animation: glow-border 2s ease-in-out infinite;
+}
+
+.pulse-dot {
+  width: 12px;
+  height: 12px;
+  min-width: 12px;
+  border-radius: 50%;
+  background: #6366f1;
+  animation: pulse 1.4s ease-in-out infinite;
+  box-shadow: 0 0 6px rgba(99, 102, 241, 0.6);
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.3; transform: scale(0.75); }
+}
+
+@keyframes glow-border {
+  0%, 100% { border-color: rgba(99, 102, 241, 0.2); }
+  50%      { border-color: rgba(99, 102, 241, 0.5); }
+}
+
+/* ── Fix scrollbar overflow in chat container ──────────────────────── */
+/* Prevent horizontal scrollbar from appearing in message content */
+.markdown-body,
+.message-content,
+[class*="message"] pre {
+  overflow-x: auto;
+  overflow-y: hidden;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+/* Hide unnecessary scrollbars on main chat area */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(128, 128, 128, 0.3);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(128, 128, 128, 0.5);
+}

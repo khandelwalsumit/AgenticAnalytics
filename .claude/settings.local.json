@@ -2,7 +2,13 @@
   "permissions": {
     "allow": [
       "WebSearch",
-      "WebFetch(domain:langchain-ai.github.io)"
+      "WebFetch(domain:langchain-ai.github.io)",
+      "Bash(cd \"D:/Workspace/AgenticAnalytics\" && source .venv/Scripts/activate && python -c \"\nfrom agents.graph import build_graph\ngraph = build_graph\\(\\)\nprint\\('Graph compiled successfully!'\\)\nprint\\('Graph nodes:', list\\(graph.get_graph\\(\\).nodes.keys\\(\\)\\)\\)\n\" 2>&1)",
+      "Bash(cd \"D:/Workspace/AgenticAnalytics\" && source .venv/Scripts/activate && python -c \"import chainlit; print\\(chainlit.__version__\\)\" 2>&1)",
+      "WebFetch(domain:docs.chainlit.io)",
+      "Bash(curl -sL \"https://docs.chainlit.io/data-persistence/history\" 2>/dev/null | python3 -c \"\nimport sys, re\nhtml = sys.stdin.read\\(\\)\n# Remove HTML tags but keep text\ntext = re.sub\\(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL\\)\ntext = re.sub\\(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL\\)\ntext = re.sub\\(r'<[^>]+>', ' ', text\\)\ntext = re.sub\\(r'\\\\s+', ' ', text\\)\nprint\\(text[:8000]\\)\n\" 2>&1)",
+      "Bash(for page in \"open-source-data-layers\" \"open-source-data-layers/custom\" \"open-source-data-layers/overview\"; do\n  echo \"=== $page ===\"\n  curl -sL \"https://docs.chainlit.io/data-persistence/$page\" 2>/dev/null | python3 -c \"\nimport sys, re\nhtml = sys.stdin.read\\(\\)\ntext = re.sub\\(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL\\)\ntext = re.sub\\(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL\\)\ntext = re.sub\\(r'<[^>]+>', ' ', text\\)\ntext = re.sub\\(r'\\\\s+', ' ', text\\)\nprint\\(text[:5000]\\)\n\"\n  echo \"\"\ndone 2>&1)",
+      "Bash(cd \"D:/Workspace/AgenticAnalytics\" && source .venv/Scripts/activate && python -c \"\n# Find StepDict and how to register data layer\nfrom chainlit.step import StepDict\nimport inspect\nprint\\('=== StepDict ==='\\)\nprint\\(inspect.getsource\\(StepDict\\)[:1500]\\)\nprint\\(\\)\n\n# Find PageInfo\nfrom chainlit.types import PageInfo\nprint\\('=== PageInfo ==='\\)\nprint\\(inspect.getsource\\(PageInfo\\)\\)\nprint\\(\\)\n\n# How to register data layer - check chainlit.data __init__\nimport chainlit.data as cd\nsrc = inspect.getsource\\(cd\\)\nfor line in src.split\\('\\\\n'\\):\n    l = line.strip\\(\\)\n    if l and \\('data_layer' in l.lower\\(\\) or 'datalayer' in l.lower\\(\\) or 'def ' in l or 'class ' in l\\):\n        print\\(line\\)\n\" 2>&1)"
     ]
   }
 }

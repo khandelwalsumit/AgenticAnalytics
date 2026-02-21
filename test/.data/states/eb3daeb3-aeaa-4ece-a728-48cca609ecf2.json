@@ -1,0 +1,48 @@
+{
+  "critique_enabled": false,
+  "plan_steps_total": 5,
+  "plan_steps_completed": 2,
+  "plan_tasks": [
+    {
+      "id": "1",
+      "title": "Data Discovery",
+      "status": "done"
+    },
+    {
+      "id": "2",
+      "title": "Data Preparation",
+      "status": "in_progress"
+    },
+    {
+      "id": "3",
+      "title": "Friction Analysis",
+      "status": "todo"
+    },
+    {
+      "id": "4",
+      "title": "Synthesis",
+      "status": "todo"
+    },
+    {
+      "id": "5",
+      "title": "Report Generation",
+      "status": "todo"
+    }
+  ],
+  "requires_user_input": true,
+  "checkpoint_message": "**Data Preparation Complete**\nI've sliced the data into 5 key demographic/issue buckets.",
+  "phase": "analysis",
+  "analysis_complete": false,
+  "reasoning": [
+    {
+      "step_name": "Data Analyst",
+      "step_text": "Applying segment filters and bucketing issues geographically and temporally..."
+    }
+  ],
+  "report_file_path": "",
+  "data_file_path": "",
+  "next_agent": "data_prep",
+  "checkpoint_prompt": "Please confirm the slicing to proceed.",
+  "thread_id": "eb3daeb3-aeaa-4ece-a728-48cca609ecf2",
+  "saved_at": "2026-02-21T20:45:34.463624+00:00"
+}
