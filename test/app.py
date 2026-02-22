@@ -1,4 +1,4 @@
-"""AgenticAnalytics — Chainlit App Framework (single-file).
+"""AgenticAnalytics - Chainlit App Framework (single-file).
 
 A clean, plug-and-play Chainlit shell for any LangGraph graph.
 Swap ``graph.py`` to switch between mock and production graphs.
@@ -7,12 +7,17 @@ Run: uv run chainlit run app.py
 
 == GRAPH CONTRACT ==
 Each node_output dict may contain:
-  reasoning           : list[dict]  — [{step_name, step_text, verbose?}]
-  plan_tasks           : list[dict]  — [{id, title, status}]  status ∈ {todo, in_progress, done}
+  reasoning           : list[dict]  - [{step_name, step_text, verbose?}]
+  plan_tasks          : list[dict]  - [{id, title, status}]  status in {todo, in_progress, done}
   plan_steps_total     : int
   plan_steps_completed : int
   requires_user_input  : bool
   checkpoint_message   : str
+  checkpoint_prompt    : str
+  checkpoint_token        : str
+  pending_input_for    : str
+  node_io              : dict
+  io_trace             : list[dict]
   messages             : list[AIMessage]
   analysis_complete    : bool
   report_file_path     : str
@@ -44,9 +49,9 @@ from langchain_core.messages import HumanMessage
 
 from graph import build_graph
 
-# ══════════════════════════════════════════════════════════════════════
+# 
 # Config
-# ══════════════════════════════════════════════════════════════════════
+# 
 VERBOSE = False
 # Ensure auth secret is long enough (32+ bytes)
 if len(os.environ.get("CHAINLIT_AUTH_SECRET", "")) < 32:
@@ -64,15 +69,15 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# ══════════════════════════════════════════════════════════════════════
+# 
 # File-based Data Layer (enables chat history sidebar)
-# ══════════════════════════════════════════════════════════════════════
+# 
 
 
 class FileDataLayer(BaseDataLayer):
-    """JSON-file backed data layer — no database required."""
+    """JSON-file backed data layer  no database required."""
 
-    # ── Users ─────────────────────────────────────────────────────────
+    #  Users 
     async def get_user(self, identifier: str) -> Optional[PersistedUser]:
         p = USERS_DIR / f"{identifier}.json"
         if not p.exists():
@@ -93,7 +98,7 @@ class FileDataLayer(BaseDataLayer):
         )
         return pu
 
-    # ── Threads ───────────────────────────────────────────────────────
+    #  Threads 
     def _tp(self, tid: str) -> Path:
         return THREADS_DIR / f"{tid}.json"
 
@@ -188,7 +193,7 @@ class FileDataLayer(BaseDataLayer):
             data=threads,
         )
 
-    # ── Steps ─────────────────────────────────────────────────────────
+    #  Steps 
     async def create_step(self, step_dict: StepDict) -> None:
         tid = step_dict.get("threadId", "")
         if not tid:
@@ -225,7 +230,7 @@ class FileDataLayer(BaseDataLayer):
                 self._save(d)
                 return
 
-    # ── Elements ──────────────────────────────────────────────────────
+    #  Elements 
     async def create_element(self, element: Any) -> None:
         tid = getattr(element, "thread_id", None) or getattr(element, "threadId", "")
         if not tid:
@@ -260,7 +265,7 @@ class FileDataLayer(BaseDataLayer):
             d["elements"] = [e for e in d["elements"] if e.get("id") != element_id]
             self._save(d)
 
-    # ── Feedback ──────────────────────────────────────────────────────
+    #  Feedback 
     async def upsert_feedback(self, feedback: Feedback) -> str:
         return feedback.id or str(uuid.uuid4())
 
@@ -270,7 +275,7 @@ class FileDataLayer(BaseDataLayer):
     async def get_favorite_steps(self, user_id: str) -> List[StepDict]:
         return []
 
-    # ── Misc ──────────────────────────────────────────────────────────
+    #  Misc 
     async def build_debug_url(self) -> str:
         return ""
 
@@ -278,9 +283,9 @@ class FileDataLayer(BaseDataLayer):
         pass
 
 
-# ══════════════════════════════════════════════════════════════════════
+# 
 # Authentication (required for chat history sidebar)
-# ══════════════════════════════════════════════════════════════════════
+# 
 
 
 @cl.password_auth_callback
@@ -297,9 +302,9 @@ def get_data_layer():
     return FileDataLayer()
 
 
-# ══════════════════════════════════════════════════════════════════════
+# 
 # Session state persistence
-# ══════════════════════════════════════════════════════════════════════
+# 
 
 
 async def save_state(thread_id: str, state: dict) -> None:
@@ -325,9 +330,9 @@ async def load_state(thread_id: str) -> dict | None:
     return json.loads(p.read_text("utf-8")) if p.exists() else None
 
 
-# ══════════════════════════════════════════════════════════════════════
+# 
 # UI Helpers
-# ══════════════════════════════════════════════════════════════════════
+# 
 
 def _task_status(s: str) -> cl.TaskStatus:
     return {"in_progress": cl.TaskStatus.RUNNING,
@@ -335,54 +340,54 @@ def _task_status(s: str) -> cl.TaskStatus:
 
 def _sub_title(a: dict) -> str:
     detail = a.get("detail", "")
-    return f"  ↳ {a['title']}" + (f"  —  {detail}" if detail else "")
+    return f"  -> {a['title']}" + (f"  -  {detail}" if detail else "")
+
+
+def _flatten_task_entries(tasks: list[dict]) -> list[dict]:
+    """Expand parent tasks and sub-agents into a single ordered list.
+
+    Sub-agent rows are placed immediately after their parent task.
+    """
+    rows: list[dict] = []
+    for t in tasks:
+        rows.append({
+            "title": t["title"],
+            "status": _task_status(t.get("status", "todo")),
+        })
+        for a in t.get("sub_agents", []):
+            rows.append({
+                "title": _sub_title(a),
+                "status": _task_status(a.get("status", "todo")),
+            })
+    return rows
 
 
 async def sync_task_list(tl: cl.TaskList | None, tasks: list[dict]) -> cl.TaskList:
-    """Create or update the sidebar TaskList, flattening sub_agents as indented children.
+    """Create/update TaskList with stable ordering.
 
-    Each plan_task may include an optional ``sub_agents`` list::
-
-        {"id": "3", "title": "Friction Analysis", "status": "in_progress",
-         "sub_agents": [
-             {"id": "f1", "title": "Digital Friction Agent", "status": "in_progress"},
-             ...
-         ]}
-
-    Sub-agents are inserted right after their parent with an ↳ prefix.
+    Parent task is always followed immediately by its sub-agent rows.
     """
+    desired_rows = _flatten_task_entries(tasks)
+
     if tl is None:
         tl = cl.TaskList()
         tl.status = "Running"
-        for t in tasks:
-            await tl.add_task(cl.Task(title=t["title"],
-                                      status=_task_status(t.get("status", "todo"))))
-            for a in t.get("sub_agents", []):
-                await tl.add_task(cl.Task(title=_sub_title(a),
-                                          status=_task_status(a.get("status", "todo"))))
+        for row in desired_rows:
+            await tl.add_task(cl.Task(title=row["title"], status=row["status"]))
         await tl.send()
-    else:
-        # Build lookup by display title (both parent and sub-items)
-        by_title = {task.title: task for task in tl.tasks}
-        for t in tasks:
-            st = _task_status(t.get("status", "todo"))
-            if t["title"] in by_title:
-                by_title[t["title"]].status = st
-            else:
-                await tl.add_task(cl.Task(title=t["title"], status=st))
-                by_title[t["title"]] = tl.tasks[-1]
-            for a in t.get("sub_agents", []):
-                sub_key = _sub_title(a)
-                sub_st  = _task_status(a.get("status", "todo"))
-                # Update title too (detail text may have been added)
-                if any(task.title.startswith(f"  ↳ {a['title']}") for task in tl.tasks):
-                    for task in tl.tasks:
-                        if task.title.startswith(f"  ↳ {a['title']}"):
-                            task.title  = sub_key
-                            task.status = sub_st
-                else:
-                    await tl.add_task(cl.Task(title=sub_key, status=sub_st))
-        await tl.send()
+        return tl
+
+    while len(tl.tasks) < len(desired_rows):
+        await tl.add_task(cl.Task(title="", status=cl.TaskStatus.READY))
+
+    for idx, row in enumerate(desired_rows):
+        tl.tasks[idx].title = row["title"]
+        tl.tasks[idx].status = row["status"]
+
+    if len(tl.tasks) > len(desired_rows):
+        tl.tasks = tl.tasks[: len(desired_rows)]
+
+    await tl.send()
     return tl
 
 
@@ -408,7 +413,7 @@ async def send_downloads(report_path: str, data_path: str) -> None:
     with open(dat, "w") as f:
         f.write("col_a,col_b,col_c\n1,2,3\n4,5,6\n")
     await cl.Message(
-        content="📥 **Your files are ready for download:**",
+        content="**Your files are ready for download:**",
         elements=[
             cl.File(name=os.path.basename(rpt), path=rpt, display="inline"),
             cl.File(name=os.path.basename(dat), path=dat, display="inline"),
@@ -416,31 +421,73 @@ async def send_downloads(report_path: str, data_path: str) -> None:
     ).send()
 
 
-# ══════════════════════════════════════════════════════════════════════
-# Initial State
-# ══════════════════════════════════════════════════════════════════════
+def _runtime_flags_from_text(text: str) -> dict[str, Any]:
+    """Parse lightweight runtime controls from a user message.
+
+    Supported:
+    - /inject timeout
+    - /inject auth
+    - /inject token
+    - /inject timeout digital_friction_agent
+    - /auto on
+    - /auto off
+    """
+    flags: dict[str, Any] = {}
+    parts = (text or "").strip().lower().split()
+    if len(parts) >= 2 and parts[0] == "/inject":
+        kind = parts[1]
+        if kind in {"timeout", "auth", "token"}:
+            flags["fault_injection"] = {
+                "next_error": kind,
+                "target": parts[2] if len(parts) >= 3 else "any",
+            }
+    if len(parts) >= 2 and parts[0] == "/auto":
+        if parts[1] in {"on", "true", "1"}:
+            flags["auto_approve_checkpoints"] = True
+        elif parts[1] in {"off", "false", "0"}:
+            flags["auto_approve_checkpoints"] = False
+    return flags
+
 
 def make_initial_state() -> dict[str, Any]:
     return {
         "messages": [],
         "critique_enabled": False,
+        "auto_approve_checkpoints": False,
         "plan_steps_total": 0,
         "plan_steps_completed": 0,
         "plan_tasks": [],
         "requires_user_input": False,
         "checkpoint_message": "",
+        "checkpoint_prompt": "",
+        "checkpoint_token": "",
+        "pending_input_for": "",
         "phase": "analysis",
         "analysis_complete": False,
         "reasoning": [],
+        "node_io": {},
+        "io_trace": [],
+        "last_completed_node": "",
+        "digital_analysis": {},
+        "operations_analysis": {},
+        "communication_analysis": {},
+        "policy_analysis": {},
+        "synthesis_result": {},
+        "narrative_output": {},
+        "dataviz_output": {},
+        "formatting_output": {},
+        "error_count": 0,
+        "recoverable_error": "",
+        "fault_injection": {"next_error": "", "target": "any"},
         "report_file_path": "",
         "data_file_path": "",
         "next_agent": "",
     }
 
 
-# ══════════════════════════════════════════════════════════════════════
+# 
 # Chainlit Lifecycle
-# ══════════════════════════════════════════════════════════════════════
+# 
 
 
 @cl.on_chat_start
@@ -457,9 +504,9 @@ async def on_chat_start():
 
     await cl.Message(
         content=(
-            "## 👋 Welcome to AgenticAnalytics\n\n"
+            "## Welcome to AgenticAnalytics\n\n"
             "Upload a CSV or send a message to begin your analysis.\n\n"
-            "The system will guide you through **data discovery → friction analysis → reporting** "
+            "The system will guide you through **data discovery -> friction analysis -> reporting** "
             "with checkpoints for your review at each stage."
         )
     ).send()
@@ -479,6 +526,19 @@ async def on_message(message: cl.Message):
                 break
     user_text = message.content or "Proceed"
 
+    # Runtime controls (fault injection + checkpoint auto-approve)
+    runtime_flags = _runtime_flags_from_text(user_text)
+    if runtime_flags:
+        state.update(runtime_flags)
+        notes = []
+        if "fault_injection" in runtime_flags:
+            fi = runtime_flags["fault_injection"]
+            notes.append(f"fault injection armed: `{fi['next_error']}` on `{fi['target']}`")
+        if "auto_approve_checkpoints" in runtime_flags:
+            mode = "ON" if runtime_flags["auto_approve_checkpoints"] else "OFF"
+            notes.append(f"auto checkpoint mode: `{mode}`")
+        await cl.Message(content="System runtime updated - " + "; ".join(notes), author="System").send()
+
     # Remove previous blinking prompt if it exists
     prev_prompt: cl.Message | None = cl.user_session.get("awaiting_prompt")
     if prev_prompt:
@@ -495,51 +555,69 @@ async def on_message(message: cl.Message):
     await reasoning_step.send()
 
     try:
-        try:
-            async for event in graph.astream(state, config=config, stream_mode="updates"):
-                for node_name, node_output in event.items():
-                    if node_name == "__end__":
+        async for event in graph.astream(state, config=config, stream_mode="updates"):
+            for node_name, node_output in event.items():
+                if node_name == "__end__":
+                    continue
+
+                # Append reasoning lines
+                for r in node_output.get("reasoning", []):
+                    if r.get("verbose") and not VERBOSE:
                         continue
+                    reasoning_step.output += f"**{r.get('step_name', node_name)}**: {r.get('step_text', '')}\n\n"
 
-                    # Append reasoning lines
-                    for r in node_output.get("reasoning", []):
-                        if r.get("verbose") and not VERBOSE:
-                            continue
-                        reasoning_step.output += f"**{r.get('step_name', node_name)}**: {r.get('step_text', '')}\n\n"
-                    await reasoning_step.update()
+                # Optional node I/O trace for contract debugging
+                if VERBOSE and node_output.get("node_io"):
+                    io = node_output["node_io"]
+                    in_json = json.dumps(io.get("input", {}), default=str)
+                    out_json = json.dumps(io.get("output", {}), default=str)
+                    reasoning_step.output += (
+                        f"`[I/O] {io.get('node', node_name)}` "
+                        f"in={in_json} out={out_json}\n\n"
+                    )
 
-                    # Sync plan task list (sub_agents embedded inside each task)
-                    new_tasks = node_output.get("plan_tasks")
-                    if new_tasks is not None:
-                        task_list = await sync_task_list(task_list, new_tasks)
-                        cl.user_session.set("task_list", task_list)
+                await reasoning_step.update()
 
-                    # Checkpoint: awaiting user input
-                    if node_output.get("requires_user_input"):
-                        info = node_output.get("checkpoint_message", "")
-                        prompt = node_output.get("checkpoint_prompt", "Please provide input to continue.")
-                        if info:
-                            await cl.Message(content=info).send()
-                        prompt_msg = await send_awaiting_input(prompt)
-                        cl.user_session.set("awaiting_prompt", prompt_msg)
+                # Sync plan task list (sub_agents embedded inside each task)
+                new_tasks = node_output.get("plan_tasks")
+                if new_tasks is not None:
+                    task_list = await sync_task_list(task_list, new_tasks)
+                    cl.user_session.set("task_list", task_list)
 
-                    # Surface AI messages
-                    for msg in node_output.get("messages", []):
-                        if hasattr(msg, "content") and msg.content and getattr(msg, "type", "") == "ai":
-                            content = msg.content
-                            if isinstance(content, list):
-                                content = " ".join(
-                                    b.get("text", "") if isinstance(b, dict) else str(b) for b in content
-                                )
-                            if content:
-                                await cl.Message(content=content).send()
+                # Checkpoint: awaiting user input
+                if node_output.get("requires_user_input"):
+                    info = node_output.get("checkpoint_message", "")
+                    prompt = node_output.get("checkpoint_prompt", "Please provide input to continue.")
+                    if info:
+                        await cl.Message(content=info).send()
+                    prompt_msg = await send_awaiting_input(prompt)
+                    cl.user_session.set("awaiting_prompt", prompt_msg)
+                else:
+                    # Ensure stale checkpoint state does not leak into later nodes.
+                    stale_prompt: cl.Message | None = cl.user_session.get("awaiting_prompt")
+                    if stale_prompt:
+                        await stale_prompt.remove()
+                        cl.user_session.set("awaiting_prompt", None)
+                    state["checkpoint_message"] = ""
+                    state["checkpoint_prompt"] = ""
+                    state["checkpoint_token"] = ""
+                    state["pending_input_for"] = ""
 
-                    # Merge into local state
-                    state.update(node_output)
-        except GeneratorExit:
-            pass  # Stream interrupted (e.g. disconnect) — safe to ignore
+                # Surface AI messages
+                for msg in node_output.get("messages", []):
+                    if hasattr(msg, "content") and msg.content and getattr(msg, "type", "") == "ai":
+                        content = msg.content
+                        if isinstance(content, list):
+                            content = " ".join(
+                                b.get("text", "") if isinstance(b, dict) else str(b) for b in content
+                            )
+                        if content:
+                            await cl.Message(content=content).send()
 
-        # Finalise reasoning step
+                # Merge node delta into local state
+                state.update(node_output)
+
+        # Finalize reasoning step
         reasoning_step.status = "success"
         await reasoning_step.update()
 
@@ -558,11 +636,13 @@ async def on_message(message: cl.Message):
 
             state["phase"] = "qa"
             await cl.Message(
-                content="---\n✅ **Analysis complete!** Ask follow-up questions or start a new chat."
+                content="---\nAnalysis complete. Ask follow-up questions or start a new chat."
             ).send()
 
     except Exception as exc:
-        await cl.Message(content=f"⚠️ **Error**: {exc}", author="System").send()
+        reasoning_step.status = "failed"
+        await reasoning_step.update()
+        await cl.Message(content=f"System error: {exc}", author="System").send()
 
     cl.user_session.set("state", state)
     await save_state(thread_id, state)
@@ -612,3 +692,4 @@ async def on_chat_resume(thread: dict):
 @cl.on_chat_end
 async def on_chat_end():
     pass
+

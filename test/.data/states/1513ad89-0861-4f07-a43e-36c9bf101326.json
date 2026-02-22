@@ -1,0 +1,48 @@
+{
+  "critique_enabled": false,
+  "plan_steps_total": 5,
+  "plan_steps_completed": 1,
+  "plan_tasks": [
+    {
+      "id": "1",
+      "title": "Data Discovery",
+      "status": "in_progress"
+    },
+    {
+      "id": "2",
+      "title": "Data Preparation",
+      "status": "todo"
+    },
+    {
+      "id": "3",
+      "title": "Friction Analysis",
+      "status": "todo"
+    },
+    {
+      "id": "4",
+      "title": "Synthesis",
+      "status": "todo"
+    },
+    {
+      "id": "5",
+      "title": "Report Generation",
+      "status": "todo"
+    }
+  ],
+  "requires_user_input": true,
+  "checkpoint_message": "**Data Discovery Complete**\nFound **300,412 records** across 13 columns. Key fields: `exact_problem_statement`, `digital_friction`, `call_reason` (L1\u2013L5).",
+  "phase": "analysis",
+  "analysis_complete": false,
+  "reasoning": [
+    {
+      "step_name": "Data Analyst",
+      "step_text": "Loading dataset and extracting schema (`exact_problem_statement`, `digital_friction`, `call_reason_l1_l5`)."
+    }
+  ],
+  "report_file_path": "",
+  "data_file_path": "",
+  "next_agent": "data_discovery",
+  "checkpoint_prompt": "Do you confirm this focus area?",
+  "thread_id": "1513ad89-0861-4f07-a43e-36c9bf101326",
+  "saved_at": "2026-02-22T03:35:28.547160+00:00"
+}

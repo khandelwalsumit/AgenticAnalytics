@@ -1,0 +1,30 @@
+{
+    "status": "Running",
+    "tasks": [
+        {
+            "title": "Data Discovery",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "Data Preparation",
+            "status": "running",
+            "forId": null
+        },
+        {
+            "title": "Friction Analysis",
+            "status": "ready",
+            "forId": null
+        },
+        {
+            "title": "Synthesis",
+            "status": "ready",
+            "forId": null
+        },
+        {
+            "title": "Report Generation",
+            "status": "ready",
+            "forId": null
+        }
+    ]
+}

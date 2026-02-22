@@ -1,0 +1,48 @@
+{
+  "critique_enabled": false,
+  "plan_steps_total": 5,
+  "plan_steps_completed": 2,
+  "plan_tasks": [
+    {
+      "id": "1",
+      "title": "Data Discovery",
+      "status": "done"
+    },
+    {
+      "id": "2",
+      "title": "Data Preparation",
+      "status": "in_progress"
+    },
+    {
+      "id": "3",
+      "title": "Friction Analysis",
+      "status": "todo"
+    },
+    {
+      "id": "4",
+      "title": "Synthesis",
+      "status": "todo"
+    },
+    {
+      "id": "5",
+      "title": "Report Generation",
+      "status": "todo"
+    }
+  ],
+  "requires_user_input": true,
+  "checkpoint_message": "**Data Preparation Complete**\nSliced into **5 buckets**: `Payment & Transfer` (38%), `Authentication` (22%), `Fraud & Dispute` (18%), `Rewards` (12%), `Profile & Settings` (10%).",
+  "phase": "analysis",
+  "analysis_complete": false,
+  "reasoning": [
+    {
+      "step_name": "Data Analyst",
+      "step_text": "Applying segment filters and bucketing issues geographically and temporally..."
+    }
+  ],
+  "report_file_path": "",
+  "data_file_path": "",
+  "next_agent": "data_prep",
+  "checkpoint_prompt": "Please confirm the slicing to proceed.",
+  "thread_id": "6bfe7447-c1a4-499e-8d48-ae41159e4e79",
+  "saved_at": "2026-02-22T03:25:59.368139+00:00"
+}

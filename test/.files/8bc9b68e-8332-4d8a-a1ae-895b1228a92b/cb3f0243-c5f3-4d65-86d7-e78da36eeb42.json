@@ -1,0 +1,50 @@
+{
+    "status": "Running",
+    "tasks": [
+        {
+            "title": "Data Discovery",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "Data Preparation",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "Friction Analysis",
+            "status": "running",
+            "forId": null
+        },
+        {
+            "title": "  -> Digital Friction Agent  -  6 findability failures, 3 UX gaps.",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "  -> Operations Agent  -  2 SLA breaches, 4 manual dependencies.",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "  -> Communication Agent  -  8 missing notifications.",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "  -> Policy Agent  -  3 regulatory constraints.",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "Synthesis",
+            "status": "ready",
+            "forId": null
+        },
+        {
+            "title": "Report Generation",
+            "status": "ready",
+            "forId": null
+        }
+    ]
+}
