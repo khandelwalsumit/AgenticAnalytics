@@ -46,6 +46,8 @@ class AnalyticsState(TypedDict, total=False):
     phase: str
     next_agent: str
     critique_enabled: bool
+    selected_agents: list[str]
+    selected_friction_agents: list[str]
     auto_approve_checkpoints: bool
 
     # Artifacts
@@ -75,6 +77,30 @@ class RecoverableInvokeError(Exception):
         self.kind = kind
         self.detail = detail
         super().__init__(f"{kind}: {detail}")
+
+
+FRICTION_LENS_CATALOG: dict[str, dict[str, str]] = {
+    "digital_friction_agent": {
+        "title": "Digital Friction Agent",
+        "detail": "6 findability failures, 3 UX gaps.",
+        "field": "digital_analysis",
+    },
+    "operations_agent": {
+        "title": "Operations Agent",
+        "detail": "2 SLA breaches, 4 manual dependencies.",
+        "field": "operations_analysis",
+    },
+    "communication_agent": {
+        "title": "Communication Agent",
+        "detail": "8 missing notifications.",
+        "field": "communication_analysis",
+    },
+    "policy_agent": {
+        "title": "Policy Agent",
+        "detail": "3 regulatory constraints.",
+        "field": "policy_analysis",
+    },
+}
 
 
 def _last_user_text(state: AnalyticsState) -> str:
@@ -366,7 +392,9 @@ async def supervisor(state: AnalyticsState) -> dict[str, Any]:
     elif idx == 2:
         next_agent = "friction"
     elif idx == 4:
-        next_agent = "critique" if state.get("critique_enabled", False) else "reporting"
+        selected_agents = state.get("selected_agents", [])
+        critique_selected = "critique" in selected_agents or state.get("critique_enabled", False)
+        next_agent = "critique" if critique_selected else "reporting"
     else:
         next_agent = "end"
 
@@ -382,7 +410,11 @@ async def supervisor(state: AnalyticsState) -> dict[str, Any]:
     output.update(_trace_io(
         state,
         node_name="supervisor",
-        node_input={"plan_steps_completed": idx, "critique_enabled": state.get("critique_enabled", False)},
+        node_input={
+            "plan_steps_completed": idx,
+            "critique_enabled": state.get("critique_enabled", False),
+            "selected_agents": state.get("selected_agents", []),
+        },
         node_output={"next_agent": next_agent, "requires_user_input": False},
     ))
     return output
@@ -496,21 +528,33 @@ async def _run_lens(state: AnalyticsState, lens_key: str, title: str, detail: st
 
 async def friction(state: AnalyticsState) -> dict[str, Any]:
     tasks = _task_updates(state.get("plan_tasks", []), {"3": "in_progress"})
+    selected = state.get("selected_friction_agents", [])
+    if not selected:
+        selected = [agent_id for agent_id in state.get("selected_agents", []) if agent_id in FRICTION_LENS_CATALOG]
+
     for t in tasks:
         if t.get("id") == "3":
             t["sub_agents"] = [
-                {"id": "digital_friction_agent", "title": "Digital Friction Agent", "status": "in_progress"},
-                {"id": "operations_agent", "title": "Operations Agent", "status": "in_progress"},
-                {"id": "communication_agent", "title": "Communication Agent", "status": "in_progress"},
-                {"id": "policy_agent", "title": "Policy Agent", "status": "in_progress"},
+                {
+                    "id": agent_id,
+                    "title": FRICTION_LENS_CATALOG[agent_id]["title"],
+                    "status": "in_progress",
+                }
+                for agent_id in selected
             ]
 
-    lens_results = await asyncio.gather(
-        _run_lens(state, "digital_friction_agent", "Digital Friction Agent", "6 findability failures, 3 UX gaps."),
-        _run_lens(state, "operations_agent", "Operations Agent", "2 SLA breaches, 4 manual dependencies."),
-        _run_lens(state, "communication_agent", "Communication Agent", "8 missing notifications."),
-        _run_lens(state, "policy_agent", "Policy Agent", "3 regulatory constraints."),
-    )
+    if selected:
+        lens_results = await asyncio.gather(*[
+            _run_lens(
+                state,
+                agent_id,
+                FRICTION_LENS_CATALOG[agent_id]["title"],
+                FRICTION_LENS_CATALOG[agent_id]["detail"],
+            )
+            for agent_id in selected
+        ])
+    else:
+        lens_results = []
 
     for t in tasks:
         if t.get("id") == "3":
@@ -524,9 +568,31 @@ async def friction(state: AnalyticsState) -> dict[str, Any]:
                 for row in lens_results
             ]
 
+    result_by_id = {row["id"]: row for row in lens_results}
+    field_updates: dict[str, dict[str, Any]] = {}
+    for agent_id, meta in FRICTION_LENS_CATALOG.items():
+        if agent_id in result_by_id:
+            field_updates[meta["field"]] = {
+                "status": result_by_id[agent_id]["status"],
+                "detail": result_by_id[agent_id]["detail"],
+            }
+        else:
+            field_updates[meta["field"]] = {
+                "status": "skipped",
+                "detail": "Not selected for this session.",
+            }
+
     output = {
         "reasoning": [
-            {"step_name": "Business Analyst", "step_text": "Ran 4 friction lenses concurrently via async gather.", "verbose": True},
+            {
+                "step_name": "Business Analyst",
+                "step_text": (
+                    "No friction lens agents selected; skipping lens execution."
+                    if not selected
+                    else f"Ran {len(selected)} selected friction lenses concurrently via async gather."
+                ),
+                "verbose": True,
+            },
             *[
                 {"step_name": row["title"], "step_text": row["detail"]}
                 for row in lens_results
@@ -534,16 +600,16 @@ async def friction(state: AnalyticsState) -> dict[str, Any]:
         ],
         "plan_tasks": tasks,
         "plan_steps_completed": 3,
-        "digital_analysis": {"status": lens_results[0]["status"], "detail": lens_results[0]["detail"]},
-        "operations_analysis": {"status": lens_results[1]["status"], "detail": lens_results[1]["detail"]},
-        "communication_analysis": {"status": lens_results[2]["status"], "detail": lens_results[2]["detail"]},
-        "policy_analysis": {"status": lens_results[3]["status"], "detail": lens_results[3]["detail"]},
+        **field_updates,
         **_clear_checkpoint_fields(),
     }
     output.update(_trace_io(
         state,
         node_name="friction",
-        node_input={"fan_out_mode": "asyncio.gather", "lens_count": 4},
+        node_input={
+            "fan_out_mode": "asyncio.gather",
+            "selected_lens_agents": selected,
+        },
         node_output={"plan_steps_completed": 3, "failed_lenses": len([r for r in lens_results if not r["ok"]])},
     ))
     return output
@@ -576,13 +642,13 @@ async def synthesizer(state: AnalyticsState) -> dict[str, Any]:
         output.update(_clear_checkpoint_fields())
     else:
         output.update(_make_checkpoint(
-            target_node="reporting",
+            target_node="supervisor",
             message=(
                 "**Synthesis Complete**\n"
                 "Dominant driver: **Findability** (Impact x Ease: 8.5).\n"
                 "`Authentication + Digital` contributes **41%** of total friction."
             ),
-            prompt="Proceed to report generation?",
+            prompt="Proceed to the next stage?",
         ))
 
     output.update(_trace_io(
@@ -783,6 +849,7 @@ def build_graph(*args, **kwargs):
         "supervisor",
         route_supervisor,
         {
+            "supervisor": "supervisor",
             "data_discovery": "data_discovery",
             "data_prep": "data_prep",
             "friction": "friction",

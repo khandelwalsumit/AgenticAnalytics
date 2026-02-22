@@ -1,0 +1,267 @@
+{
+  "critique_enabled": false,
+  "selected_agents": [
+    "digital_friction_agent"
+  ],
+  "selected_friction_agents": [
+    "digital_friction_agent"
+  ],
+  "auto_approve_checkpoints": false,
+  "plan_steps_total": 5,
+  "plan_steps_completed": 5,
+  "plan_tasks": [
+    {
+      "id": "1",
+      "title": "Data Discovery",
+      "status": "done"
+    },
+    {
+      "id": "2",
+      "title": "Data Preparation",
+      "status": "done"
+    },
+    {
+      "id": "3",
+      "title": "Friction Analysis",
+      "status": "done",
+      "sub_agents": [
+        {
+          "id": "digital_friction_agent",
+          "title": "Digital Friction Agent",
+          "status": "done",
+          "detail": "6 findability failures, 3 UX gaps."
+        }
+      ]
+    },
+    {
+      "id": "4",
+      "title": "Synthesis",
+      "status": "done"
+    },
+    {
+      "id": "5",
+      "title": "Report Generation",
+      "status": "done",
+      "sub_agents": [
+        {
+          "id": "narrative_agent",
+          "title": "Narrative Agent",
+          "status": "done",
+          "detail": "Executive summary and 4 thematic narratives drafted."
+        },
+        {
+          "id": "dataviz_agent",
+          "title": "DataViz Agent",
+          "status": "done",
+          "detail": "Generated 4 charts: distribution, impact-ease, multi-lens, preventability."
+        },
+        {
+          "id": "formatting_agent",
+          "title": "Formatting Agent",
+          "status": "done",
+          "detail": "Assembled markdown report and PPTX package."
+        }
+      ]
+    }
+  ],
+  "requires_user_input": false,
+  "checkpoint_message": "",
+  "checkpoint_prompt": "",
+  "checkpoint_token": "",
+  "pending_input_for": "",
+  "phase": "qa",
+  "analysis_complete": true,
+  "reasoning": [
+    {
+      "step_name": "Report Analyst",
+      "step_text": "Ran reporting squad with async branches then formatter.",
+      "verbose": true
+    },
+    {
+      "step_name": "Narrative Agent",
+      "step_text": "Executive summary and 4 thematic narratives drafted."
+    },
+    {
+      "step_name": "DataViz Agent",
+      "step_text": "Generated 4 charts: distribution, impact-ease, multi-lens, preventability."
+    },
+    {
+      "step_name": "Formatting Agent",
+      "step_text": "Assembled markdown report and PPTX package."
+    }
+  ],
+  "node_io": {
+    "node": "reporting",
+    "input": {
+      "reporting_mode": "async branches + sequential formatting"
+    },
+    "output": {
+      "analysis_complete": true,
+      "plan_steps_completed": 5
+    }
+  },
+  "io_trace": [
+    {
+      "node": "supervisor",
+      "input": {
+        "plan_tasks_present": false
+      },
+      "output": {
+        "next_agent": "data_discovery",
+        "plan_steps_total": 5
+      }
+    },
+    {
+      "node": "data_discovery",
+      "input": {
+        "dataset_path": "",
+        "messages_count": 1
+      },
+      "output": {
+        "plan_steps_completed": 1,
+        "requires_user_input": true,
+        "pending_input_for": "data_prep"
+      }
+    },
+    {
+      "node": "supervisor",
+      "input": {
+        "pending_input_for": "data_prep",
+        "user_reply": "hi"
+      },
+      "output": {
+        "next_agent": "data_prep",
+        "requires_user_input": false
+      }
+    },
+    {
+      "node": "data_prep",
+      "input": {
+        "checkpoint_policy": "optional",
+        "auto_approve_checkpoints": false
+      },
+      "output": {
+        "plan_steps_completed": 2,
+        "requires_user_input": false
+      }
+    },
+    {
+      "node": "supervisor",
+      "input": {
+        "plan_steps_completed": 2,
+        "critique_enabled": false,
+        "selected_agents": [
+          "digital_friction_agent"
+        ]
+      },
+      "output": {
+        "next_agent": "friction",
+        "requires_user_input": false
+      }
+    },
+    {
+      "node": "friction",
+      "input": {
+        "fan_out_mode": "asyncio.gather",
+        "selected_lens_agents": [
+          "digital_friction_agent"
+        ]
+      },
+      "output": {
+        "plan_steps_completed": 3,
+        "failed_lenses": 0
+      }
+    },
+    {
+      "node": "synthesizer",
+      "input": {
+        "lens_outputs_available": true,
+        "auto_approve_checkpoints": false
+      },
+      "output": {
+        "plan_steps_completed": 4,
+        "requires_user_input": true
+      }
+    },
+    {
+      "node": "supervisor",
+      "input": {
+        "pending_input_for": "supervisor",
+        "user_reply": "hi"
+      },
+      "output": {
+        "next_agent": "supervisor",
+        "requires_user_input": false
+      }
+    },
+    {
+      "node": "supervisor",
+      "input": {
+        "plan_steps_completed": 4,
+        "critique_enabled": false,
+        "selected_agents": [
+          "digital_friction_agent"
+        ]
+      },
+      "output": {
+        "next_agent": "reporting",
+        "requires_user_input": false
+      }
+    },
+    {
+      "node": "reporting",
+      "input": {
+        "reporting_mode": "async branches + sequential formatting"
+      },
+      "output": {
+        "analysis_complete": true,
+        "plan_steps_completed": 5
+      }
+    }
+  ],
+  "last_completed_node": "reporting",
+  "digital_analysis": {
+    "status": "done",
+    "detail": "6 findability failures, 3 UX gaps."
+  },
+  "operations_analysis": {
+    "status": "skipped",
+    "detail": "Not selected for this session."
+  },
+  "communication_analysis": {
+    "status": "skipped",
+    "detail": "Not selected for this session."
+  },
+  "policy_analysis": {
+    "status": "skipped",
+    "detail": "Not selected for this session."
+  },
+  "synthesis_result": {
+    "dominant_driver": "Findability",
+    "impact_x_ease": 8.5,
+    "supporting_signal": "Authentication + Digital = 41%"
+  },
+  "narrative_output": {
+    "status": "done",
+    "detail": "Executive summary and 4 thematic narratives drafted."
+  },
+  "dataviz_output": {
+    "status": "done",
+    "detail": "Generated 4 charts: distribution, impact-ease, multi-lens, preventability."
+  },
+  "formatting_output": {
+    "status": "done",
+    "detail": "Assembled markdown report and PPTX package."
+  },
+  "error_count": 0,
+  "recoverable_error": "",
+  "fault_injection": {
+    "next_error": "",
+    "target": "any"
+  },
+  "report_file_path": "report.pptx",
+  "data_file_path": "filtered_data.csv",
+  "next_agent": "reporting",
+  "thread_id": "225d8572-4494-4225-82ee-ebc680542a02",
+  "saved_at": "2026-02-22T12:37:44.285908+00:00"
+}

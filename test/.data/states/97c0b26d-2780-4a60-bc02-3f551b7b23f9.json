@@ -1,0 +1,114 @@
+{
+  "critique_enabled": false,
+  "selected_agents": [
+    "digital_friction_agent",
+    "operations_agent",
+    "communication_agent",
+    "policy_agent"
+  ],
+  "selected_friction_agents": [
+    "digital_friction_agent",
+    "operations_agent",
+    "communication_agent",
+    "policy_agent"
+  ],
+  "auto_approve_checkpoints": false,
+  "plan_steps_total": 5,
+  "plan_steps_completed": 1,
+  "plan_tasks": [
+    {
+      "id": "1",
+      "title": "Data Discovery",
+      "status": "done"
+    },
+    {
+      "id": "2",
+      "title": "Data Preparation",
+      "status": "in_progress"
+    },
+    {
+      "id": "3",
+      "title": "Friction Analysis",
+      "status": "todo"
+    },
+    {
+      "id": "4",
+      "title": "Synthesis",
+      "status": "todo"
+    },
+    {
+      "id": "5",
+      "title": "Report Generation",
+      "status": "todo"
+    }
+  ],
+  "requires_user_input": true,
+  "checkpoint_message": "**Data Discovery Complete**\nFound **300,412 records** across 13 columns.\nKey fields: `exact_problem_statement`, `digital_friction`, `call_reason (L1-L5)`.",
+  "checkpoint_prompt": "Do you confirm this scope and proceed to preparation?",
+  "checkpoint_token": "7585a4e8",
+  "pending_input_for": "data_prep",
+  "phase": "analysis",
+  "analysis_complete": false,
+  "reasoning": [
+    {
+      "step_name": "Data Analyst",
+      "step_text": "Loaded CSV and discovered schema for 300,412 records across 13 columns."
+    }
+  ],
+  "node_io": {
+    "node": "data_discovery",
+    "input": {
+      "dataset_path": "",
+      "messages_count": 1
+    },
+    "output": {
+      "plan_steps_completed": 1,
+      "requires_user_input": true,
+      "pending_input_for": "data_prep"
+    }
+  },
+  "io_trace": [
+    {
+      "node": "supervisor",
+      "input": {
+        "plan_tasks_present": false
+      },
+      "output": {
+        "next_agent": "data_discovery",
+        "plan_steps_total": 5
+      }
+    },
+    {
+      "node": "data_discovery",
+      "input": {
+        "dataset_path": "",
+        "messages_count": 1
+      },
+      "output": {
+        "plan_steps_completed": 1,
+        "requires_user_input": true,
+        "pending_input_for": "data_prep"
+      }
+    }
+  ],
+  "last_completed_node": "data_discovery",
+  "digital_analysis": {},
+  "operations_analysis": {},
+  "communication_analysis": {},
+  "policy_analysis": {},
+  "synthesis_result": {},
+  "narrative_output": {},
+  "dataviz_output": {},
+  "formatting_output": {},
+  "error_count": 0,
+  "recoverable_error": "",
+  "fault_injection": {
+    "next_error": "",
+    "target": "any"
+  },
+  "report_file_path": "",
+  "data_file_path": "",
+  "next_agent": "data_discovery",
+  "thread_id": "97c0b26d-2780-4a60-bc02-3f551b7b23f9",
+  "saved_at": "2026-02-22T12:48:38.620987+00:00"
+}

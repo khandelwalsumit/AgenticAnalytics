@@ -34,6 +34,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import chainlit as cl
+from chainlit.input_widget import MultiSelect
 from chainlit.data import BaseDataLayer
 from chainlit.step import StepDict
 from chainlit.types import (
@@ -53,6 +54,64 @@ from graph import build_graph
 # Config
 # 
 VERBOSE = False
+
+FRICTION_AGENT_IDS = [
+    "digital_friction_agent",
+    "operations_agent",
+    "communication_agent",
+    "policy_agent",
+]
+
+AGENT_ID_TO_LABEL = {
+    "digital_friction_agent": "Digital Friction Agent",
+    "operations_agent": "Operations Agent",
+    "communication_agent": "Communication Agent",
+    "policy_agent": "Policy Agent",
+    "critique": "Critique",
+}
+AGENT_ITEMS = {label: agent_id for agent_id, label in AGENT_ID_TO_LABEL.items()}
+AGENT_LABEL_TO_ID = {label: agent_id for label, agent_id in AGENT_ITEMS.items()}
+
+DEFAULT_SELECTED_AGENTS = list(FRICTION_AGENT_IDS)
+
+
+def _normalize_selected_agents(raw: Any, *, default_if_missing: bool) -> list[str]:
+    """Normalize selected_agents payload to internal agent IDs."""
+    if raw is None:
+        return list(DEFAULT_SELECTED_AGENTS) if default_if_missing else []
+    if not isinstance(raw, list):
+        return list(DEFAULT_SELECTED_AGENTS) if default_if_missing else []
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in raw:
+        if not isinstance(value, str):
+            continue
+        agent_id = value if value in AGENT_ID_TO_LABEL else AGENT_LABEL_TO_ID.get(value, "")
+        if agent_id and agent_id not in seen:
+            seen.add(agent_id)
+            normalized.append(agent_id)
+
+    if normalized:
+        return normalized
+    if not raw:
+        return []
+    return list(DEFAULT_SELECTED_AGENTS) if default_if_missing else []
+
+
+async def _send_agent_settings(initial_selected: list[str]) -> None:
+    normalized_initial = _normalize_selected_agents(initial_selected, default_if_missing=True)
+    await cl.ChatSettings(
+        [
+            MultiSelect(
+                id="selected_agents",
+                label="Session Agents",
+                initial=list(normalized_initial),
+                items=AGENT_ITEMS,
+                description="Only selected agents run in friction/critique subgraphs for this session.",
+            )
+        ]
+    ).send()
 # Ensure auth secret is long enough (32+ bytes)
 if len(os.environ.get("CHAINLIT_AUTH_SECRET", "")) < 32:
     os.environ["CHAINLIT_AUTH_SECRET"] = os.environ.get("CHAINLIT_AUTH_SECRET", "dev").ljust(32, "0")
@@ -453,6 +512,8 @@ def make_initial_state() -> dict[str, Any]:
     return {
         "messages": [],
         "critique_enabled": False,
+        "selected_agents": list(DEFAULT_SELECTED_AGENTS),
+        "selected_friction_agents": list(DEFAULT_SELECTED_AGENTS),
         "auto_approve_checkpoints": False,
         "plan_steps_total": 0,
         "plan_steps_completed": 0,
@@ -497,10 +558,13 @@ async def on_chat_start():
 
     cl.user_session.set("graph", graph)
     cl.user_session.set("thread_id", thread_id)
+    cl.user_session.set("selected_agents", list(DEFAULT_SELECTED_AGENTS))
+    cl.user_session.set("critique_enabled", False)
     cl.user_session.set("state", make_initial_state())
     cl.user_session.set("task_list", None)
     cl.user_session.set("squad_list", None)
     cl.user_session.set("awaiting_prompt", None)
+    await _send_agent_settings(list(DEFAULT_SELECTED_AGENTS))
 
     await cl.Message(
         content=(
@@ -538,6 +602,15 @@ async def on_message(message: cl.Message):
             mode = "ON" if runtime_flags["auto_approve_checkpoints"] else "OFF"
             notes.append(f"auto checkpoint mode: `{mode}`")
         await cl.Message(content="System runtime updated - " + "; ".join(notes), author="System").send()
+
+    selected_agents = _normalize_selected_agents(
+        cl.user_session.get("selected_agents"),
+        default_if_missing=True,
+    )
+    selected_friction = [a for a in selected_agents if a in FRICTION_AGENT_IDS]
+    state["selected_agents"] = selected_agents
+    state["selected_friction_agents"] = selected_friction
+    state["critique_enabled"] = "critique" in selected_agents
 
     # Remove previous blinking prompt if it exists
     prev_prompt: cl.Message | None = cl.user_session.get("awaiting_prompt")
@@ -650,10 +723,24 @@ async def on_message(message: cl.Message):
 
 @cl.on_settings_update
 async def on_settings_update(settings: dict):
-    if "critique_enabled" in settings:
-        cl.user_session.set("critique_enabled", settings["critique_enabled"])
-        label = "enabled" if settings["critique_enabled"] else "disabled"
-        await cl.Message(content=f"Critique mode **{label}**.", author="System").send()
+    if "selected_agents" in settings:
+        selected = _normalize_selected_agents(
+            settings.get("selected_agents"),
+            default_if_missing=False,
+        )
+        cl.user_session.set("selected_agents", selected)
+        cl.user_session.set("critique_enabled", "critique" in selected)
+        state = cl.user_session.get("state") or {}
+        state["selected_agents"] = list(selected)
+        state["selected_friction_agents"] = [a for a in selected if a in FRICTION_AGENT_IDS]
+        state["critique_enabled"] = "critique" in selected
+        cl.user_session.set("state", state)
+        selected_labels = [AGENT_ID_TO_LABEL.get(agent_id, agent_id) for agent_id in selected]
+        summary = ", ".join(selected_labels) if selected_labels else "none"
+        await cl.Message(
+            content=f"Session agents updated: **{summary}**.",
+            author="System",
+        ).send()
 
 
 @cl.on_chat_resume
@@ -671,6 +758,16 @@ async def on_chat_resume(thread: dict):
 
     if saved:
         state.update(saved)
+        selected = _normalize_selected_agents(
+            state.get("selected_agents"),
+            default_if_missing=True,
+        )
+        state["selected_agents"] = list(selected)
+        state["selected_friction_agents"] = [a for a in selected if a in FRICTION_AGENT_IDS]
+        state["critique_enabled"] = "critique" in selected
+        cl.user_session.set("selected_agents", selected)
+        cl.user_session.set("critique_enabled", "critique" in selected)
+        await _send_agent_settings(selected)
         cl.user_session.set("state", state)
 
         phase = saved.get("phase", "analysis")
@@ -685,6 +782,9 @@ async def on_chat_resume(thread: dict):
                     "\n\nContinue where you left off."
         ).send()
     else:
+        cl.user_session.set("selected_agents", list(DEFAULT_SELECTED_AGENTS))
+        cl.user_session.set("critique_enabled", False)
+        await _send_agent_settings(list(DEFAULT_SELECTED_AGENTS))
         cl.user_session.set("state", state)
         await cl.Message(content="Could not restore session. Starting fresh.", author="System").send()
 

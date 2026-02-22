@@ -1,5 +1,4 @@
-/* ── AgenticAnalytics Custom Styles ─────────────────────────────────── */
-
+/* AgenticAnalytics custom styles */
 /* Blinking pulse dot for "Awaiting Input" messages */
 .awaiting-input {
   display: flex;
@@ -26,16 +25,59 @@
 }
 
 @keyframes pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50%      { opacity: 0.3; transform: scale(0.75); }
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.3;
+    transform: scale(0.75);
+  }
 }
 
 @keyframes glow-border {
-  0%, 100% { border-color: rgba(99, 102, 241, 0.2); }
-  50%      { border-color: rgba(99, 102, 241, 0.5); }
+  0%,
+  100% {
+    border-color: rgba(99, 102, 241, 0.2);
+  }
+  50% {
+    border-color: rgba(99, 102, 241, 0.5);
+  }
 }
 
-/* ── Fix scrollbar overflow in chat container ──────────────────────── */
+/* Improve readability of user messages */
+[data-message-author="user"] .message-content,
+[data-author="user"] .message-content,
+.user-message .message-content,
+.message.user .message-content,
+[data-testid*="user"] .message-content {
+  color: var(--aa-user-text-color) !important;
+}
+
+/* Step header style hook */
+button[id^="step-"] {
+  color: #9e9de0 !important;
+  font-size: 12 px !important
+}
+
+/* Step container style hook (run steps only) */
+.step[data-step-type="run"] .message-content,
+.step[data-step-type="run"] .markdown-body,
+.step[data-setp-type="run"] .message-content,
+.step[data-setp-type="run"] .markdown-body {
+  color: #888888 !important;
+  opacity: 0.72;
+}
+
+/* Reasoning content in run steps: 60% dim and half size */
+.step[data-step-type="run"] .markdown-body,
+.step[data-setp-type="run"] .markdown-body {
+  color: #888888 !important;
+  font-size: 0.6em !important;
+  line-height: 1.35;
+}
+
 /* Prevent horizontal scrollbar from appearing in message content */
 .markdown-body,
 .message-content,
@@ -50,13 +92,16 @@
 ::-webkit-scrollbar {
   width: 6px;
 }
+
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
 ::-webkit-scrollbar-thumb {
   background: rgba(128, 128, 128, 0.3);
   border-radius: 3px;
 }
+
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(128, 128, 128, 0.5);
 }
