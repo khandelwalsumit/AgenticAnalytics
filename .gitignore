@@ -14,7 +14,6 @@ wheels/
 
 # Cache
 .cache/
-Citi-Agentic-main
 
 # Data artifacts (keep .gitkeep)
 data/*.csv

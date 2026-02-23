@@ -13,10 +13,10 @@ Each node_output dict may contain:
   checkpoint_prompt    : str
   checkpoint_token     : str
   pending_input_for    : str
+  supervisor_decision  : str        - "answer"|"clarify"|"extract"|"analyse"|"execute"
   node_io              : dict
   io_trace             : list[dict]
   messages             : list[AIMessage]
-  analysis_complete    : bool
   report_file_path     : str
   data_file_path       : str
 """
@@ -168,10 +168,6 @@ async def _send_notification(message: str, level: str = "info") -> None:
 
 
 def _should_restore_downloads(state: dict[str, Any]) -> bool:
-    if state.get("analysis_complete"):
-        return True
-    if str(state.get("phase", "")).lower() == "qa":
-        return True
     if state.get("report_file_path") or state.get("data_file_path"):
         return True
     return False
@@ -257,8 +253,6 @@ def make_initial_state() -> dict[str, Any]:
         "checkpoint_prompt": "",
         "checkpoint_token": "",
         "pending_input_for": "",
-        "phase": "analysis",
-        "analysis_complete": False,
         "execution_trace": [],
         "reasoning": [],
         "node_io": {},
@@ -285,13 +279,11 @@ def make_initial_state() -> dict[str, Any]:
         "critique_feedback": {},
         "quality_score": 0.0,
         "next_agent": "",
-        "analysis_scope": {
-            "dataset_path": "",
-            "filters": {},
-            "skills_used": [],
-            "buckets_created": [],
-            "focus_column": "",
-        },
+        "supervisor_decision": "",
+        "filters_applied": {},
+        "themes_for_analysis": [],
+        "navigation_log": [],
+        "analysis_objective": "",
         "error_count": 0,
         "recoverable_error": "",
         "fault_injection": {"next_error": "", "target": "any"},
@@ -465,8 +457,8 @@ async def on_message(message: cl.Message):
         reasoning_step.status = "success"
         await reasoning_step.update()
 
-        # Post-analysis: downloads + Q&A transition
-        if state.get("analysis_complete"):
+        # Post-analysis: send downloads if report is available
+        if state.get("report_file_path") or state.get("data_file_path"):
             await send_downloads(
                 state.get("report_file_path", "report.pptx"),
                 state.get("data_file_path", "data.csv"),
@@ -477,11 +469,6 @@ async def on_message(message: cl.Message):
                 task_list.status = "Done"
                 await task_list.send()
                 cl.user_session.set("task_list", task_list)
-
-            state["phase"] = "qa"
-            await cl.Message(
-                content="---\nAnalysis complete. Ask follow-up questions or start a new chat."
-            ).send()
 
     except Exception as exc:
         reasoning_step.status = "failed"
@@ -544,10 +531,9 @@ async def on_chat_resume(thread: dict):
         cl.user_session.set("state", state)
         await save_analysis_state(thread_id, state)
 
-        phase = saved.get("phase", "analysis")
         completed = saved.get("plan_steps_completed", 0)
         total = saved.get("plan_steps_total", 0)
-        parts = [f"**Phase:** {phase}"]
+        parts = []
         if total > 0:
             parts.append(f"**Progress:** {completed}/{total} steps")
 

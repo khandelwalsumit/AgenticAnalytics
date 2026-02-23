@@ -15,10 +15,9 @@ import time
 import uuid
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from pydantic import BaseModel, Field
+from langchain_core.messages import AIMessage
 
-from agents.state import AnalyticsState, ExecutionTrace, ScopeDecision
+from agents.state import AnalyticsState, ExecutionTrace
 from config import (
     ALL_DOMAIN_SKILLS,
     FRICTION_AGENTS,
@@ -28,7 +27,6 @@ from config import (
     VERBOSE,
 )
 from core.agent_factory import AgentFactory
-from core.llm import get_llm
 from core.skill_loader import SkillLoader
 
 logger = logging.getLogger("agenticanalytics.nodes")
@@ -125,81 +123,54 @@ def _extract_verbose_details(messages: list) -> dict[str, Any]:
 
 
 # ------------------------------------------------------------------
-# Scope Detector (lightweight classification — not a full agent)
+# Supervisor decision parsing
 # ------------------------------------------------------------------
 
 
-class ScopeDecisionModel(BaseModel):
-    """Structured output for scope detection."""
+def _parse_supervisor_decision(text: str) -> dict[str, Any]:
+    """Extract structured JSON decision from supervisor's response text.
 
-    in_scope: bool = Field(description="Whether the question is within the current analysis scope")
-    reason: str = Field(description="Brief explanation of why the question is in or out of scope")
+    The supervisor outputs JSON like:
+    {"decision": "answer"|"clarify"|"extract"|"analyse"|"execute", ...}
+
+    Returns parsed dict or empty dict if parsing fails.
+    """
+    text = text.strip()
+    # Try to extract JSON from the text (may be wrapped in markdown code blocks)
+    if "```" in text:
+        # Extract content between code fences
+        parts = text.split("```")
+        for part in parts[1::2]:  # odd-indexed parts are inside fences
+            part = part.strip()
+            if part.startswith("json"):
+                part = part[4:].strip()
+            try:
+                return json.loads(part)
+            except (json.JSONDecodeError, ValueError):
+                continue
+    # Try direct JSON parse
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        pass
+    # Try to find JSON object in text
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start >= 0 and end > start:
+        try:
+            return json.loads(text[start:end])
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return {}
 
 
-SCOPE_DETECTOR_PROMPT = """You are a scope detector for a customer experience analytics system.
-You determine whether a user's follow-up question falls within the scope of the completed analysis.
-
-## Current Analysis Scope
-Dataset: {dataset_path}
-Filters applied: {filters}
-Skills used: {skills_used}
-Buckets created: {buckets_created}
-Focus column: {focus_column}
-
-## Rules
-IN-SCOPE: Questions that drill into existing findings, ask for clarification,
-request comparisons within the analyzed data, or want different views of
-already-bucketed data.
-
-OUT-OF-SCOPE: Requests requiring new data, different filters not already applied,
-or a fundamentally different analysis focus.
-
-Determine if the following question is in-scope or out-of-scope."""
-
-
-async def scope_detector_node(state: AnalyticsState) -> dict[str, Any]:
-    """Lightweight classification node using structured output."""
-    scope = state.get("analysis_scope", {})
-    messages = state["messages"]
-    last_message = messages[-1] if messages else None
-
-    if not last_message:
-        return {"next_agent": "supervisor"}
-
-    prompt = SCOPE_DETECTOR_PROMPT.format(
-        dataset_path=scope.get("dataset_path", "N/A"),
-        filters=scope.get("filters", {}),
-        skills_used=scope.get("skills_used", []),
-        buckets_created=scope.get("buckets_created", []),
-        focus_column=scope.get("focus_column", "N/A"),
-    )
-
-    llm = get_llm(temperature=0.0, max_tokens=256)
-    structured_llm = llm.with_structured_output(ScopeDecisionModel)
-
-    question = last_message.content if hasattr(last_message, "content") else str(last_message)
-    result = await structured_llm.ainvoke([
-        SystemMessage(content=prompt),
-        HumanMessage(content=question),
-    ])
-
-    if result.in_scope:
-        return {
-            "next_agent": "supervisor",
-            "reasoning": [{"step_name": "Scope Detector", "step_text": f"In-scope: {result.reason}"}],
-        }
-    else:
-        return {
-            "next_agent": "__end__",
-            "messages": [AIMessage(content=(
-                f"This question falls outside the current analysis scope.\n\n"
-                f"**Reason:** {result.reason}\n\n"
-                f"The current analysis covers: {', '.join(scope.get('skills_used', []))}\n"
-                f"with filters: {scope.get('filters', {})}\n\n"
-                f"To explore this topic, please start a **New Chat** with a fresh analysis scope."
-            ))],
-            "reasoning": [{"step_name": "Scope Detector", "step_text": f"Out-of-scope: {result.reason}"}],
-        }
+_DECISION_TO_NEXT_AGENT: dict[str, str] = {
+    "answer": "__end__",
+    "clarify": "__end__",
+    "extract": "data_analyst",
+    "analyse": "planner",
+    "execute": "",  # determined by plan_tasks
+}
 
 
 # ------------------------------------------------------------------
@@ -347,15 +318,35 @@ def make_agent_node(
                 + json.dumps(report_context, indent=2, default=str)
             )
 
-        # Business analyst (legacy path): inject selected skills if any
-        elif agent_name == "business_analyst" and skill_loader:
-            selected = state.get("selected_skills", [])
-            if selected:
-                extra_context = (
-                    "\n\n## Loaded Skills\n"
-                    "Use the following domain/operational skills to guide your analysis:\n\n"
-                    + skill_loader.load_skills(selected)
-                )
+        # Supervisor: inject current filters, themes, and plan state
+        elif agent_name == "supervisor":
+            supervisor_context: dict[str, Any] = {
+                "filters_applied": state.get("filters_applied", {}),
+                "themes_for_analysis": state.get("themes_for_analysis", []),
+                "navigation_log": state.get("navigation_log", []),
+                "analysis_objective": state.get("analysis_objective", ""),
+                "plan_tasks": state.get("plan_tasks", []),
+                "plan_steps_completed": state.get("plan_steps_completed", 0),
+                "plan_steps_total": state.get("plan_steps_total", 0),
+            }
+            extra_context = (
+                "\n\n## Current State Context\n"
+                + json.dumps(supervisor_context, indent=2, default=str)
+            )
+
+        # Planner: inject analysis objective, themes, and filters
+        elif agent_name == "planner":
+            planner_context: dict[str, Any] = {
+                "filters_applied": state.get("filters_applied", {}),
+                "themes_for_analysis": state.get("themes_for_analysis", []),
+                "navigation_log": state.get("navigation_log", []),
+                "analysis_objective": state.get("analysis_objective", ""),
+                "critique_enabled": state.get("critique_enabled", False),
+            }
+            extra_context = (
+                "\n\n## Planning Context\n"
+                + json.dumps(planner_context, indent=2, default=str)
+            )
 
         config = agent_factory.parse_agent_md(agent_name)
         system_msg_content = config.system_prompt
@@ -443,6 +434,52 @@ def make_agent_node(
                 "full_response": str(last_msg.content) if last_msg else "",
                 "agent": agent_name,
             }
+
+        # -- Supervisor decision parsing -----------------------------------
+        if agent_name == "supervisor" and last_msg and hasattr(last_msg, "content"):
+            raw_text = _extract_text(last_msg.content)
+            decision_data = _parse_supervisor_decision(raw_text)
+            decision = decision_data.get("decision", "")
+            response_text = decision_data.get("response", "")
+
+            if decision in _DECISION_TO_NEXT_AGENT:
+                updates["supervisor_decision"] = decision
+
+                if decision == "execute":
+                    # Find next pending task in plan_tasks
+                    for task in state.get("plan_tasks", []):
+                        if task.get("status") in ("ready", "todo"):
+                            updates["next_agent"] = task["agent"]
+                            break
+                    else:
+                        updates["next_agent"] = "__end__"
+                else:
+                    updates["next_agent"] = _DECISION_TO_NEXT_AGENT[decision]
+
+                # For answer/clarify, replace raw JSON with the response text
+                if decision in ("answer", "clarify") and response_text:
+                    updates["messages"] = [AIMessage(content=response_text)]
+
+            logger.info(
+                "Supervisor decision: %s → next_agent=%s (confidence=%s)",
+                decision,
+                updates.get("next_agent", "?"),
+                decision_data.get("confidence", "?"),
+            )
+
+        # -- Planner output parsing ----------------------------------------
+        if agent_name == "planner" and last_msg and hasattr(last_msg, "content"):
+            raw_text = _extract_text(last_msg.content)
+            plan_data = _parse_supervisor_decision(raw_text)  # same JSON parser
+            new_tasks = plan_data.get("plan_tasks", [])
+            if new_tasks:
+                updates["plan_tasks"] = new_tasks
+                updates["plan_steps_total"] = plan_data.get(
+                    "plan_steps_total", len(new_tasks)
+                )
+                updates["plan_steps_completed"] = 0
+                if plan_data.get("analysis_objective"):
+                    updates["analysis_objective"] = plan_data["analysis_objective"]
 
         # Update plan progress
         completed = state.get("plan_steps_completed", 0) + 1

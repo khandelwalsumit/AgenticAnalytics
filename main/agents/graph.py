@@ -1,11 +1,13 @@
 """Main LangGraph StateGraph assembly.
 
 Defines the full analytics pipeline graph with:
-- Supervisor, Data Analyst, Business Analyst, Report Analyst, Critique nodes
+- Supervisor (intent routing + plan execution)
+- Planner (creates execution plans)
+- Data Analyst (filter mapping + data prep)
+- Report Analyst, Critique nodes
 - 4 parallel friction lens agents (Digital, Operations, Communication, Policy)
 - Synthesizer for root-cause merging
 - 3 reporting agents (Narrative, DataViz, Formatting)
-- Scope Detector for Q&A phase routing
 - User checkpoint interrupts
 - Send API fan-out for parallel analysis and reporting subgraphs
 """
@@ -20,7 +22,6 @@ from langgraph.types import Send
 
 from agents.nodes import (
     make_agent_node,
-    scope_detector_node,
     user_checkpoint_node,
 )
 from agents.state import AnalyticsState
@@ -53,10 +54,8 @@ def build_graph(
 
     # -- Create node functions -------------------------------------------------
     supervisor_node = make_agent_node(agent_factory, "supervisor")
+    planner_node = make_agent_node(agent_factory, "planner")
     data_analyst_node = make_agent_node(agent_factory, "data_analyst")
-    business_analyst_node = make_agent_node(
-        agent_factory, "business_analyst", skill_loader=skill_loader
-    )
     report_analyst_node = make_agent_node(agent_factory, "report_analyst")
     critique_node = make_agent_node(agent_factory, "critique")
 
@@ -87,11 +86,10 @@ def build_graph(
 
     # Add all nodes
     graph.add_node("supervisor", supervisor_node)
+    graph.add_node("planner", planner_node)
     graph.add_node("data_analyst", data_analyst_node)
-    graph.add_node("business_analyst", business_analyst_node)
     graph.add_node("report_analyst", report_analyst_node)
     graph.add_node("critique", critique_node)
-    graph.add_node("scope_detector", scope_detector_node)
     graph.add_node("user_checkpoint", user_checkpoint_node)
 
     # Friction lens agents
@@ -115,15 +113,15 @@ def build_graph(
     ) -> Union[str, list[Send]]:
         """Route based on supervisor's next_agent decision.
 
+        The supervisor sets next_agent via structured JSON decisions:
+        - answer/clarify → END (response already in messages)
+        - extract → data_analyst
+        - analyse → planner
+        - execute → follows plan_tasks (may trigger subgraphs)
+
         Returns Send objects for parallel fan-out (friction_analysis,
         report_generation) or a string for single-agent routing.
         """
-        phase = state.get("phase", "analysis")
-
-        # In Q&A mode, route through scope detector first
-        if phase == "qa" and state.get("analysis_complete", False):
-            return "scope_detector"
-
         next_agent = state.get("next_agent", "")
 
         # Fan-out: 4 parallel friction agents
@@ -145,7 +143,7 @@ def build_graph(
         # Single-agent routing
         route_map = {
             "data_analyst": "data_analyst",
-            "business_analyst": "business_analyst",
+            "planner": "planner",
             "report_analyst": "report_analyst",
             "critique": "critique",
             "user_checkpoint": "user_checkpoint",
@@ -158,10 +156,9 @@ def build_graph(
         route_from_supervisor,
         {
             "data_analyst": "data_analyst",
-            "business_analyst": "business_analyst",
+            "planner": "planner",
             "report_analyst": "report_analyst",
             "critique": "critique",
-            "scope_detector": "scope_detector",
             "user_checkpoint": "user_checkpoint",
             "digital_friction_agent": "digital_friction_agent",
             "operations_agent": "operations_agent",
@@ -171,20 +168,6 @@ def build_graph(
             "dataviz_agent": "dataviz_agent",
             END: END,
         },
-    )
-
-    # -- Scope Detector routing ------------------------------------------------
-    def route_from_scope_detector(state: AnalyticsState) -> str:
-        """Route based on scope detection result."""
-        next_agent = state.get("next_agent", "")
-        if next_agent == "__end__":
-            return END
-        return "supervisor"
-
-    graph.add_conditional_edges(
-        "scope_detector",
-        route_from_scope_detector,
-        {"supervisor": "supervisor", END: END},
     )
 
     # -- Analysis subgraph edges -----------------------------------------------
@@ -205,7 +188,7 @@ def build_graph(
 
     # -- Direct agent → Supervisor return edges --------------------------------
     graph.add_edge("data_analyst", "supervisor")
-    graph.add_edge("business_analyst", "supervisor")
+    graph.add_edge("planner", "supervisor")
     graph.add_edge("report_analyst", "supervisor")
     graph.add_edge("critique", "supervisor")
 
