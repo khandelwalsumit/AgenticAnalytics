@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # -- Paths ------------------------------------------------------------------
-ROOT_DIR = Path(__file__).resolve().parent.parent
+ROOT_DIR = Path(__file__).resolve().parent
 AGENTS_DIR = ROOT_DIR / "agents" / "definitions"
 SKILLS_DIR = ROOT_DIR / "skills"
 DATA_DIR = ROOT_DIR / os.getenv("DATA_DIR", "data")

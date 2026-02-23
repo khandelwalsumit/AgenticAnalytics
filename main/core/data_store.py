@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from config.settings import CACHE_DIR
+from config import CACHE_DIR
 
 
 class DataStore:

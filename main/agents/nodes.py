@@ -19,7 +19,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from agents.state import AnalyticsState, ExecutionTrace, ScopeDecision
-from config.settings import (
+from config import (
     ALL_DOMAIN_SKILLS,
     FRICTION_AGENTS,
     LOG_LEVEL,
@@ -186,11 +186,7 @@ async def scope_detector_node(state: AnalyticsState) -> dict[str, Any]:
     if result.in_scope:
         return {
             "next_agent": "supervisor",
-            "agent_reasoning": state.get("agent_reasoning", []) + [{
-                "step_name": "Scope Detector",
-                "step_text": f"In-scope: {result.reason}",
-                "agent": "scope_detector",
-            }],
+            "reasoning": [{"step_name": "Scope Detector", "step_text": f"In-scope: {result.reason}"}],
         }
     else:
         return {
@@ -202,11 +198,7 @@ async def scope_detector_node(state: AnalyticsState) -> dict[str, Any]:
                 f"with filters: {scope.get('filters', {})}\n\n"
                 f"To explore this topic, please start a **New Chat** with a fresh analysis scope."
             ))],
-            "agent_reasoning": state.get("agent_reasoning", []) + [{
-                "step_name": "Scope Detector",
-                "step_text": f"Out-of-scope: {result.reason}",
-                "agent": "scope_detector",
-            }],
+            "reasoning": [{"step_name": "Scope Detector", "step_text": f"Out-of-scope: {result.reason}"}],
         }
 
 
@@ -219,11 +211,49 @@ async def user_checkpoint_node(state: AnalyticsState) -> dict[str, Any]:
     """Checkpoint node — graph pauses here for user input via interrupt_before."""
     return {
         "requires_user_input": True,
-        "agent_reasoning": state.get("agent_reasoning", []) + [{
+        "reasoning": [{
             "step_name": "User Checkpoint",
             "step_text": state.get("checkpoint_message", "Awaiting your input..."),
-            "agent": "checkpoint",
         }],
+    }
+
+
+# ------------------------------------------------------------------
+# Node I/O trace (graph contract: every node emits node_io + io_trace)
+# ------------------------------------------------------------------
+
+
+def _trace_io(
+    state: AnalyticsState,
+    node_name: str,
+    node_input: dict[str, Any],
+    node_output: dict[str, Any],
+) -> dict[str, Any]:
+    """Build node_io (current) and io_trace (accumulated) entries."""
+    entry = {
+        "node": node_name,
+        "input": node_input,
+        "output": {k: v for k, v in node_output.items() if k != "messages"},
+    }
+    return {
+        "node_io": entry,
+        "io_trace": state.get("io_trace", []) + [entry],
+        "last_completed_node": node_name,
+    }
+
+
+# ------------------------------------------------------------------
+# Checkpoint helpers
+# ------------------------------------------------------------------
+
+
+def _clear_checkpoint_fields() -> dict[str, Any]:
+    return {
+        "requires_user_input": False,
+        "checkpoint_message": "",
+        "checkpoint_prompt": "",
+        "checkpoint_token": "",
+        "pending_input_for": "",
     }
 
 
@@ -233,10 +263,10 @@ async def user_checkpoint_node(state: AnalyticsState) -> dict[str, Any]:
 
 
 def _update_task_status(
-    plan_tasks: list[dict[str, str]],
+    plan_tasks: list[dict[str, Any]],
     agent_name: str,
     status: str,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """Return a copy of plan_tasks with the matching agent's status updated."""
     updated = []
     for task in plan_tasks:
@@ -391,8 +421,20 @@ def make_agent_node(
         updates: dict[str, Any] = {
             "messages": result["messages"],
             "execution_trace": state.get("execution_trace", []) + [trace],
-            "agent_reasoning": state.get("agent_reasoning", []) + [reasoning_entry],
+            "reasoning": [reasoning_entry],
+            **_clear_checkpoint_fields(),
         }
+
+        # Node I/O trace for contract debugging
+        node_input_summary = {
+            "messages_count": len(state.get("messages", [])),
+            "plan_steps_completed": state.get("plan_steps_completed", 0),
+        }
+        updates.update(_trace_io(state, agent_name, node_input_summary, {
+            "output_summary": output_summary,
+            "tools_used": tools_used,
+            "elapsed_ms": elapsed_ms,
+        }))
 
         # Write to dedicated state field if agent has one
         if agent_name in AGENT_STATE_FIELDS:

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from config.settings import TOP_N_DEFAULT
+from config import TOP_N_DEFAULT
 
 
 class MetricsEngine:

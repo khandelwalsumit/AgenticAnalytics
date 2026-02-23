@@ -12,7 +12,7 @@ from typing import Any
 import pandas as pd
 from langchain_core.tools import tool
 
-from config.settings import MAX_SAMPLE_SIZE, MIN_BUCKET_SIZE
+from config import MAX_SAMPLE_SIZE, MIN_BUCKET_SIZE
 from core.data_store import DataStore
 from tools.metrics import MetricsEngine
 

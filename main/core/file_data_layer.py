@@ -27,7 +27,7 @@ from chainlit.types import (
 )
 from chainlit.user import PersistedUser, User
 
-from config.settings import CACHE_DIR
+from config import CACHE_DIR
 
 # Storage root
 _STORAGE_DIR = CACHE_DIR / "data_layer"

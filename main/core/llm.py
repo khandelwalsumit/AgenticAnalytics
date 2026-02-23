@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-from config.settings import (
+from config import (
     DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,
     DEFAULT_TEMPERATURE,

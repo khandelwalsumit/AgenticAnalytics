@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from config.settings import THREAD_STATES_DIR
+from config import THREAD_STATES_DIR
 
 
 # ------------------------------------------------------------------

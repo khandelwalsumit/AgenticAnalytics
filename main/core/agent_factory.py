@@ -8,7 +8,7 @@ from typing import Any, Callable
 from langchain_core.messages import SystemMessage
 from langgraph.prebuilt import create_react_agent
 
-from config.settings import AGENTS_DIR
+from config import AGENTS_DIR
 from core.agent_loader import AgentSkill, load_agent, load_all_agents
 from core.llm import get_llm
 

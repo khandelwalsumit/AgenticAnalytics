@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from config.settings import SKILLS_DIR
+from config import SKILLS_DIR
 
 
 class SkillLoader:

@@ -10,7 +10,7 @@ from langchain_core.tools import tool
 
 from pathlib import Path
 
-from config.settings import DATA_DIR, TOP_N_DEFAULT
+from config import DATA_DIR, TOP_N_DEFAULT
 from core.data_store import DataStore
 from core.skill_loader import SkillLoader
 from tools.data_tools import (

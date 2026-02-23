@@ -62,12 +62,12 @@ class PlanStep(TypedDict):
 class PlanTask(TypedDict):
     """A visible task in the live task list.
 
-    Status values: ``ready`` | ``running`` | ``done`` | ``failed``
+    Status values: ``todo`` | ``in_progress`` | ``done`` | ``failed``
     """
 
+    id: str
     title: str
-    agent: str  # node that will execute this task
-    status: str  # ready | running | done | failed
+    status: str  # todo | in_progress | done | failed | blocked
 
 
 class AnalyticsState(TypedDict):
@@ -87,6 +87,12 @@ class AnalyticsState(TypedDict):
 
     # Execution trace
     execution_trace: list[ExecutionTrace]
+
+    # Node telemetry for UI (graph contract)
+    reasoning: list[dict[str, Any]]
+    node_io: dict[str, Any]
+    io_trace: list[dict[str, Any]]
+    last_completed_node: str
 
     # Data — METADATA ONLY (raw data lives in DataStore)
     dataset_path: str
@@ -126,11 +132,21 @@ class AnalyticsState(TypedDict):
     next_agent: str
     requires_user_input: bool
     checkpoint_message: str
+    checkpoint_prompt: str
+    checkpoint_token: str
+    pending_input_for: str
     phase: str  # "analysis" | "qa"
+
+    # Session agent selection
+    selected_agents: list[str]
+    selected_friction_agents: list[str]
+    auto_approve_checkpoints: bool
 
     # Q&A mode
     analysis_complete: bool
     analysis_scope: ScopeSnapshot
 
-    # UI state
-    agent_reasoning: list[dict[str, Any]]
+    # Fault injection / resilience (dev/test)
+    fault_injection: dict[str, str]
+    error_count: int
+    recoverable_error: str
