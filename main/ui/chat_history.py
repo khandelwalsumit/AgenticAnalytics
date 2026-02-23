@@ -31,20 +31,19 @@ async def save_analysis_state(thread_id: str, state: dict[str, Any]) -> None:
     """
     THREAD_STATES_DIR.mkdir(parents=True, exist_ok=True)
 
-    serializable = {
-        "thread_id": thread_id,
-        "saved_at": datetime.now(timezone.utc).isoformat(),
-        "user_focus": state.get("user_focus", ""),
-        "analysis_type": state.get("analysis_type", ""),
-        "selected_skills": state.get("selected_skills", []),
-        "critique_enabled": state.get("critique_enabled", False),
-        "phase": state.get("phase", "analysis"),
-        "analysis_complete": state.get("analysis_complete", False),
-        "plan_steps_completed": state.get("plan_steps_completed", 0),
-        "plan_steps_total": state.get("plan_steps_total", 0),
-        "findings_count": len(state.get("findings", [])),
-        "dataset_path": state.get("dataset_path", ""),
-    }
+    serializable: dict[str, Any] = {}
+    for key, value in state.items():
+        if key == "messages":
+            continue
+        try:
+            json.dumps(value)
+            serializable[key] = value
+        except (TypeError, ValueError):
+            continue
+
+    serializable["thread_id"] = thread_id
+    serializable["saved_at"] = datetime.now(timezone.utc).isoformat()
+    serializable["findings_count"] = len(state.get("findings", []))
 
     state_path = THREAD_STATES_DIR / f"{thread_id}.json"
     state_path.write_text(json.dumps(serializable, indent=2), encoding="utf-8")
@@ -101,7 +100,7 @@ async def list_saved_sessions(limit: int = 10) -> list[dict[str, Any]]:
         thread_id = data.get("thread_id", path.stem)
         phase = data.get("phase", "analysis")
         focus = data.get("user_focus", "")
-        findings_count = data.get("findings_count", 0)
+        findings_count = data.get("findings_count", len(data.get("findings", [])))
         completed = data.get("plan_steps_completed", 0)
         total = data.get("plan_steps_total", 0)
         saved_at = data.get("saved_at", "")

@@ -75,6 +75,15 @@ AGENT_LABEL_TO_ID = {label: agent_id for label, agent_id in AGENT_ITEMS.items()}
 DEFAULT_SELECTED_AGENTS = list(FRICTION_AGENT_IDS)
 
 
+def _active_chainlit_thread_id() -> str:
+    """Best-effort access to the current Chainlit thread identifier."""
+    try:
+        thread_id = getattr(cl.context.session, "thread_id", "")
+    except Exception:
+        thread_id = ""
+    return thread_id if isinstance(thread_id, str) else ""
+
+
 def _normalize_selected_agents(raw: Any, *, default_if_missing: bool) -> list[str]:
     """Normalize selected_agents payload to internal agent IDs."""
     if raw is None:
@@ -144,13 +153,25 @@ class FileDataLayer(BaseDataLayer):
         return PersistedUser(**json.loads(p.read_text("utf-8")))
 
     async def create_user(self, user: User) -> Optional[PersistedUser]:
+        p = USERS_DIR / f"{user.identifier}.json"
+        if p.exists():
+            try:
+                existing = json.loads(p.read_text("utf-8"))
+                metadata = user.metadata or existing.get("metadata", {})
+                if metadata != existing.get("metadata", {}):
+                    existing["metadata"] = metadata
+                    p.write_text(json.dumps(existing, default=str), "utf-8")
+                return PersistedUser(**existing)
+            except (json.JSONDecodeError, OSError, TypeError, ValueError):
+                pass
+
         pu = PersistedUser(
             id=str(uuid.uuid4()),
             identifier=user.identifier,
             createdAt=_now_iso(),
             metadata=user.metadata or {},
         )
-        (USERS_DIR / f"{user.identifier}.json").write_text(
+        p.write_text(
             json.dumps({"id": pu.id, "identifier": pu.identifier,
                         "createdAt": pu.createdAt, "metadata": pu.metadata}, default=str),
             "utf-8",
@@ -216,14 +237,18 @@ class FileDataLayer(BaseDataLayer):
 
     async def list_threads(self, pagination: Pagination,
                            filters: ThreadFilter) -> PaginatedResponse[ThreadDict]:
+        filter_identifier = self._resolve_user_identifier(filters.userId) if filters.userId else ""
         all_t: list[dict] = []
         for p in THREADS_DIR.glob("*.json"):
             try:
                 d = json.loads(p.read_text("utf-8"))
             except (json.JSONDecodeError, OSError):
                 continue
-            if filters.userId and d.get("userId") != filters.userId:
-                continue
+            if filters.userId:
+                same_user_id = d.get("userId") == filters.userId
+                same_identifier = bool(filter_identifier) and d.get("userIdentifier") == filter_identifier
+                if not (same_user_id or same_identifier):
+                    continue
             if filters.search and filters.search.lower() not in (d.get("name") or "").lower():
                 continue
             all_t.append(d)
@@ -553,7 +578,7 @@ def make_initial_state() -> dict[str, Any]:
 
 @cl.on_chat_start
 async def on_chat_start():
-    thread_id = str(uuid.uuid4())
+    thread_id = _active_chainlit_thread_id() or str(uuid.uuid4())
     graph = build_graph()
 
     cl.user_session.set("graph", graph)
@@ -580,7 +605,9 @@ async def on_chat_start():
 async def on_message(message: cl.Message):
     graph     = cl.user_session.get("graph")
     state     = cl.user_session.get("state")
-    thread_id = cl.user_session.get("thread_id")
+    thread_id = cl.user_session.get("thread_id") or _active_chainlit_thread_id()
+    if thread_id:
+        cl.user_session.set("thread_id", thread_id)
 
     # Handle file uploads
     if message.elements:
@@ -745,8 +772,18 @@ async def on_settings_update(settings: dict):
 
 @cl.on_chat_resume
 async def on_chat_resume(thread: dict):
-    thread_id = thread.get("id", "")
+    thread_id = thread.get("id", "") or _active_chainlit_thread_id()
     saved = await load_state(thread_id)
+
+    legacy_thread_id = ""
+    metadata = thread.get("metadata", {}) if isinstance(thread, dict) else {}
+    if isinstance(metadata, dict):
+        candidate = metadata.get("thread_id", "")
+        if isinstance(candidate, str):
+            legacy_thread_id = candidate
+
+    if not saved and legacy_thread_id and legacy_thread_id != thread_id:
+        saved = await load_state(legacy_thread_id)
 
     state = make_initial_state()
     graph = build_graph()
@@ -758,6 +795,7 @@ async def on_chat_resume(thread: dict):
 
     if saved:
         state.update(saved)
+        state["thread_id"] = thread_id
         selected = _normalize_selected_agents(
             state.get("selected_agents"),
             default_if_missing=True,
@@ -769,6 +807,7 @@ async def on_chat_resume(thread: dict):
         cl.user_session.set("critique_enabled", "critique" in selected)
         await _send_agent_settings(selected)
         cl.user_session.set("state", state)
+        await save_state(thread_id, state)
 
         phase = saved.get("phase", "analysis")
         completed = saved.get("plan_steps_completed", 0)

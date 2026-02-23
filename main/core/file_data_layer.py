@@ -65,13 +65,24 @@ class FileDataLayer(BaseDataLayer):
         return PersistedUser(**data)
 
     async def create_user(self, user: User) -> Optional[PersistedUser]:
+        path = _USERS_DIR / f"{user.identifier}.json"
+        if path.exists():
+            try:
+                existing = json.loads(path.read_text(encoding="utf-8"))
+                metadata = user.metadata or existing.get("metadata", {})
+                if metadata != existing.get("metadata", {}):
+                    existing["metadata"] = metadata
+                    path.write_text(json.dumps(existing, default=str), encoding="utf-8")
+                return PersistedUser(**existing)
+            except (json.JSONDecodeError, OSError, TypeError, ValueError):
+                pass
+
         persisted = PersistedUser(
             id=str(uuid.uuid4()),
             identifier=user.identifier,
             createdAt=_now_iso(),
             metadata=user.metadata or {},
         )
-        path = _USERS_DIR / f"{user.identifier}.json"
         path.write_text(
             json.dumps({
                 "id": persisted.id,
@@ -120,6 +131,17 @@ class FileDataLayer(BaseDataLayer):
             return data.get("userIdentifier", "")
         return ""
 
+    def _resolve_user_identifier(self, user_id: str) -> str:
+        """Look up identifier from persisted user ID."""
+        for path in _USERS_DIR.glob("*.json"):
+            try:
+                user_data = json.loads(path.read_text(encoding="utf-8"))
+                if user_data.get("id") == user_id:
+                    return user_data.get("identifier", "")
+            except (json.JSONDecodeError, OSError):
+                continue
+        return ""
+
     async def update_thread(
         self,
         thread_id: str,
@@ -140,6 +162,9 @@ class FileDataLayer(BaseDataLayer):
             data["name"] = name
         if user_id is not None:
             data["userId"] = user_id
+            identifier = self._resolve_user_identifier(user_id)
+            if identifier:
+                data["userIdentifier"] = identifier
         if metadata is not None:
             data["metadata"] = metadata
         if tags is not None:
@@ -155,6 +180,7 @@ class FileDataLayer(BaseDataLayer):
         self, pagination: Pagination, filters: ThreadFilter
     ) -> PaginatedResponse[ThreadDict]:
         """List threads for the sidebar, newest first."""
+        filter_identifier = self._resolve_user_identifier(filters.userId) if filters.userId else ""
         all_threads: list[dict] = []
         for path in _THREADS_DIR.glob("*.json"):
             try:
@@ -163,8 +189,11 @@ class FileDataLayer(BaseDataLayer):
                 continue
 
             # Apply user filter
-            if filters.userId and data.get("userId") != filters.userId:
-                continue
+            if filters.userId:
+                same_user_id = data.get("userId") == filters.userId
+                same_identifier = bool(filter_identifier) and data.get("userIdentifier") == filter_identifier
+                if not (same_user_id or same_identifier):
+                    continue
 
             # Apply search filter
             if filters.search:

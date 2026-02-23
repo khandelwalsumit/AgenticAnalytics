@@ -16,8 +16,7 @@ import chainlit as cl
 from langchain_core.messages import HumanMessage
 
 from agents.graph import build_graph
-from agents.state import AnalyticsState
-from config.settings import AGENTS_DIR, CACHE_DIR, DATA_DIR, THREAD_STATES_DIR, VERBOSE
+from config.settings import AGENTS_DIR, CACHE_DIR, DATA_DIR, VERBOSE
 from core.agent_factory import AgentFactory
 from core.data_store import DataStore
 from core.file_data_layer import FileDataLayer
@@ -35,7 +34,6 @@ from ui.components import (
     hide_thinking,
     send_agent_step,
     send_download_buttons,
-    send_plan_banner,
     send_verbose_node_step,
     show_awaiting_input,
     show_thinking,
@@ -44,76 +42,34 @@ from ui.components import (
 )
 
 
-# ------------------------------------------------------------------
-# Authentication (required for chat history sidebar)
-# ------------------------------------------------------------------
+def _active_chainlit_thread_id() -> str:
+    """Best-effort access to Chainlit's current thread identifier."""
+    try:
+        thread_id = getattr(cl.context.session, "thread_id", "")
+    except Exception:
+        thread_id = ""
+    return thread_id if isinstance(thread_id, str) else ""
 
 
-@cl.password_auth_callback
-def auth_callback(username: str, password: str):
-    """Simple auth — accepts any credentials for local development.
-
-    Replace with real validation for production.
-    """
-    return cl.User(
-        identifier=username,
-        metadata={"role": "admin", "provider": "credentials"},
-    )
-
-
-# ------------------------------------------------------------------
-# Data layer (required for chat history sidebar)
-# ------------------------------------------------------------------
-
-
-@cl.data_layer
-def get_data_layer():
-    """Provide a file-based data layer for thread persistence."""
-    return FileDataLayer()
-
-
-# ------------------------------------------------------------------
-# Chat start
-# ------------------------------------------------------------------
-
-
-@cl.on_chat_start
-async def on_chat_start():
-    """Initialize session: build graph, create DataStore, set up state."""
+def _create_runtime() -> tuple[str, DataStore, Any]:
+    """Build per-session runtime dependencies."""
     session_id = str(uuid.uuid4())[:12]
-
-    # Create session-scoped DataStore
     data_store = DataStore(session_id=session_id, cache_dir=str(CACHE_DIR))
 
     # Bind DataStore to tools
     set_data_tools_store(data_store)
     set_report_tools_store(data_store)
 
-    # Create SkillLoader
+    # Create SkillLoader + AgentFactory and compile graph
     skill_loader = SkillLoader()
     set_analysis_deps(data_store, skill_loader)
+    agent_factory = AgentFactory(definitions_dir=AGENTS_DIR, tool_registry=TOOL_REGISTRY)
+    graph = build_graph(agent_factory=agent_factory, skill_loader=skill_loader)
+    return session_id, data_store, graph
 
-    # Create AgentFactory with tool registry
-    agent_factory = AgentFactory(
-        definitions_dir=AGENTS_DIR,
-        tool_registry=TOOL_REGISTRY,
-    )
 
-    # Build the graph
-    graph = build_graph(
-        agent_factory=agent_factory,
-        skill_loader=skill_loader,
-    )
-
-    # Store in session
-    cl.user_session.set("graph", graph)
-    cl.user_session.set("data_store", data_store)
-    cl.user_session.set("session_id", session_id)
-    cl.user_session.set("thread_id", str(uuid.uuid4()))
-    cl.user_session.set("critique_enabled", False)
-
-    # Initial state
-    initial_state: dict[str, Any] = {
+def _make_initial_state() -> dict[str, Any]:
+    return {
         "messages": [],
         "user_focus": "",
         "analysis_type": "",
@@ -158,7 +114,60 @@ async def on_chat_start():
         },
         "agent_reasoning": [],
     }
-    cl.user_session.set("state", initial_state)
+
+
+def _set_runtime_session(thread_id: str, state: dict[str, Any]) -> None:
+    """Store runtime objects/state in Chainlit user session."""
+    session_id, data_store, graph = _create_runtime()
+    cl.user_session.set("graph", graph)
+    cl.user_session.set("data_store", data_store)
+    cl.user_session.set("session_id", session_id)
+    cl.user_session.set("thread_id", thread_id)
+    cl.user_session.set("critique_enabled", bool(state.get("critique_enabled", False)))
+    cl.user_session.set("state", state)
+    cl.user_session.set("task_list_widget", None)
+    cl.user_session.set("awaiting_indicator", None)
+
+
+# ------------------------------------------------------------------
+# Authentication (required for chat history sidebar)
+# ------------------------------------------------------------------
+
+
+@cl.password_auth_callback
+def auth_callback(username: str, password: str):
+    """Simple auth — accepts any credentials for local development.
+
+    Replace with real validation for production.
+    """
+    return cl.User(
+        identifier=username,
+        metadata={"role": "admin", "provider": "credentials"},
+    )
+
+
+# ------------------------------------------------------------------
+# Data layer (required for chat history sidebar)
+# ------------------------------------------------------------------
+
+
+@cl.data_layer
+def get_data_layer():
+    """Provide a file-based data layer for thread persistence."""
+    return FileDataLayer()
+
+
+# ------------------------------------------------------------------
+# Chat start
+# ------------------------------------------------------------------
+
+
+@cl.on_chat_start
+async def on_chat_start():
+    """Initialize session: build graph, create DataStore, set up state."""
+    thread_id = _active_chainlit_thread_id() or str(uuid.uuid4())
+    initial_state = _make_initial_state()
+    _set_runtime_session(thread_id, initial_state)
 
     # Welcome message
     verbose_note = " (`VERBOSE` mode is **ON** — you'll see detailed agent steps.)" if VERBOSE else ""
@@ -186,10 +195,12 @@ async def on_chat_start():
 async def on_message(message: cl.Message):
     """Handle incoming user messages and file uploads."""
     graph = cl.user_session.get("graph")
-    state = cl.user_session.get("state")
-    data_store: DataStore = cl.user_session.get("data_store")
-    session_id = cl.user_session.get("session_id")
-    thread_id = cl.user_session.get("thread_id")
+    state = cl.user_session.get("state") or _make_initial_state()
+    session_id = cl.user_session.get("session_id") or str(uuid.uuid4())[:12]
+    thread_id = cl.user_session.get("thread_id") or _active_chainlit_thread_id()
+    if thread_id:
+        cl.user_session.set("thread_id", thread_id)
+    cl.user_session.set("session_id", session_id)
 
     # Handle file uploads
     if message.elements:
@@ -224,7 +235,7 @@ async def on_message(message: cl.Message):
     thinking_step = await show_thinking("Processing")
 
     # Invoke graph
-    config = {"configurable": {"thread_id": thread_id}}
+    config = {"configurable": {"thread_id": thread_id or str(uuid.uuid4())}}
     task_list_widget: cl.TaskList | None = cl.user_session.get("task_list_widget")
 
     try:
@@ -328,7 +339,7 @@ async def on_message(message: cl.Message):
 
     # Persist state
     cl.user_session.set("state", state)
-    await save_analysis_state(thread_id, state)
+    await save_analysis_state(thread_id or config["configurable"]["thread_id"], state)
 
 
 # ------------------------------------------------------------------
@@ -361,17 +372,34 @@ async def on_chat_resume(thread: dict):
     We reload the saved analysis state so the graph continues from where
     the user left off.
     """
-    thread_id = thread.get("id", "")
+    thread_id = thread.get("id", "") or _active_chainlit_thread_id()
 
     saved = await load_analysis_state(thread_id)
-    if saved:
-        cl.user_session.set("thread_id", thread_id)
-        cl.user_session.set("critique_enabled", saved.get("critique_enabled", False))
+    legacy_thread_id = ""
+    metadata = thread.get("metadata", {}) if isinstance(thread, dict) else {}
+    if isinstance(metadata, dict):
+        candidate = metadata.get("thread_id", "")
+        if isinstance(candidate, str):
+            legacy_thread_id = candidate
 
-        phase = saved.get("phase", "analysis")
-        findings_count = saved.get("findings_count", 0)
-        completed = saved.get("plan_steps_completed", 0)
-        total = saved.get("plan_steps_total", 0)
+    if not saved and legacy_thread_id and legacy_thread_id != thread_id:
+        saved = await load_analysis_state(legacy_thread_id)
+
+    state = _make_initial_state()
+    if saved:
+        state.update(saved)
+    state["messages"] = []
+    state["thread_id"] = thread_id
+
+    _set_runtime_session(thread_id, state)
+
+    if saved:
+        await save_analysis_state(thread_id, state)
+
+        phase = state.get("phase", "analysis")
+        findings_count = state.get("findings_count", len(state.get("findings", [])))
+        completed = state.get("plan_steps_completed", 0)
+        total = state.get("plan_steps_total", 0)
 
         status_parts = [f"**Phase:** {phase}"]
         if total > 0:
@@ -383,14 +411,15 @@ async def on_chat_resume(thread: dict):
             content=(
                 "## Session Resumed\n\n"
                 + " | ".join(status_parts) + "\n\n"
-                "Continue where you left off — ask a question or provide the next input."
+                "Continue where you left off - ask a question or provide the next input."
             ),
         ).send()
-    else:
-        await cl.Message(
-            content="Could not restore previous session state. Starting fresh.",
-            author="System",
-        ).send()
+        return
+
+    await cl.Message(
+        content="Could not restore previous session state. Starting fresh.",
+        author="System",
+    ).send()
 
 
 # ------------------------------------------------------------------
