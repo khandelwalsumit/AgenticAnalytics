@@ -103,6 +103,34 @@ FRICTION_LENS_CATALOG: dict[str, dict[str, str]] = {
 }
 
 
+def _with_trace(
+    state: AnalyticsState,
+    *,
+    node_name: str,
+    node_input: dict[str, Any],
+    output: dict[str, Any],
+) -> dict[str, Any]:
+    merged = dict(output)
+    merged.update(_trace_io(state, node_name=node_name, node_input=node_input, node_output=output))
+    return merged
+
+
+def _set_task_sub_agents(
+    tasks: list[dict[str, Any]],
+    *,
+    task_id: str,
+    sub_agents: list[dict[str, Any]],
+    task_status: str | None = None,
+) -> None:
+    for task in tasks:
+        if task.get("id") != task_id:
+            continue
+        if task_status is not None:
+            task["status"] = task_status
+        task["sub_agents"] = sub_agents
+        return
+
+
 def _last_user_text(state: AnalyticsState) -> str:
     messages = state.get("messages", [])
     if not messages:
@@ -289,20 +317,15 @@ def _recoverable_checkpoint(state: AnalyticsState, node_name: str, err: Recovera
             prompt="Reply `retry` to retry this step, or `skip` to move ahead with partial output.",
         ),
     }
-    output.update(_trace_io(
+    return _with_trace(
         state,
         node_name=node_name,
         node_input={
             "plan_steps_completed": state.get("plan_steps_completed", 0),
             "phase": state.get("phase", "analysis"),
         },
-        node_output={
-            "requires_user_input": True,
-            "pending_input_for": node_name,
-            "recoverable_error": err.kind,
-        },
-    ))
-    return output
+        output=output,
+    )
 
 
 async def supervisor(state: AnalyticsState) -> dict[str, Any]:
@@ -312,28 +335,30 @@ async def supervisor(state: AnalyticsState) -> dict[str, Any]:
     user_text = _last_user_text(state).strip().lower()
 
     if state.get("analysis_complete"):
-        output = {
+        return _with_trace(
+            state,
+            node_name="supervisor",
+            node_input={"analysis_complete": True, "phase": state.get("phase", "analysis")},
+            output={
             "reasoning": [{
                 "step_name": "Scope Detector",
                 "step_text": "Analysis already complete. Routing through scope classification for Q&A.",
             }],
             "next_agent": "scope_detector",
             **_clear_checkpoint_fields(),
-        }
-        output.update(_trace_io(
-            state,
-            node_name="supervisor",
-            node_input={"analysis_complete": True, "phase": state.get("phase", "analysis")},
-            node_output={"next_agent": "scope_detector", "requires_user_input": False},
-        ))
-        return output
+            },
+        )
 
     # Resume from an outstanding checkpoint or recoverable error.
     pending = state.get("pending_input_for", "")
     if state.get("requires_user_input") and pending:
         if "skip" in user_text:
             skip_to = "reporting" if pending == "synthesizer" else "supervisor"
-            output = {
+            return _with_trace(
+                state,
+                node_name="supervisor",
+                node_input={"pending_input_for": pending, "user_reply": user_text},
+                output={
                 "reasoning": [{
                     "step_name": "Supervisor",
                     "step_text": f"User requested skip for `{pending}`. Continuing to `{skip_to}`.",
@@ -342,16 +367,14 @@ async def supervisor(state: AnalyticsState) -> dict[str, Any]:
                 "next_agent": skip_to,
                 "recoverable_error": "",
                 **_clear_checkpoint_fields(),
-            }
-            output.update(_trace_io(
-                state,
-                node_name="supervisor",
-                node_input={"pending_input_for": pending, "user_reply": user_text},
-                node_output={"next_agent": skip_to, "requires_user_input": False},
-            ))
-            return output
+                },
+            )
 
-        output = {
+        return _with_trace(
+            state,
+            node_name="supervisor",
+            node_input={"pending_input_for": pending, "user_reply": user_text},
+            output={
             "reasoning": [{
                 "step_name": "Supervisor",
                 "step_text": f"Checkpoint response received. Resuming `{pending}`.",
@@ -360,32 +383,24 @@ async def supervisor(state: AnalyticsState) -> dict[str, Any]:
             "next_agent": pending,
             "recoverable_error": "",
             **_clear_checkpoint_fields(),
-        }
-        output.update(_trace_io(
-            state,
-            node_name="supervisor",
-            node_input={"pending_input_for": pending, "user_reply": user_text},
-            node_output={"next_agent": pending, "requires_user_input": False},
-        ))
-        return output
+            },
+        )
 
     if not tasks:
         tasks = _new_plan_tasks()
         tasks[0]["status"] = "in_progress"
-        output = {
+        return _with_trace(
+            state,
+            node_name="supervisor",
+            node_input={"plan_tasks_present": False},
+            output={
             "reasoning": [{"step_name": "Supervisor", "step_text": "Generating analysis plan...", "verbose": True}],
             "plan_tasks": tasks,
             "plan_steps_total": 5,
             "next_agent": "data_discovery",
             **_clear_checkpoint_fields(),
-        }
-        output.update(_trace_io(
-            state,
-            node_name="supervisor",
-            node_input={"plan_tasks_present": False},
-            node_output={"next_agent": "data_discovery", "plan_steps_total": 5},
-        ))
-        return output
+            },
+        )
 
     if idx == 1:
         next_agent = "data_prep"
@@ -398,16 +413,7 @@ async def supervisor(state: AnalyticsState) -> dict[str, Any]:
     else:
         next_agent = "end"
 
-    output = {
-        "reasoning": [{
-            "step_name": "Supervisor",
-            "step_text": f"Routing to `{next_agent}`.",
-            "verbose": True,
-        }],
-        "next_agent": next_agent,
-        **_clear_checkpoint_fields(),
-    }
-    output.update(_trace_io(
+    return _with_trace(
         state,
         node_name="supervisor",
         node_input={
@@ -415,9 +421,16 @@ async def supervisor(state: AnalyticsState) -> dict[str, Any]:
             "critique_enabled": state.get("critique_enabled", False),
             "selected_agents": state.get("selected_agents", []),
         },
-        node_output={"next_agent": next_agent, "requires_user_input": False},
-    ))
-    return output
+        output={
+        "reasoning": [{
+            "step_name": "Supervisor",
+            "step_text": f"Routing to `{next_agent}`.",
+            "verbose": True,
+        }],
+        "next_agent": next_agent,
+        **_clear_checkpoint_fields(),
+        },
+    )
 
 
 def route_supervisor(state: AnalyticsState) -> str:
@@ -464,13 +477,12 @@ async def data_discovery(state: AnalyticsState) -> dict[str, Any]:
             prompt="Do you confirm this scope and proceed to preparation?",
         ),
     }
-    output.update(_trace_io(
+    return _with_trace(
         state,
         node_name="data_discovery",
         node_input={"dataset_path": state.get("dataset_path", ""), "messages_count": len(state.get("messages", []))},
-        node_output={"plan_steps_completed": 1, "requires_user_input": True, "pending_input_for": "data_prep"},
-    ))
-    return output
+        output=output,
+    )
 
 
 async def data_prep(state: AnalyticsState) -> dict[str, Any]:
@@ -505,13 +517,12 @@ async def data_prep(state: AnalyticsState) -> dict[str, Any]:
     else:
         output.update(_clear_checkpoint_fields())
 
-    output.update(_trace_io(
+    return _with_trace(
         state,
         node_name="data_prep",
         node_input={"checkpoint_policy": "optional", "auto_approve_checkpoints": state.get("auto_approve_checkpoints", False)},
-        node_output={"plan_steps_completed": 2, "requires_user_input": output["requires_user_input"]},
-    ))
-    return output
+        output=output,
+    )
 
 
 async def _run_lens(state: AnalyticsState, lens_key: str, title: str, detail: str) -> dict[str, Any]:
@@ -526,22 +537,32 @@ async def _run_lens(state: AnalyticsState, lens_key: str, title: str, detail: st
         return {"id": lens_key, "title": title, "status": "failed", "detail": f"{err.kind}: {err.detail}", "ok": False}
 
 
+async def _run_reporting_branch(state: AnalyticsState, op_name: str, title: str, text: str) -> dict[str, Any]:
+    try:
+        resp = await _invoke_with_resilience(state, op_name=op_name, response=text)
+        return {"id": op_name, "title": title, "status": "done", "detail": resp, "ok": True}
+    except RecoverableInvokeError as err:
+        return {"id": op_name, "title": title, "status": "failed", "detail": f"{err.kind}: {err.detail}", "ok": False}
+
+
 async def friction(state: AnalyticsState) -> dict[str, Any]:
     tasks = _task_updates(state.get("plan_tasks", []), {"3": "in_progress"})
     selected = state.get("selected_friction_agents", [])
     if not selected:
         selected = [agent_id for agent_id in state.get("selected_agents", []) if agent_id in FRICTION_LENS_CATALOG]
 
-    for t in tasks:
-        if t.get("id") == "3":
-            t["sub_agents"] = [
-                {
-                    "id": agent_id,
-                    "title": FRICTION_LENS_CATALOG[agent_id]["title"],
-                    "status": "in_progress",
-                }
-                for agent_id in selected
-            ]
+    _set_task_sub_agents(
+        tasks,
+        task_id="3",
+        sub_agents=[
+            {
+                "id": agent_id,
+                "title": FRICTION_LENS_CATALOG[agent_id]["title"],
+                "status": "in_progress",
+            }
+            for agent_id in selected
+        ],
+    )
 
     if selected:
         lens_results = await asyncio.gather(*[
@@ -556,17 +577,19 @@ async def friction(state: AnalyticsState) -> dict[str, Any]:
     else:
         lens_results = []
 
-    for t in tasks:
-        if t.get("id") == "3":
-            t["sub_agents"] = [
-                {
-                    "id": row["id"],
-                    "title": row["title"],
-                    "status": "done" if row["ok"] else "blocked",
-                    "detail": row["detail"],
-                }
-                for row in lens_results
-            ]
+    _set_task_sub_agents(
+        tasks,
+        task_id="3",
+        sub_agents=[
+            {
+                "id": row["id"],
+                "title": row["title"],
+                "status": "done" if row["ok"] else "blocked",
+                "detail": row["detail"],
+            }
+            for row in lens_results
+        ],
+    )
 
     result_by_id = {row["id"]: row for row in lens_results}
     field_updates: dict[str, dict[str, Any]] = {}
@@ -603,16 +626,15 @@ async def friction(state: AnalyticsState) -> dict[str, Any]:
         **field_updates,
         **_clear_checkpoint_fields(),
     }
-    output.update(_trace_io(
+    return _with_trace(
         state,
         node_name="friction",
         node_input={
             "fan_out_mode": "asyncio.gather",
             "selected_lens_agents": selected,
         },
-        node_output={"plan_steps_completed": 3, "failed_lenses": len([r for r in lens_results if not r["ok"]])},
-    ))
-    return output
+        output=output,
+    )
 
 
 async def synthesizer(state: AnalyticsState) -> dict[str, Any]:
@@ -651,13 +673,12 @@ async def synthesizer(state: AnalyticsState) -> dict[str, Any]:
             prompt="Proceed to the next stage?",
         ))
 
-    output.update(_trace_io(
+    return _with_trace(
         state,
         node_name="synthesizer",
         node_input={"lens_outputs_available": True, "auto_approve_checkpoints": auto_approve},
-        node_output={"plan_steps_completed": 4, "requires_user_input": output["requires_user_input"]},
-    ))
-    return output
+        output=output,
+    )
 
 
 async def critique(state: AnalyticsState) -> dict[str, Any]:
@@ -674,32 +695,25 @@ async def critique(state: AnalyticsState) -> dict[str, Any]:
         "reasoning": [{"step_name": "QA Agent", "step_text": critique_text}],
         **_clear_checkpoint_fields(),
     }
-    output.update(_trace_io(
+    return _with_trace(
         state,
         node_name="critique",
         node_input={"critique_enabled": state.get("critique_enabled", False)},
-        node_output={"requires_user_input": False},
-    ))
-    return output
-
-
-async def _run_reporting_branch(state: AnalyticsState, op_name: str, title: str, text: str) -> dict[str, Any]:
-    try:
-        resp = await _invoke_with_resilience(state, op_name=op_name, response=text)
-        return {"id": op_name, "title": title, "status": "done", "detail": resp, "ok": True}
-    except RecoverableInvokeError as err:
-        return {"id": op_name, "title": title, "status": "failed", "detail": f"{err.kind}: {err.detail}", "ok": False}
+        output=output,
+    )
 
 
 async def reporting(state: AnalyticsState) -> dict[str, Any]:
     tasks = _task_updates(state.get("plan_tasks", []), {"4": "done", "5": "in_progress"})
-    for t in tasks:
-        if t.get("id") == "5":
-            t["sub_agents"] = [
-                {"id": "narrative_agent", "title": "Narrative Agent", "status": "in_progress"},
-                {"id": "dataviz_agent", "title": "DataViz Agent", "status": "in_progress"},
-                {"id": "formatting_agent", "title": "Formatting Agent", "status": "todo"},
-            ]
+    _set_task_sub_agents(
+        tasks,
+        task_id="5",
+        sub_agents=[
+            {"id": "narrative_agent", "title": "Narrative Agent", "status": "in_progress"},
+            {"id": "dataviz_agent", "title": "DataViz Agent", "status": "in_progress"},
+            {"id": "formatting_agent", "title": "Formatting Agent", "status": "todo"},
+        ],
+    )
 
     branch_results = await asyncio.gather(
         _run_reporting_branch(state, "narrative_agent", "Narrative Agent", "Executive summary and 4 thematic narratives drafted."),
@@ -716,18 +730,20 @@ async def reporting(state: AnalyticsState) -> dict[str, Any]:
     except RecoverableInvokeError as err:
         fmt_row = {"id": "formatting_agent", "title": "Formatting Agent", "status": "failed", "detail": f"{err.kind}: {err.detail}", "ok": False}
 
-    for t in tasks:
-        if t.get("id") == "5":
-            t["status"] = "done" if fmt_row["ok"] else "blocked"
-            t["sub_agents"] = [
-                {
-                    "id": row["id"],
-                    "title": row["title"],
-                    "status": "done" if row.get("ok", False) else "blocked",
-                    "detail": row["detail"],
-                }
-                for row in [*branch_results, fmt_row]
-            ]
+    _set_task_sub_agents(
+        tasks,
+        task_id="5",
+        task_status="done" if fmt_row["ok"] else "blocked",
+        sub_agents=[
+            {
+                "id": row["id"],
+                "title": row["title"],
+                "status": "done" if row.get("ok", False) else "blocked",
+                "detail": row["detail"],
+            }
+            for row in [*branch_results, fmt_row]
+        ],
+    )
 
     completion_msg = (
         "**Analysis complete!**\n\n"
@@ -754,13 +770,12 @@ async def reporting(state: AnalyticsState) -> dict[str, Any]:
         "formatting_output": {"status": fmt_row["status"], "detail": fmt_row["detail"]},
         **_clear_checkpoint_fields(),
     }
-    output.update(_trace_io(
+    return _with_trace(
         state,
         node_name="reporting",
         node_input={"reporting_mode": "async branches + sequential formatting"},
-        node_output={"analysis_complete": True, "plan_steps_completed": 5},
-    ))
-    return output
+        output=output,
+    )
 
 
 async def scope_detector(state: AnalyticsState) -> dict[str, Any]:
@@ -795,13 +810,12 @@ async def scope_detector(state: AnalyticsState) -> dict[str, Any]:
             ))],
             **_clear_checkpoint_fields(),
         }
-    output.update(_trace_io(
+    return _with_trace(
         state,
         node_name="scope_detector",
         node_input={"question": question[:120]},
-        node_output={"in_scope": in_scope, "next_agent": output.get("next_agent", "end")},
-    ))
-    return output
+        output=output,
+    )
 
 
 async def qa_agent(state: AnalyticsState) -> dict[str, Any]:
@@ -823,13 +837,12 @@ async def qa_agent(state: AnalyticsState) -> dict[str, Any]:
         "messages": [AIMessage(content=answer)],
         **_clear_checkpoint_fields(),
     }
-    output.update(_trace_io(
+    return _with_trace(
         state,
         node_name="qa_agent",
         node_input={"analysis_complete": state.get("analysis_complete", False)},
-        node_output={"message_generated": True},
-    ))
-    return output
+        output=output,
+    )
 
 
 def build_graph(*args, **kwargs):

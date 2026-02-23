@@ -25,10 +25,15 @@ Each node_output dict may contain:
 """
 from __future__ import annotations
 
-import json, os, uuid, tempfile
+import json
+import asyncio
+import inspect
+import os
+import tempfile
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -137,6 +142,80 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+THREAD_TEMPLATE = {
+    "createdAt": "",
+    "steps": [],
+    "elements": [],
+}
+
+
+def _new_thread_payload(thread_id: str) -> dict[str, Any]:
+    payload = dict(THREAD_TEMPLATE)
+    payload["id"] = thread_id
+    payload["createdAt"] = _now_iso()
+    payload["steps"] = []
+    payload["elements"] = []
+    return payload
+
+
+def _apply_selection_to_state(state: dict[str, Any], selected_agents: list[str]) -> None:
+    state["selected_agents"] = list(selected_agents)
+    state["selected_friction_agents"] = [a for a in selected_agents if a in FRICTION_AGENT_IDS]
+    state["critique_enabled"] = "critique" in selected_agents
+
+
+def _clear_checkpoint_state(state: dict[str, Any]) -> None:
+    state["checkpoint_message"] = ""
+    state["checkpoint_prompt"] = ""
+    state["checkpoint_token"] = ""
+    state["pending_input_for"] = ""
+
+
+def _message_text(msg: Any) -> str:
+    if not hasattr(msg, "content") or not msg.content or getattr(msg, "type", "") != "ai":
+        return ""
+    content = msg.content
+    if isinstance(content, list):
+        return " ".join(block.get("text", "") if isinstance(block, dict) else str(block) for block in content)
+    return str(content)
+
+
+async def _clear_awaiting_prompt() -> None:
+    prompt: cl.Message | None = cl.user_session.get("awaiting_prompt")
+    if prompt:
+        await prompt.remove()
+        cl.user_session.set("awaiting_prompt", None)
+
+
+async def _send_notification(message: str, level: str = "info") -> None:
+    """Send an ephemeral UI toast (non-chat) with safe fallback."""
+    try:
+        result = cl.context.emitter.send_toast(message=message, type=level)
+        if inspect.isawaitable(result):
+            await result
+    except Exception:
+        await cl.Message(content=message, author="System").send()
+
+
+def _setup_runtime_session(thread_id: str, state: dict[str, Any]) -> None:
+    cl.user_session.set("graph", build_graph())
+    cl.user_session.set("thread_id", thread_id)
+    cl.user_session.set("state", state)
+    cl.user_session.set("task_list", None)
+    cl.user_session.set("squad_list", None)
+    cl.user_session.set("awaiting_prompt", None)
+
+
+def _should_restore_downloads(state: dict[str, Any]) -> bool:
+    if state.get("analysis_complete"):
+        return True
+    if str(state.get("phase", "")).lower() == "qa":
+        return True
+    if state.get("report_file_path") or state.get("data_file_path"):
+        return True
+    return False
+
+
 # 
 # File-based Data Layer (enables chat history sidebar)
 # 
@@ -218,8 +297,7 @@ class FileDataLayer(BaseDataLayer):
 
     async def update_thread(self, thread_id: str, name=None, user_id=None,
                             metadata=None, tags=None) -> None:
-        d = self._load(thread_id) or {"id": thread_id, "createdAt": _now_iso(),
-                                       "steps": [], "elements": []}
+        d = self._load(thread_id) or _new_thread_payload(thread_id)
         if name is not None:     d["name"] = name
         if user_id is not None:
             d["userId"] = user_id
@@ -282,7 +360,7 @@ class FileDataLayer(BaseDataLayer):
         tid = step_dict.get("threadId", "")
         if not tid:
             return
-        d = self._load(tid) or {"id": tid, "createdAt": _now_iso(), "steps": [], "elements": []}
+        d = self._load(tid) or _new_thread_payload(tid)
         d["steps"].append(dict(step_dict))
         self._save(d)
 
@@ -505,6 +583,20 @@ async def send_downloads(report_path: str, data_path: str) -> None:
     ).send()
 
 
+async def _send_resume_downloads_after_restore(state: dict[str, Any], delay_s: float = 0.8) -> None:
+    """Send downloads after UI resume hydration to avoid message replacement."""
+    try:
+        await cl.sleep(delay_s)
+        if not _should_restore_downloads(state):
+            return
+        await send_downloads(
+            state.get("report_file_path") or "report.pptx",
+            state.get("data_file_path") or "filtered_data.csv",
+        )
+    except Exception:
+        await _send_notification("Could not re-render downloads on resume.", level="warning")
+
+
 def _runtime_flags_from_text(text: str) -> dict[str, Any]:
     """Parse lightweight runtime controls from a user message.
 
@@ -579,16 +671,11 @@ def make_initial_state() -> dict[str, Any]:
 @cl.on_chat_start
 async def on_chat_start():
     thread_id = _active_chainlit_thread_id() or str(uuid.uuid4())
-    graph = build_graph()
-
-    cl.user_session.set("graph", graph)
-    cl.user_session.set("thread_id", thread_id)
+    state = make_initial_state()
+    _setup_runtime_session(thread_id, state)
     cl.user_session.set("selected_agents", list(DEFAULT_SELECTED_AGENTS))
     cl.user_session.set("critique_enabled", False)
-    cl.user_session.set("state", make_initial_state())
-    cl.user_session.set("task_list", None)
-    cl.user_session.set("squad_list", None)
-    cl.user_session.set("awaiting_prompt", None)
+    _apply_selection_to_state(state, list(DEFAULT_SELECTED_AGENTS))
     await _send_agent_settings(list(DEFAULT_SELECTED_AGENTS))
 
     await cl.Message(
@@ -634,16 +721,10 @@ async def on_message(message: cl.Message):
         cl.user_session.get("selected_agents"),
         default_if_missing=True,
     )
-    selected_friction = [a for a in selected_agents if a in FRICTION_AGENT_IDS]
-    state["selected_agents"] = selected_agents
-    state["selected_friction_agents"] = selected_friction
-    state["critique_enabled"] = "critique" in selected_agents
+    _apply_selection_to_state(state, selected_agents)
 
     # Remove previous blinking prompt if it exists
-    prev_prompt: cl.Message | None = cl.user_session.get("awaiting_prompt")
-    if prev_prompt:
-        await prev_prompt.remove()
-        cl.user_session.set("awaiting_prompt", None)
+    await _clear_awaiting_prompt()
 
     state["messages"].append(HumanMessage(content=user_text))
     config = {"configurable": {"thread_id": thread_id}}
@@ -694,25 +775,14 @@ async def on_message(message: cl.Message):
                     cl.user_session.set("awaiting_prompt", prompt_msg)
                 else:
                     # Ensure stale checkpoint state does not leak into later nodes.
-                    stale_prompt: cl.Message | None = cl.user_session.get("awaiting_prompt")
-                    if stale_prompt:
-                        await stale_prompt.remove()
-                        cl.user_session.set("awaiting_prompt", None)
-                    state["checkpoint_message"] = ""
-                    state["checkpoint_prompt"] = ""
-                    state["checkpoint_token"] = ""
-                    state["pending_input_for"] = ""
+                    await _clear_awaiting_prompt()
+                    _clear_checkpoint_state(state)
 
                 # Surface AI messages
                 for msg in node_output.get("messages", []):
-                    if hasattr(msg, "content") and msg.content and getattr(msg, "type", "") == "ai":
-                        content = msg.content
-                        if isinstance(content, list):
-                            content = " ".join(
-                                b.get("text", "") if isinstance(b, dict) else str(b) for b in content
-                            )
-                        if content:
-                            await cl.Message(content=content).send()
+                    text = _message_text(msg)
+                    if text:
+                        await cl.Message(content=text).send()
 
                 # Merge node delta into local state
                 state.update(node_output)
@@ -758,9 +828,7 @@ async def on_settings_update(settings: dict):
         cl.user_session.set("selected_agents", selected)
         cl.user_session.set("critique_enabled", "critique" in selected)
         state = cl.user_session.get("state") or {}
-        state["selected_agents"] = list(selected)
-        state["selected_friction_agents"] = [a for a in selected if a in FRICTION_AGENT_IDS]
-        state["critique_enabled"] = "critique" in selected
+        _apply_selection_to_state(state, selected)
         cl.user_session.set("state", state)
         selected_labels = [AGENT_ID_TO_LABEL.get(agent_id, agent_id) for agent_id in selected]
         summary = ", ".join(selected_labels) if selected_labels else "none"
@@ -786,12 +854,7 @@ async def on_chat_resume(thread: dict):
         saved = await load_state(legacy_thread_id)
 
     state = make_initial_state()
-    graph = build_graph()
-    cl.user_session.set("graph", graph)
-    cl.user_session.set("thread_id", thread_id)
-    cl.user_session.set("task_list", None)
-    cl.user_session.set("squad_list", None)
-    cl.user_session.set("awaiting_prompt", None)
+    _setup_runtime_session(thread_id, state)
 
     if saved:
         state.update(saved)
@@ -800,9 +863,7 @@ async def on_chat_resume(thread: dict):
             state.get("selected_agents"),
             default_if_missing=True,
         )
-        state["selected_agents"] = list(selected)
-        state["selected_friction_agents"] = [a for a in selected if a in FRICTION_AGENT_IDS]
-        state["critique_enabled"] = "critique" in selected
+        _apply_selection_to_state(state, selected)
         cl.user_session.set("selected_agents", selected)
         cl.user_session.set("critique_enabled", "critique" in selected)
         await _send_agent_settings(selected)
@@ -816,16 +877,18 @@ async def on_chat_resume(thread: dict):
         if total > 0:
             parts.append(f"**Progress:** {completed}/{total} steps")
 
-        await cl.Message(
-            content="## Session Resumed\n\n" + " | ".join(parts) +
-                    "\n\nContinue where you left off."
-        ).send()
+        toast_text = "Session resumed: " + " | ".join(parts) + " | Continue where you left off."
+        await _send_notification(toast_text, level="success")
+
+        # Re-surface downloads after resume hydration settles in the UI.
+        if _should_restore_downloads(state):
+            asyncio.create_task(_send_resume_downloads_after_restore(dict(state)))
     else:
         cl.user_session.set("selected_agents", list(DEFAULT_SELECTED_AGENTS))
         cl.user_session.set("critique_enabled", False)
         await _send_agent_settings(list(DEFAULT_SELECTED_AGENTS))
         cl.user_session.set("state", state)
-        await cl.Message(content="Could not restore session. Starting fresh.", author="System").send()
+        await _send_notification("Could not restore session. Starting fresh.", level="warning")
 
 
 @cl.on_chat_end

@@ -97,11 +97,26 @@
   "analysis_complete": true,
   "reasoning": [
     {
-      "step_name": "Supervisor",
-      "step_text": "Answered from existing findings and synthesis artifacts."
+      "step_name": "Report Analyst",
+      "step_text": "Ran reporting squad with async branches then formatter.",
+      "verbose": true
+    },
+    {
+      "step_name": "Narrative Agent",
+      "step_text": "Executive summary and 4 thematic narratives drafted."
+    },
+    {
+      "step_name": "DataViz Agent",
+      "step_text": "Generated 4 charts: distribution, impact-ease, multi-lens, preventability."
+    },
+    {
+      "step_name": "Formatting Agent",
+      "step_text": "Assembled markdown report and PPTX package."
     }
   ],
-  "last_completed_node": "qa_agent",
+  "node_io": {},
+  "io_trace": [],
+  "last_completed_node": "reporting",
   "digital_analysis": {
     "status": "done",
     "detail": "6 findability failures, 3 UX gaps."
@@ -143,7 +158,7 @@
   },
   "report_file_path": "report.pptx",
   "data_file_path": "filtered_data.csv",
-  "next_agent": "qa_agent",
-  "thread_id": "4b6d501b-c826-4359-bfa5-ef10e9a5958f",
-  "saved_at": "2026-02-23T05:38:34.775866+00:00"
+  "next_agent": "reporting",
+  "thread_id": "346c5c09-93e7-422a-ae1d-a3fb78913477",
+  "saved_at": "2026-02-23T05:47:26.634878+00:00"
 }
