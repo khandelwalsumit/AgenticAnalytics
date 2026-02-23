@@ -8,6 +8,8 @@ its full tool calls, AI messages, and timing as nested Chainlit Steps.
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import uuid
 from pathlib import Path
 from typing import Any
@@ -49,6 +51,59 @@ def _active_chainlit_thread_id() -> str:
     except Exception:
         thread_id = ""
     return thread_id if isinstance(thread_id, str) else ""
+
+
+async def _send_notification(message: str, level: str = "info") -> None:
+    """Send an ephemeral UI toast notification with safe fallback."""
+    try:
+        result = cl.context.emitter.send_toast(message=message, type=level)
+        if inspect.isawaitable(result):
+            await result
+    except Exception:
+        await cl.Message(content=message, author="System").send()
+
+
+def _should_restore_downloads(state: dict[str, Any]) -> bool:
+    if state.get("analysis_complete"):
+        return True
+    if str(state.get("phase", "")).lower() == "qa":
+        return True
+    if state.get("report_file_path") or state.get("data_file_path"):
+        return True
+    return False
+
+
+async def _send_resume_downloads_after_restore(
+    state: dict[str, Any],
+    delay_s: float = 0.8,
+) -> None:
+    """Re-send downloads after resume hydration to avoid UI replacement."""
+    try:
+        await cl.sleep(delay_s)
+        if not _should_restore_downloads(state):
+            return
+        await send_download_buttons(
+            report_path=state.get("report_file_path") or "report.pptx",
+            data_path=state.get("data_file_path") or "filtered_data.csv",
+        )
+    except Exception:
+        await _send_notification("Could not re-render downloads on resume.", level="warning")
+
+
+def _extract_ai_text(msg: Any) -> str:
+    """Normalize AI message content to plain text for UI rendering."""
+    if not hasattr(msg, "content") or not msg.content or getattr(msg, "type", "") != "ai":
+        return ""
+    content = msg.content
+    if isinstance(content, list):
+        text_blocks: list[str] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text_blocks.append(block.get("text", ""))
+            elif isinstance(block, str):
+                text_blocks.append(block)
+        return " ".join(text_blocks)
+    return str(content)
 
 
 def _create_runtime() -> tuple[str, DataStore, Any]:
@@ -285,18 +340,9 @@ async def on_message(message: cl.Message):
                 # Check for final messages from agents
                 new_messages = node_output.get("messages", [])
                 for msg in new_messages:
-                    if hasattr(msg, "content") and msg.content and msg.type == "ai":
-                        content = msg.content
-                        if isinstance(content, list):
-                            text_blocks = []
-                            for block in content:
-                                if isinstance(block, dict) and block.get("type") == "text":
-                                    text_blocks.append(block.get("text", ""))
-                                elif isinstance(block, str):
-                                    text_blocks.append(block)
-                            content = " ".join(text_blocks)
-                        if content:
-                            await cl.Message(content=content).send()
+                    content = _extract_ai_text(msg)
+                    if content:
+                        await cl.Message(content=content).send()
 
                 # Update state
                 state.update(node_output)
@@ -401,25 +447,20 @@ async def on_chat_resume(thread: dict):
         completed = state.get("plan_steps_completed", 0)
         total = state.get("plan_steps_total", 0)
 
-        status_parts = [f"**Phase:** {phase}"]
+        status_parts = [f"Phase: {phase}"]
         if total > 0:
-            status_parts.append(f"**Progress:** {completed}/{total} steps")
+            status_parts.append(f"Progress: {completed}/{total} steps")
         if findings_count > 0:
-            status_parts.append(f"**Findings:** {findings_count}")
+            status_parts.append(f"Findings: {findings_count}")
 
-        await cl.Message(
-            content=(
-                "## Session Resumed\n\n"
-                + " | ".join(status_parts) + "\n\n"
-                "Continue where you left off - ask a question or provide the next input."
-            ),
-        ).send()
+        toast_text = "Session resumed: " + " | ".join(status_parts) + " | Continue where you left off."
+        await _send_notification(toast_text, level="success")
+
+        if _should_restore_downloads(state):
+            asyncio.create_task(_send_resume_downloads_after_restore(dict(state)))
         return
 
-    await cl.Message(
-        content="Could not restore previous session state. Starting fresh.",
-        author="System",
-    ).send()
+    await _send_notification("Could not restore previous session state. Starting fresh.", level="warning")
 
 
 # ------------------------------------------------------------------

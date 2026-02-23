@@ -1,36 +1,20 @@
-"""AgentFactory: reads agent .md files and creates LangGraph agents."""
+"""AgentFactory: create LangGraph agents from markdown skill definitions."""
 
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-import yaml
 from langchain_core.messages import SystemMessage
 from langgraph.prebuilt import create_react_agent
 
 from config.settings import AGENTS_DIR
+from core.agent_loader import AgentSkill, load_agent, load_all_agents
 from core.llm import get_llm
 
 
-@dataclass
-class AgentConfig:
-    """Parsed configuration from an agent markdown file."""
-
-    name: str = ""
-    model: str = "gemini-2.5-flash"
-    temperature: float = 0.1
-    top_p: float = 0.95
-    max_tokens: int = 8192
-    description: str = ""
-    tools: list[str] = field(default_factory=list)
-    system_prompt: str = ""
-
-
 class AgentFactory:
-    """Reads agent .md files → creates LangGraph agents with VertexAI."""
+    """Reads agent markdown files and instantiates LangGraph agents."""
 
     def __init__(
         self,
@@ -41,43 +25,35 @@ class AgentFactory:
         self.definitions_dir = Path(definitions_dir)
         self.llm_factory = llm_factory or get_llm
         self.tool_registry = tool_registry or {}
-        self._cache: dict[str, AgentConfig] = {}
+        self._cache: dict[str, AgentSkill] = {}
 
-    def parse_agent_md(self, name: str) -> AgentConfig:
-        """Parse YAML frontmatter + system prompt from .md file."""
+    def _agent_path(self, name: str) -> Path:
+        return self.definitions_dir / f"{name}.md"
+
+    def parse_agent_md(self, name: str) -> AgentSkill:
+        """Parse an agent markdown file into AgentSkill."""
         if name in self._cache:
             return self._cache[name]
 
-        md_path = self.definitions_dir / f"{name}.md"
-        if not md_path.exists():
-            raise FileNotFoundError(f"Agent definition not found: {md_path}")
+        path = self._agent_path(name)
+        if not path.exists():
+            raise FileNotFoundError(f"Agent definition not found: {path}")
 
-        raw = md_path.read_text(encoding="utf-8")
-
-        # Split frontmatter from body
-        match = re.match(r"^---\s*\n(.*?)\n---\s*\n(.*)$", raw, re.DOTALL)
-        if not match:
-            raise ValueError(f"Agent {name}: missing YAML frontmatter (---)")
-
-        frontmatter = yaml.safe_load(match.group(1))
-        body = match.group(2).strip()
-
-        config = AgentConfig(
-            name=frontmatter.get("name", name),
-            model=frontmatter.get("model", "gemini-2.5-flash"),
-            temperature=frontmatter.get("temperature", 0.1),
-            top_p=frontmatter.get("top_p", 0.95),
-            max_tokens=frontmatter.get("max_tokens", 8192),
-            description=frontmatter.get("description", ""),
-            tools=frontmatter.get("tools", []),
-            system_prompt=body,
-        )
+        config = load_agent(path)
         self._cache[name] = config
         return config
 
+    def load_agent(self, name: str) -> AgentSkill:
+        """Compatibility helper aligned with Citi-Agentic loader API."""
+        return self.parse_agent_md(name)
+
+    def load_all_agents(self) -> dict[str, AgentSkill]:
+        """Load all agent definitions from this factory's directory."""
+        return load_all_agents(self.definitions_dir)
+
     def _resolve_tools(self, tool_names: list[str]) -> list[Callable]:
-        """Resolve tool names to callable functions from registry."""
-        resolved = []
+        """Resolve tool names to callables from registry."""
+        resolved: list[Callable] = []
         for name in tool_names:
             if name not in self.tool_registry:
                 raise KeyError(
@@ -88,14 +64,7 @@ class AgentFactory:
         return resolved
 
     def make_agent(self, name: str, extra_context: str = "") -> Any:
-        """Create a LangGraph agent using create_react_agent.
-
-        - Reads agent .md → parses config + prompt
-        - Resolves tools from registry
-        - Optionally appends XML-wrapped skill content (extra_context)
-        - Creates ChatVertexAI with config params
-        - Returns compiled agent via create_react_agent
-        """
+        """Create a LangGraph ReAct agent from an agent definition."""
         config = self.parse_agent_md(name)
 
         prompt = config.system_prompt
@@ -110,20 +79,14 @@ class AgentFactory:
         )
 
         tools = self._resolve_tools(config.tools)
-
-        agent = create_react_agent(
+        return create_react_agent(
             model=llm,
             tools=tools,
             prompt=SystemMessage(content=prompt),
         )
-        return agent
 
     def make_node(self, name: str, extra_context: str = "") -> Callable:
-        """Returns a node function for use in the main StateGraph.
-
-        The node function accepts the full AnalyticsState and runs the agent,
-        returning updated state fields.
-        """
+        """Build a node function that invokes the configured agent."""
         agent = self.make_agent(name, extra_context=extra_context)
 
         async def node_fn(state: dict) -> dict:
@@ -132,3 +95,4 @@ class AgentFactory:
 
         node_fn.__name__ = f"{name}_node"
         return node_fn
+
