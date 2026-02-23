@@ -244,7 +244,6 @@ def make_initial_state() -> dict[str, Any]:
         "selected_agents": list(DEFAULT_SELECTED_AGENTS),
         "selected_friction_agents": list(DEFAULT_SELECTED_AGENTS),
         "auto_approve_checkpoints": False,
-        "current_plan": {},
         "plan_steps_total": 0,
         "plan_steps_completed": 0,
         "plan_tasks": [],

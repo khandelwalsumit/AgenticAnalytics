@@ -1,14 +1,10 @@
 """Node functions for each agent in the analytics graph.
 
 Each node is a thin async wrapper that:
-1. Records start time for ExecutionTrace
-2. Invokes the agent (via AgentFactory or direct LLM call)
-3. Updates state with results and trace info
-4. Captures verbose details (tool calls, AI messages) when VERBOSE is on
-
-Structured-output agents (supervisor, planner, data_analyst, synthesizer_agent,
-critique) return a Pydantic object in ``result["structured_output"]``.
-All other agents use the standard ReAct message flow.
+1. Invokes the agent (pre-bound structured chain or per-call ReAct agent)
+2. Applies structured-output → state mapping for decision agents
+3. Tracks plan progress (only for agents listed in plan_tasks)
+4. Records ExecutionTrace + reasoning for the Chainlit UI
 """
 
 from __future__ import annotations
@@ -46,7 +42,7 @@ logger.setLevel(getattr(logging, LOG_LEVEL.upper(), logging.INFO))
 
 
 # ------------------------------------------------------------------
-# Agent → state field mapping (for dedicated output fields)
+# Agent → dedicated state field
 # ------------------------------------------------------------------
 
 AGENT_STATE_FIELDS: dict[str, str] = {
@@ -60,109 +56,47 @@ AGENT_STATE_FIELDS: dict[str, str] = {
     "formatting_agent": "formatting_output",
 }
 
+# Supervisor decision → next node routing
+_DECISION_TO_NEXT: dict[str, str] = {
+    "answer": "__end__",
+    "clarify": "__end__",
+    "extract": "data_analyst",
+    "analyse": "planner",
+    "execute": "",  # resolved from plan_tasks
+}
+
 
 # ------------------------------------------------------------------
-# Helpers: extract verbose details from agent message history
+# Text helpers
 # ------------------------------------------------------------------
 
 
-def _extract_text(content: Any) -> str:
+def _text(content: Any) -> str:
     """Normalise LangChain message content to plain text."""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts = []
-        for block in content:
-            if isinstance(block, dict):
-                parts.append(block.get("text", ""))
-            else:
-                parts.append(str(block))
-        return " ".join(parts)
+        return " ".join(
+            b.get("text", "") if isinstance(b, dict) else str(b) for b in content
+        )
     return str(content)
 
 
-def _truncate(text: str, limit: int = MAX_DISPLAY_LENGTH) -> str:
-    if len(text) <= limit:
-        return text
-    return text[:limit] + f"\n\n... (truncated, {len(text)} chars total)"
-
-
-def _extract_verbose_details(messages: list) -> dict[str, Any]:
-    """Walk through agent message history and extract structured details.
-
-    Returns a dict with:
-      - tool_calls: list of {name, args_preview, result_preview}
-      - ai_messages: list of plain-text AI responses
-      - message_count: total messages
-    """
-    tool_calls: list[dict[str, str]] = []
-    ai_messages: list[str] = []
-    tool_result_map: dict[str, str] = {}  # tool_call_id → result preview
-
-    for msg in messages:
-        # Collect tool results first (ToolMessage)
-        if msg.type == "tool" and hasattr(msg, "content"):
-            tool_call_id = getattr(msg, "tool_call_id", None)
-            if tool_call_id:
-                tool_result_map[tool_call_id] = _truncate(
-                    _extract_text(msg.content), 500
-                )
-
-        # AI messages with tool_calls
-        if msg.type == "ai" and hasattr(msg, "tool_calls") and msg.tool_calls:
-            for tc in msg.tool_calls:
-                tc_id = tc.get("id", "")
-                args_raw = tc.get("args", {})
-                args_preview = _truncate(json.dumps(args_raw, default=str), 500)
-                tool_calls.append({
-                    "name": tc.get("name", "unknown"),
-                    "args_preview": args_preview,
-                    "result_preview": tool_result_map.get(tc_id, "(pending)"),
-                })
-
-        # Plain AI messages (no tool calls = final response or intermediate thought)
-        if msg.type == "ai" and hasattr(msg, "content") and msg.content:
-            if not (hasattr(msg, "tool_calls") and msg.tool_calls):
-                text = _extract_text(msg.content)
-                if text.strip():
-                    ai_messages.append(text)
-
-    return {
-        "tool_calls": tool_calls,
-        "ai_messages": ai_messages,
-        "message_count": len(messages),
-    }
+def _trunc(text: str, limit: int = MAX_DISPLAY_LENGTH) -> str:
+    return text if len(text) <= limit else text[:limit] + f"\n… ({len(text)} chars)"
 
 
 # ------------------------------------------------------------------
-# Structured output helpers
+# JSON fallback parser (legacy: non-structured agents only)
 # ------------------------------------------------------------------
 
 
-def _is_structured_output_agent(agent_name: str) -> bool:
-    """Return True if this agent uses with_structured_output."""
-    return agent_name in STRUCTURED_OUTPUT_SCHEMAS
-
-
-def _get_structured_output(result: dict[str, Any]) -> Any | None:
-    """Safely retrieve the Pydantic structured output object from result."""
-    return result.get("structured_output")
-
-
-# ------------------------------------------------------------------
-# Legacy JSON decision parser (kept as fallback for non-structured agents)
-# ------------------------------------------------------------------
-
-
-def _parse_json_fallback(text: str) -> dict[str, Any]:
-    """Best-effort JSON extraction from raw LLM text.
-
-    Only used for agents that don't use with_structured_output.
-    """
+def _parse_json(text: str) -> dict[str, Any]:
+    """Best-effort JSON extraction from raw LLM text."""
     text = text.strip()
+    # Try fenced code blocks first
     if "```" in text:
-        parts = text.split("```")
-        for part in parts[1::2]:
+        for part in text.split("```")[1::2]:
             part = part.strip()
             if part.startswith("json"):
                 part = part[4:].strip()
@@ -170,72 +104,33 @@ def _parse_json_fallback(text: str) -> dict[str, Any]:
                 return json.loads(part)
             except (json.JSONDecodeError, ValueError):
                 continue
-    try:
-        return json.loads(text)
-    except (json.JSONDecodeError, ValueError):
-        pass
-    start = text.find("{")
-    end = text.rfind("}") + 1
-    if start >= 0 and end > start:
+    # Try full text, then brace extraction
+    for candidate in (text, text[text.find("{"):text.rfind("}") + 1] if "{" in text else ""):
+        if not candidate:
+            continue
         try:
-            return json.loads(text[start:end])
+            return json.loads(candidate)
         except (json.JSONDecodeError, ValueError):
-            pass
+            continue
     return {}
 
 
-_DECISION_TO_NEXT_AGENT: dict[str, str] = {
-    "answer": "__end__",
-    "clarify": "__end__",
-    "extract": "data_analyst",
-    "analyse": "planner",
-    "execute": "",  # determined by plan_tasks
-}
-
-
 # ------------------------------------------------------------------
-# User Checkpoint node
+# Plan helpers
 # ------------------------------------------------------------------
 
 
-async def user_checkpoint_node(state: AnalyticsState) -> dict[str, Any]:
-    """Checkpoint node — graph pauses here for user input via interrupt_before."""
-    return {
-        "requires_user_input": True,
-        "reasoning": [{
-            "step_name": "User Checkpoint",
-            "step_text": state.get("checkpoint_message", "Awaiting your input..."),
-        }],
-    }
+def _find_next_plan_agent(plan_tasks: list[dict]) -> tuple[list[dict], str]:
+    """Find the first pending task, mark it in_progress, return (updated_tasks, agent).
 
-
-# ------------------------------------------------------------------
-# Node I/O trace (graph contract: every node emits node_io + io_trace)
-# ------------------------------------------------------------------
-
-
-def _trace_io(
-    state: AnalyticsState,
-    node_name: str,
-    node_input: dict[str, Any],
-    node_output: dict[str, Any],
-) -> dict[str, Any]:
-    """Build node_io (current) and io_trace (accumulated) entries."""
-    entry = {
-        "node": node_name,
-        "input": node_input,
-        "output": {k: v for k, v in node_output.items() if k != "messages"},
-    }
-    return {
-        "node_io": entry,
-        "io_trace": state.get("io_trace", []) + [entry],
-        "last_completed_node": node_name,
-    }
-
-
-# ------------------------------------------------------------------
-# Checkpoint helpers
-# ------------------------------------------------------------------
+    Returns ("__end__", ...) if no pending task is found.
+    """
+    updated = [dict(t) for t in plan_tasks]
+    for task in updated:
+        if task.get("status") in ("ready", "todo"):
+            task["status"] = "in_progress"
+            return updated, task.get("agent", "__end__")
+    return updated, "__end__"
 
 
 def _clear_checkpoint_fields() -> dict[str, Any]:
@@ -249,23 +144,66 @@ def _clear_checkpoint_fields() -> dict[str, Any]:
 
 
 # ------------------------------------------------------------------
-# Plan task helpers
+# Verbose extraction (only runs when VERBOSE is on)
 # ------------------------------------------------------------------
 
 
-def _update_task_status(
-    plan_tasks: list[dict[str, Any]],
-    agent_name: str,
-    status: str,
-) -> list[dict[str, Any]]:
-    """Return a copy of plan_tasks with the matching agent's status updated."""
-    updated = []
-    for task in plan_tasks:
-        task_copy = dict(task)
-        if task_copy.get("agent") == agent_name:
-            task_copy["status"] = status
-        updated.append(task_copy)
-    return updated
+def _verbose_details(messages: list) -> dict[str, Any]:
+    """Extract tool calls and AI messages for debug display."""
+    tool_calls: list[dict] = []
+    ai_msgs: list[str] = []
+    tool_results: dict[str, str] = {}
+
+    for msg in messages:
+        if msg.type == "tool" and hasattr(msg, "content"):
+            tc_id = getattr(msg, "tool_call_id", None)
+            if tc_id:
+                tool_results[tc_id] = _trunc(_text(msg.content), 500)
+
+        if msg.type == "ai":
+            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    tool_calls.append({
+                        "name": tc.get("name", "?"),
+                        "args_preview": _trunc(json.dumps(tc.get("args", {}), default=str), 500),
+                        "result_preview": tool_results.get(tc.get("id", ""), "(pending)"),
+                    })
+            elif hasattr(msg, "content") and msg.content:
+                t = _text(msg.content).strip()
+                if t:
+                    ai_msgs.append(t)
+
+    return {"tool_calls": tool_calls, "ai_messages": ai_msgs, "message_count": len(messages)}
+
+
+# ------------------------------------------------------------------
+# Node I/O trace (graph contract)
+# ------------------------------------------------------------------
+
+
+def _trace_io(state: AnalyticsState, node: str, inp: dict, out: dict) -> dict[str, Any]:
+    entry = {"node": node, "input": inp, "output": {k: v for k, v in out.items() if k != "messages"}}
+    return {
+        "node_io": entry,
+        "io_trace": state.get("io_trace", []) + [entry],
+        "last_completed_node": node,
+    }
+
+
+# ------------------------------------------------------------------
+# User checkpoint node
+# ------------------------------------------------------------------
+
+
+async def user_checkpoint_node(state: AnalyticsState) -> dict[str, Any]:
+    """Graph pauses here for user input via interrupt_before."""
+    return {
+        "requires_user_input": True,
+        "reasoning": [{
+            "step_name": "User Checkpoint",
+            "step_text": state.get("checkpoint_message", "Awaiting your input..."),
+        }],
+    }
 
 
 # ------------------------------------------------------------------
@@ -278,95 +216,161 @@ def make_agent_node(
     agent_name: str,
     skill_loader: SkillLoader | None = None,
 ):
-    """Create an async node function for a named agent.
+    """Create an async node function for *agent_name*.
 
-    For agents listed in ``STRUCTURED_OUTPUT_SCHEMAS`` (supervisor, planner,
-    data_analyst, synthesizer_agent, critique) the LLM is bound to the
-    Pydantic schema **once** at creation time via ``with_structured_output``.
-    The resulting chain is reused on every invocation — only the system prompt
-    is rebuilt per-call to include dynamic context.
-
-    Non-structured (ReAct / tool-using) agents are still created per-invocation
-    through ``agent_factory.make_agent`` because tool resolution may vary.
-
-    Args:
-        agent_factory: AgentFactory instance with tool registry.
-        agent_name: Name matching the .md definition file.
-        skill_loader: Optional SkillLoader for skill injection.
-
-    Returns:
-        Async node function compatible with LangGraph StateGraph.
+    Structured-output agents (supervisor, planner, data_analyst, synthesizer,
+    critique) have their LLM chain bound **once** here at graph-build time.
+    ReAct agents are built per-invocation via ``agent_factory.make_agent``.
     """
-
-    # -- Eagerly create structured-output chain at node-creation time ------
     from core.agent_factory import StructuredOutputAgent
 
-    is_structured = _is_structured_output_agent(agent_name)
-    structured_llm_chain = None  # reusable chain for structured agents
+    # -- Eager chain creation for structured agents ------------------------
+    is_structured = agent_name in STRUCTURED_OUTPUT_SCHEMAS
+    structured_chain = None
     output_schema = None
 
     if is_structured:
-        structured_llm_chain, output_schema = agent_factory.create_structured_chain(
-            agent_name
-        )
-        logger.info(
-            "Pre-created structured-output LLM chain for [%s] with schema %s",
-            agent_name,
-            output_schema.__name__,
-        )
+        structured_chain, output_schema = agent_factory.create_structured_chain(agent_name)
+        logger.info("Pre-created structured chain for [%s] → %s", agent_name, output_schema.__name__)
 
+    # -- Closure: the actual node function ---------------------------------
     async def node_fn(state: AnalyticsState) -> dict[str, Any]:
         start_ms = int(time.time() * 1000)
         step_id = str(uuid.uuid4())[:8]
+        logger.info("Node [%s] starting (step=%s)", agent_name, step_id)
 
-        logger.info("Node [%s] starting (step_id=%s)", agent_name, step_id)
+        # -- Build dynamic context ----------------------------------------
+        extra_context = _build_extra_context(agent_name, state, skill_loader)
 
-        # Mark task as running in plan_tasks
-        plan_tasks = list(state.get("plan_tasks", []))
-        plan_tasks = _update_task_status(plan_tasks, agent_name, "running")
+        config = agent_factory.parse_agent_md(agent_name)
+        system_prompt = config.system_prompt
+        if extra_context:
+            system_prompt += f"\n\n{extra_context}"
 
-        # -- Build extra context based on agent type -----------------------
-        extra_context = ""
+        logger.info("Node [%s] system prompt length=%d, input messages=%d",
+                     agent_name, len(system_prompt), len(state["messages"]))
 
-        # Friction agents: inject all 6 domain skills
-        if agent_name in FRICTION_AGENTS and skill_loader:
-            extra_context = (
-                "\n\n## Loaded Domain Skills\n"
-                "Apply these domain skills through your specific analytical lens:\n\n"
-                + skill_loader.load_skills(ALL_DOMAIN_SKILLS)
+        # -- Invoke agent --------------------------------------------------
+        if is_structured and structured_chain is not None:
+            agent = StructuredOutputAgent(
+                name=agent_name,
+                system_prompt=system_prompt,
+                chain=structured_chain,
+                output_schema=output_schema,
             )
+            result = await agent.ainvoke({"messages": state["messages"]})
+        else:
+            agent = agent_factory.make_agent(agent_name, extra_context=extra_context)
+            result = await agent.ainvoke({"messages": state["messages"]})
 
-        # Synthesizer: inject 4 friction agent outputs
-        elif agent_name == "synthesizer_agent":
-            agent_outputs = {
+        elapsed = int(time.time() * 1000) - start_ms
+        msgs = result["messages"]
+        last_msg = msgs[-1] if msgs else None
+        summary = _trunc(_text(last_msg.content), 200) if last_msg and hasattr(last_msg, "content") else ""
+
+        # -- Build tools_used list -----------------------------------------
+        tools_used = [
+            tc.get("name", "?")
+            for m in msgs if hasattr(m, "tool_calls")
+            for tc in m.tool_calls
+        ]
+
+        # -- Base updates --------------------------------------------------
+        updates: dict[str, Any] = {
+            "messages": msgs,
+            "execution_trace": state.get("execution_trace", []) + [ExecutionTrace(
+                step_id=step_id,
+                agent=agent_name,
+                input_summary=state["messages"][-1].content[:200] if state["messages"] else "",
+                output_summary=summary,
+                tools_used=tools_used,
+                latency_ms=elapsed,
+                success=True,
+            )],
+            "reasoning": [{
+                "step_name": agent_name.replace("_", " ").title(),
+                "step_text": summary,
+                "agent": agent_name,
+                **({"verbose": _verbose_details(msgs)} if VERBOSE else {}),
+            }],
+            **_clear_checkpoint_fields(),
+        }
+
+        # Node I/O trace
+        updates.update(_trace_io(state, agent_name, {
+            "messages_count": len(state.get("messages", [])),
+            "plan_steps_completed": state.get("plan_steps_completed", 0),
+        }, {"output_summary": summary, "tools_used": tools_used, "elapsed_ms": elapsed}))
+
+        # Dedicated state field (friction/reporting agents)
+        if agent_name in AGENT_STATE_FIELDS:
+            updates[AGENT_STATE_FIELDS[agent_name]] = {
+                "output": summary,
+                "full_response": str(last_msg.content) if last_msg else "",
+                "agent": agent_name,
+            }
+
+        # -- Structured output → state mapping -----------------------------
+        structured = result.get("structured_output")
+        plan_agents = {t.get("agent", "") for t in state.get("plan_tasks", [])}
+
+        _apply_structured_updates(agent_name, structured, last_msg, state, updates)
+
+        # -- Plan progress (only for agents that ARE in the plan) -----------
+        if agent_name in plan_agents:
+            _advance_plan(agent_name, state, updates)
+
+        logger.info("Node [%s] done in %dms (tools: %s)", agent_name, elapsed, ", ".join(tools_used) or "none")
+        return updates
+
+    node_fn.__name__ = f"{agent_name}_node"
+    return node_fn
+
+
+# ------------------------------------------------------------------
+# Extra context builders
+# ------------------------------------------------------------------
+
+
+def _build_extra_context(
+    agent_name: str,
+    state: AnalyticsState,
+    skill_loader: SkillLoader | None,
+) -> str:
+    """Build agent-specific context to append to the system prompt."""
+    if agent_name in FRICTION_AGENTS and skill_loader:
+        return (
+            "\n\n## Loaded Domain Skills\n"
+            "Apply these domain skills through your specific analytical lens:\n\n"
+            + skill_loader.load_skills(ALL_DOMAIN_SKILLS)
+        )
+
+    if agent_name == "synthesizer_agent":
+        return (
+            "\n\n## Friction Agent Outputs\n"
+            "Synthesize the following 4 independent analyses:\n\n"
+            + json.dumps({
                 "digital": state.get("digital_analysis", {}),
                 "operations": state.get("operations_analysis", {}),
                 "communication": state.get("communication_analysis", {}),
                 "policy": state.get("policy_analysis", {}),
-            }
-            extra_context = (
-                "\n\n## Friction Agent Outputs\n"
-                "Synthesize the following 4 independent analyses:\n\n"
-                + json.dumps(agent_outputs, indent=2, default=str)
-            )
+            }, indent=2, default=str)
+        )
 
-        # Reporting agents: inject synthesis result + findings
-        elif agent_name in REPORTING_AGENTS:
-            report_context: dict[str, Any] = {
-                "synthesis": state.get("synthesis_result", {}),
-                "findings": state.get("findings", []),
-            }
-            if agent_name == "formatting_agent":
-                report_context["narrative"] = state.get("narrative_output", {})
-                report_context["charts"] = state.get("dataviz_output", {})
-            extra_context = (
-                "\n\n## Analysis Context\n"
-                + json.dumps(report_context, indent=2, default=str)
-            )
+    if agent_name in REPORTING_AGENTS:
+        ctx: dict[str, Any] = {
+            "synthesis": state.get("synthesis_result", {}),
+            "findings": state.get("findings", []),
+        }
+        if agent_name == "formatting_agent":
+            ctx["narrative"] = state.get("narrative_output", {})
+            ctx["charts"] = state.get("dataviz_output", {})
+        return "\n\n## Analysis Context\n" + json.dumps(ctx, indent=2, default=str)
 
-        # Supervisor: inject current filters, themes, and plan state
-        elif agent_name == "supervisor":
-            supervisor_context: dict[str, Any] = {
+    if agent_name == "supervisor":
+        return (
+            "\n\n## Current State Context\n"
+            + json.dumps({
                 "filters_applied": state.get("filters_applied", {}),
                 "themes_for_analysis": state.get("themes_for_analysis", []),
                 "navigation_log": state.get("navigation_log", []),
@@ -374,318 +378,159 @@ def make_agent_node(
                 "plan_tasks": state.get("plan_tasks", []),
                 "plan_steps_completed": state.get("plan_steps_completed", 0),
                 "plan_steps_total": state.get("plan_steps_total", 0),
-            }
-            extra_context = (
-                "\n\n## Current State Context\n"
-                + json.dumps(supervisor_context, indent=2, default=str)
-            )
+            }, indent=2, default=str)
+        )
 
-        # Planner: inject analysis objective, themes, and filters
-        elif agent_name == "planner":
-            planner_context: dict[str, Any] = {
+    if agent_name == "planner":
+        return (
+            "\n\n## Planning Context\n"
+            + json.dumps({
                 "filters_applied": state.get("filters_applied", {}),
                 "themes_for_analysis": state.get("themes_for_analysis", []),
                 "navigation_log": state.get("navigation_log", []),
                 "analysis_objective": state.get("analysis_objective", ""),
                 "critique_enabled": state.get("critique_enabled", False),
-            }
-            extra_context = (
-                "\n\n## Planning Context\n"
-                + json.dumps(planner_context, indent=2, default=str)
-            )
-
-        config = agent_factory.parse_agent_md(agent_name)
-        system_msg_content = config.system_prompt
-        if extra_context:
-            system_msg_content += f"\n\n{extra_context}"
-            
-        logger.info("Node [%s] System Message payload:\n%s", agent_name, system_msg_content)
-        logger.info("Node [%s] LLM calls starting (Input Messages: %d)", agent_name, len(state["messages"]))
-
-        # -- Invoke agent ---------------------------------------------------
-        if is_structured and structured_llm_chain is not None:
-            # Reuse pre-created structured-output chain; only rebuild prompt
-            agent = StructuredOutputAgent(
-                name=agent_name,
-                system_prompt=system_msg_content,
-                chain=structured_llm_chain,
-                output_schema=output_schema,
-            )
-            result = await agent.ainvoke({"messages": state["messages"]})
-        else:
-            # Non-structured (ReAct) agents: build per-invocation
-            agent = agent_factory.make_agent(agent_name, extra_context=extra_context)
-            result = await agent.ainvoke({"messages": state["messages"]})
-
-        elapsed_ms = int(time.time() * 1000) - start_ms
-        last_msg = result["messages"][-1] if result["messages"] else None
-        
-        if last_msg and hasattr(last_msg, "content"):
-            logger.info("Node [%s] LLM calls generated response:\n%s", agent_name, _truncate(_extract_text(last_msg.content), 500))
-
-        # -- Summarise output -----------------------------------------------
-        output_summary = ""
-        if last_msg and hasattr(last_msg, "content"):
-            output_summary = _truncate(_extract_text(last_msg.content), 200)
-
-        # -- Build tools_used list ------------------------------------------
-        tools_used = []
-        for msg in result["messages"]:
-            if hasattr(msg, "tool_calls"):
-                for tc in msg.tool_calls:
-                    tools_used.append(tc.get("name", "unknown"))
-
-        # -- Verbose details ------------------------------------------------
-        verbose_details: dict[str, Any] = {}
-        if VERBOSE:
-            verbose_details = _extract_verbose_details(result["messages"])
-            verbose_details["elapsed_ms"] = elapsed_ms
-            verbose_details["step_id"] = step_id
-            logger.debug(
-                "Node [%s] verbose: %d tool calls, %d AI messages, %dms",
-                agent_name,
-                len(verbose_details["tool_calls"]),
-                len(verbose_details["ai_messages"]),
-                elapsed_ms,
-            )
-
-        trace = ExecutionTrace(
-            step_id=step_id,
-            agent=agent_name,
-            input_summary=state["messages"][-1].content[:200] if state["messages"] else "",
-            output_summary=output_summary,
-            tools_used=tools_used,
-            latency_ms=elapsed_ms,
-            success=True,
+            }, indent=2, default=str)
         )
 
-        reasoning_entry: dict[str, Any] = {
-            "step_name": agent_name.replace("_", " ").title(),
-            "step_text": output_summary,
-            "agent": agent_name,
-        }
-        if VERBOSE:
-            reasoning_entry["verbose"] = verbose_details
+    return ""
 
-        updates: dict[str, Any] = {
-            "messages": result["messages"],
-            "execution_trace": state.get("execution_trace", []) + [trace],
-            "reasoning": [reasoning_entry],
-            **_clear_checkpoint_fields(),
-        }
 
-        # Node I/O trace for contract debugging
-        node_input_summary = {
-            "messages_count": len(state.get("messages", [])),
-            "plan_steps_completed": state.get("plan_steps_completed", 0),
-        }
-        updates.update(_trace_io(state, agent_name, node_input_summary, {
-            "output_summary": output_summary,
-            "tools_used": tools_used,
-            "elapsed_ms": elapsed_ms,
-        }))
+# ------------------------------------------------------------------
+# Structured output → state mapping
+# ------------------------------------------------------------------
 
-        # Write to dedicated state field if agent has one
-        if agent_name in AGENT_STATE_FIELDS:
-            updates[AGENT_STATE_FIELDS[agent_name]] = {
-                "output": output_summary,
-                "full_response": str(last_msg.content) if last_msg else "",
-                "agent": agent_name,
-            }
 
-        # -- Structured output: per-agent state updates --------------------
-        structured = _get_structured_output(result)
+def _apply_structured_updates(
+    agent_name: str,
+    structured: Any,
+    last_msg: Any,
+    state: AnalyticsState,
+    updates: dict[str, Any],
+) -> None:
+    """Map structured/fallback output to state updates. Mutates *updates*."""
 
-        # Agents that are part of the plan — used to gate plan progress below.
-        plan_agent_names = {
-            t.get("agent", "") for t in state.get("plan_tasks", [])
-        }
+    # === SUPERVISOR ===
+    if agent_name == "supervisor":
+        if isinstance(structured, SupervisorOutput):
+            _apply_supervisor(structured, state, updates)
+        elif last_msg and hasattr(last_msg, "content"):
+            _apply_supervisor_fallback(_text(last_msg.content), state, updates)
 
-        if agent_name == "supervisor" and isinstance(structured, SupervisorOutput):
-            # ------- Supervisor (structured) ---------------------------------
-            decision = structured.decision
-            updates["supervisor_decision"] = decision
-            updates["reasoning"] = [{
-                "step_name": "Supervisor",
-                "step_text": structured.reasoning,
-            }]
+    # === PLANNER ===
+    elif agent_name == "planner":
+        if isinstance(structured, PlannerOutput):
+            updates.update({
+                "plan_tasks": [t.model_dump() for t in structured.plan_tasks],
+                "plan_steps_total": structured.plan_steps_total,
+                "plan_steps_completed": 0,
+                "analysis_objective": structured.analysis_objective,
+                "reasoning": [{"step_name": "Planner", "step_text": structured.reasoning}],
+            })
+            logger.info("Planner: %d tasks, objective=%r", len(structured.plan_tasks), structured.analysis_objective[:80])
+        elif last_msg and hasattr(last_msg, "content"):
+            data = _parse_json(_text(last_msg.content))
+            if data.get("plan_tasks"):
+                updates.update({
+                    "plan_tasks": data["plan_tasks"],
+                    "plan_steps_total": data.get("plan_steps_total", len(data["plan_tasks"])),
+                    "plan_steps_completed": 0,
+                })
+                if data.get("analysis_objective"):
+                    updates["analysis_objective"] = data["analysis_objective"]
 
-            if decision == "execute":
-                # Walk plan_tasks to find the first pending step & mark it.
-                found_agent = ""
-                updated_plan = list(state.get("plan_tasks", []))
-                for task in updated_plan:
-                    if task.get("status") in ("ready", "todo"):
-                        task["status"] = "in_progress"
-                        found_agent = task.get("agent", "")
-                        break
-                updates["next_agent"] = found_agent or "__end__"
-                updates["plan_tasks"] = updated_plan
-            else:
-                updates["next_agent"] = _DECISION_TO_NEXT_AGENT.get(decision, "__end__")
+    # === DATA ANALYST ===
+    elif agent_name == "data_analyst" and isinstance(structured, DataAnalystOutput):
+        updates["supervisor_decision"] = structured.decision
+        updates["reasoning"] = [{"step_name": "Data Analyst", "step_text": structured.response}]
+        if structured.response:
+            updates["messages"] = [AIMessage(content=structured.response)]
+        logger.info("Data Analyst: decision=%s, confidence=%d", structured.decision, structured.confidence)
 
-            # Replace synthetic JSON message with the human-friendly response
-            if structured.response:
-                updates["messages"] = [AIMessage(content=structured.response)]
+    # === SYNTHESIZER ===
+    elif agent_name == "synthesizer_agent" and isinstance(structured, SynthesizerOutput):
+        narrative = structured.summary.executive_narrative
+        updates.update({
+            "synthesis_result": structured.summary.model_dump(),
+            "findings": [f.model_dump() for f in structured.findings],
+            "reasoning": [{"step_name": "Synthesizer Agent", "step_text": narrative}],
+        })
+        if narrative:
+            updates["messages"] = [AIMessage(content=narrative)]
+        logger.info("Synthesizer: %d findings, confidence=%d", len(structured.findings), structured.confidence)
 
-            logger.info(
-                "Supervisor decision (structured): %s → next_agent=%s (confidence=%d)",
-                decision,
-                updates.get("next_agent", "?"),
-                structured.confidence,
-            )
+    # === CRITIQUE ===
+    elif agent_name == "critique" and isinstance(structured, CritiqueOutput):
+        text = f"Grade: {structured.grade} | Score: {structured.quality_score:.2f} | Decision: {structured.decision}\n{structured.summary}"
+        updates.update({
+            "critique_feedback": structured.model_dump(),
+            "quality_score": structured.quality_score,
+            "reasoning": [{"step_name": "Critique Agent", "step_text": text}],
+            "messages": [AIMessage(content=text)],
+        })
+        logger.info("Critique: grade=%s, score=%.2f, issues=%d", structured.grade, structured.quality_score, len(structured.issues))
 
-        elif agent_name == "supervisor" and last_msg and hasattr(last_msg, "content"):
-            # ------- Supervisor (legacy JSON fallback) -----------------------
-            raw_text = _extract_text(last_msg.content)
-            decision_data = _parse_json_fallback(raw_text)
-            decision = decision_data.get("decision", "")
-            response_text = decision_data.get("response", "")
 
-            if decision in _DECISION_TO_NEXT_AGENT:
-                updates["supervisor_decision"] = decision
-                if decision == "execute":
-                    updated_plan = list(state.get("plan_tasks", []))
-                    found_agent = ""
-                    for task in updated_plan:
-                        if task.get("status") in ("ready", "todo"):
-                            task["status"] = "in_progress"
-                            found_agent = task.get("agent", "")
-                            break
-                    updates["next_agent"] = found_agent or "__end__"
-                    updates["plan_tasks"] = updated_plan
-                else:
-                    updates["next_agent"] = _DECISION_TO_NEXT_AGENT[decision]
-                if decision in ("answer", "clarify") and response_text:
-                    updates["messages"] = [AIMessage(content=response_text)]
+def _apply_supervisor(s: SupervisorOutput, state: AnalyticsState, updates: dict) -> None:
+    """Map SupervisorOutput → state updates."""
+    updates["supervisor_decision"] = s.decision
+    updates["reasoning"] = [{"step_name": "Supervisor", "step_text": s.reasoning}]
 
-            logger.info(
-                "Supervisor decision (fallback): %s → next_agent=%s (confidence=%s)",
-                decision,
-                updates.get("next_agent", "?"),
-                decision_data.get("confidence", "?"),
-            )
+    if s.decision == "execute":
+        plan, agent = _find_next_plan_agent(state.get("plan_tasks", []))
+        updates["next_agent"] = agent
+        updates["plan_tasks"] = plan
+    else:
+        updates["next_agent"] = _DECISION_TO_NEXT.get(s.decision, "__end__")
 
-        if agent_name == "planner" and isinstance(structured, PlannerOutput):
-            # ------- Planner (structured) ------------------------------------
-            new_tasks = [t.model_dump() for t in structured.plan_tasks]
-            updates["plan_tasks"] = new_tasks
-            updates["plan_steps_total"] = structured.plan_steps_total
-            updates["plan_steps_completed"] = 0
-            updates["analysis_objective"] = structured.analysis_objective
-            updates["reasoning"] = [{
-                "step_name": "Planner",
-                "step_text": structured.reasoning,
-            }]
-            logger.info(
-                "Planner (structured): %d tasks, objective=%r",
-                len(new_tasks),
-                structured.analysis_objective[:80],
-            )
+    if s.response:
+        updates["messages"] = [AIMessage(content=s.response)]
 
-        elif agent_name == "planner" and last_msg and hasattr(last_msg, "content"):
-            # ------- Planner (legacy JSON fallback) --------------------------
-            raw_text = _extract_text(last_msg.content)
-            plan_data = _parse_json_fallback(raw_text)
-            new_tasks = plan_data.get("plan_tasks", [])
-            if new_tasks:
-                updates["plan_tasks"] = new_tasks
-                updates["plan_steps_total"] = plan_data.get(
-                    "plan_steps_total", len(new_tasks)
-                )
-                updates["plan_steps_completed"] = 0
-                if plan_data.get("analysis_objective"):
-                    updates["analysis_objective"] = plan_data["analysis_objective"]
+    logger.info("Supervisor (structured): %s → %s (confidence=%d)", s.decision, updates["next_agent"], s.confidence)
 
-        if agent_name == "data_analyst" and isinstance(structured, DataAnalystOutput):
-            # ------- Data Analyst (structured) -------------------------------
-            updates["reasoning"] = [{
-                "step_name": "Data Analyst",
-                "step_text": structured.response,
-            }]
-            # Surface the analyst's decision in state for supervisor routing
-            updates["supervisor_decision"] = structured.decision
-            if structured.response:
-                updates["messages"] = [AIMessage(content=structured.response)]
-            logger.info(
-                "Data Analyst (structured): decision=%s, confidence=%d",
-                structured.decision,
-                structured.confidence,
-            )
 
-        if agent_name == "synthesizer_agent" and isinstance(structured, SynthesizerOutput):
-            # ------- Synthesizer (structured) --------------------------------
-            updates["synthesis_result"] = structured.summary.model_dump()
-            updates["findings"] = [f.model_dump() for f in structured.findings]
-            updates["reasoning"] = [{
-                "step_name": "Synthesizer Agent",
-                "step_text": structured.summary.executive_narrative,
-            }]
-            # Surface executive narrative to user
-            if structured.summary.executive_narrative:
-                updates["messages"] = [AIMessage(content=structured.summary.executive_narrative)]
-            logger.info(
-                "Synthesizer (structured): %d findings, decision=%s, confidence=%d",
-                len(structured.findings),
-                structured.decision,
-                structured.confidence,
-            )
+def _apply_supervisor_fallback(raw: str, state: AnalyticsState, updates: dict) -> None:
+    """Map legacy JSON supervisor output → state updates."""
+    data = _parse_json(raw)
+    decision = data.get("decision", "")
+    if decision not in _DECISION_TO_NEXT:
+        logger.warning("Supervisor fallback: unrecognised decision %r", decision)
+        return
 
-        if agent_name == "critique" and isinstance(structured, CritiqueOutput):
-            # ------- Critique (structured) -----------------------------------
-            updates["critique_feedback"] = structured.model_dump()
-            updates["quality_score"] = structured.quality_score
-            critique_summary = (
-                f"Grade: {structured.grade} | Score: {structured.quality_score:.2f} | "
-                f"Decision: {structured.decision}\n{structured.summary}"
-            )
-            updates["reasoning"] = [{
-                "step_name": "Critique Agent",
-                "step_text": critique_summary,
-            }]
-            # Surface critique summary to user
-            updates["messages"] = [AIMessage(content=critique_summary)]
-            logger.info(
-                "Critique (structured): grade=%s, score=%.2f, decision=%s, issues=%d",
-                structured.grade,
-                structured.quality_score,
-                structured.decision,
-                len(structured.issues),
-            )
+    updates["supervisor_decision"] = decision
+    if decision == "execute":
+        plan, agent = _find_next_plan_agent(state.get("plan_tasks", []))
+        updates["next_agent"] = agent
+        updates["plan_tasks"] = plan
+    else:
+        updates["next_agent"] = _DECISION_TO_NEXT[decision]
 
-        # -- Update plan progress (only for agents that are IN the plan) ------
-        # Supervisor and planner are orchestrators, not plan steps themselves.
-        if agent_name in plan_agent_names:
-            # Mark this agent's task as done
-            updated_tasks = list(updates.get("plan_tasks", state.get("plan_tasks", [])))
-            for task in updated_tasks:
-                if task.get("agent") == agent_name and task.get("status") != "done":
-                    task["status"] = "done"
-                    break
-            updates["plan_tasks"] = updated_tasks
+    if decision in ("answer", "clarify") and data.get("response"):
+        updates["messages"] = [AIMessage(content=data["response"])]
 
-            completed = state.get("plan_steps_completed", 0) + 1
-            updates["plan_steps_completed"] = completed
-            logger.info(
-                "Plan progress: %d/%d (agent=%s)",
-                completed,
-                state.get("plan_steps_total", 0),
-                agent_name,
-            )
+    logger.info("Supervisor (fallback): %s → %s (confidence=%s)", decision, updates.get("next_agent", "?"), data.get("confidence", "?"))
 
-            # Check if all plan steps are done
-            total = state.get("plan_steps_total", 0)
-            if total > 0 and completed >= total:
-                updates["analysis_complete"] = True
-                updates["phase"] = "qa"
-                logger.info("Analysis pipeline complete — entering Q&A mode.")
 
-        logger.info(
-            "Node [%s] finished in %dms (tools: %s)",
-            agent_name, elapsed_ms, ", ".join(tools_used) or "none",
-        )
+# ------------------------------------------------------------------
+# Plan progress
+# ------------------------------------------------------------------
 
-        return updates
 
-    node_fn.__name__ = f"{agent_name}_node"
-    return node_fn
+def _advance_plan(agent_name: str, state: AnalyticsState, updates: dict) -> None:
+    """Mark the agent's task done and check pipeline completion."""
+    tasks = [dict(t) for t in updates.get("plan_tasks", state.get("plan_tasks", []))]
+    for t in tasks:
+        if t.get("agent") == agent_name and t.get("status") != "done":
+            t["status"] = "done"
+            break
+    updates["plan_tasks"] = tasks
+
+    completed = state.get("plan_steps_completed", 0) + 1
+    total = state.get("plan_steps_total", 0)
+    updates["plan_steps_completed"] = completed
+    logger.info("Plan progress: %d/%d (agent=%s)", completed, total, agent_name)
+
+    if total > 0 and completed >= total:
+        updates["analysis_complete"] = True
+        updates["phase"] = "qa"
+        logger.info("Pipeline complete — entering Q&A mode.")
