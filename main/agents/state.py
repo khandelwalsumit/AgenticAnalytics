@@ -119,6 +119,8 @@ class AnalyticsState(TypedDict):
     checkpoint_prompt: str
     checkpoint_token: str
     pending_input_for: str
+    analysis_complete: bool  # True once all plan steps are done
+    phase: str  # "analysis" | "qa"
 
     # Supervisor decision context
     filters_applied: dict[str, Any]

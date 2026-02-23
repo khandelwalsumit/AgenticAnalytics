@@ -496,6 +496,11 @@ def make_agent_node(
         # -- Structured output: per-agent state updates --------------------
         structured = _get_structured_output(result)
 
+        # Agents that are part of the plan — used to gate plan progress below.
+        plan_agent_names = {
+            t.get("agent", "") for t in state.get("plan_tasks", [])
+        }
+
         if agent_name == "supervisor" and isinstance(structured, SupervisorOutput):
             # ------- Supervisor (structured) ---------------------------------
             decision = structured.decision
@@ -503,16 +508,19 @@ def make_agent_node(
             updates["reasoning"] = [{
                 "step_name": "Supervisor",
                 "step_text": structured.reasoning,
-                "verbose": True,
             }]
 
             if decision == "execute":
-                for task in state.get("plan_tasks", []):
+                # Walk plan_tasks to find the first pending step & mark it.
+                found_agent = ""
+                updated_plan = list(state.get("plan_tasks", []))
+                for task in updated_plan:
                     if task.get("status") in ("ready", "todo"):
-                        updates["next_agent"] = task["agent"]
+                        task["status"] = "in_progress"
+                        found_agent = task.get("agent", "")
                         break
-                else:
-                    updates["next_agent"] = "__end__"
+                updates["next_agent"] = found_agent or "__end__"
+                updates["plan_tasks"] = updated_plan
             else:
                 updates["next_agent"] = _DECISION_TO_NEXT_AGENT.get(decision, "__end__")
 
@@ -537,12 +545,15 @@ def make_agent_node(
             if decision in _DECISION_TO_NEXT_AGENT:
                 updates["supervisor_decision"] = decision
                 if decision == "execute":
-                    for task in state.get("plan_tasks", []):
+                    updated_plan = list(state.get("plan_tasks", []))
+                    found_agent = ""
+                    for task in updated_plan:
                         if task.get("status") in ("ready", "todo"):
-                            updates["next_agent"] = task["agent"]
+                            task["status"] = "in_progress"
+                            found_agent = task.get("agent", "")
                             break
-                    else:
-                        updates["next_agent"] = "__end__"
+                    updates["next_agent"] = found_agent or "__end__"
+                    updates["plan_tasks"] = updated_plan
                 else:
                     updates["next_agent"] = _DECISION_TO_NEXT_AGENT[decision]
                 if decision in ("answer", "clarify") and response_text:
@@ -594,7 +605,7 @@ def make_agent_node(
             }]
             # Surface the analyst's decision in state for supervisor routing
             updates["supervisor_decision"] = structured.decision
-            if structured.decision == "clarify":
+            if structured.response:
                 updates["messages"] = [AIMessage(content=structured.response)]
             logger.info(
                 "Data Analyst (structured): decision=%s, confidence=%d",
@@ -610,6 +621,9 @@ def make_agent_node(
                 "step_name": "Synthesizer Agent",
                 "step_text": structured.summary.executive_narrative,
             }]
+            # Surface executive narrative to user
+            if structured.summary.executive_narrative:
+                updates["messages"] = [AIMessage(content=structured.summary.executive_narrative)]
             logger.info(
                 "Synthesizer (structured): %d findings, decision=%s, confidence=%d",
                 len(structured.findings),
@@ -621,13 +635,16 @@ def make_agent_node(
             # ------- Critique (structured) -----------------------------------
             updates["critique_feedback"] = structured.model_dump()
             updates["quality_score"] = structured.quality_score
+            critique_summary = (
+                f"Grade: {structured.grade} | Score: {structured.quality_score:.2f} | "
+                f"Decision: {structured.decision}\n{structured.summary}"
+            )
             updates["reasoning"] = [{
                 "step_name": "Critique Agent",
-                "step_text": (
-                    f"Grade: {structured.grade} | Score: {structured.quality_score:.2f} | "
-                    f"Decision: {structured.decision}\n{structured.summary}"
-                ),
+                "step_text": critique_summary,
             }]
+            # Surface critique summary to user
+            updates["messages"] = [AIMessage(content=critique_summary)]
             logger.info(
                 "Critique (structured): grade=%s, score=%.2f, decision=%s, issues=%d",
                 structured.grade,
@@ -636,13 +653,32 @@ def make_agent_node(
                 len(structured.issues),
             )
 
-        # Update plan progress
-        completed = state.get("plan_steps_completed", 0) + 1
-        updates["plan_steps_completed"] = completed
+        # -- Update plan progress (only for agents that are IN the plan) ------
+        # Supervisor and planner are orchestrators, not plan steps themselves.
+        if agent_name in plan_agent_names:
+            # Mark this agent's task as done
+            updated_tasks = list(updates.get("plan_tasks", state.get("plan_tasks", [])))
+            for task in updated_tasks:
+                if task.get("agent") == agent_name and task.get("status") != "done":
+                    task["status"] = "done"
+                    break
+            updates["plan_tasks"] = updated_tasks
 
-        # Mark task as done in plan_tasks
-        plan_tasks = _update_task_status(plan_tasks, agent_name, "done")
-        updates["plan_tasks"] = plan_tasks
+            completed = state.get("plan_steps_completed", 0) + 1
+            updates["plan_steps_completed"] = completed
+            logger.info(
+                "Plan progress: %d/%d (agent=%s)",
+                completed,
+                state.get("plan_steps_total", 0),
+                agent_name,
+            )
+
+            # Check if all plan steps are done
+            total = state.get("plan_steps_total", 0)
+            if total > 0 and completed >= total:
+                updates["analysis_complete"] = True
+                updates["phase"] = "qa"
+                logger.info("Analysis pipeline complete — entering Q&A mode.")
 
         logger.info(
             "Node [%s] finished in %dms (tools: %s)",

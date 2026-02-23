@@ -280,6 +280,8 @@ def make_initial_state() -> dict[str, Any]:
         "quality_score": 0.0,
         "next_agent": "",
         "supervisor_decision": "",
+        "analysis_complete": False,
+        "phase": "analysis",
         "filters_applied": {},
         "themes_for_analysis": [],
         "navigation_log": [],
@@ -457,12 +459,13 @@ async def on_message(message: cl.Message):
         reasoning_step.status = "success"
         await reasoning_step.update()
 
-        # Post-analysis: send downloads if report is available
-        if state.get("report_file_path") or state.get("data_file_path"):
-            await send_downloads(
-                state.get("report_file_path", "report.pptx"),
-                state.get("data_file_path", "data.csv"),
-            )
+        # Post-analysis: send downloads if analysis is complete or report is available
+        if state.get("analysis_complete") or state.get("report_file_path") or state.get("data_file_path"):
+            if state.get("report_file_path") or state.get("data_file_path"):
+                await send_downloads(
+                    state.get("report_file_path", "report.pptx"),
+                    state.get("data_file_path", "data.csv"),
+                )
             if task_list:
                 done = [{**t, "status": "done"} for t in state.get("plan_tasks", [])]
                 task_list = await sync_task_list(task_list, done)
