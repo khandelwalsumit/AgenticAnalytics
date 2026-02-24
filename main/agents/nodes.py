@@ -453,8 +453,10 @@ def _apply_structured_updates(
         da_response = da_data.get("response", _text(last_msg.content) if last_msg else "")
         da_confidence = da_data.get("confidence", 80)
 
-        # DO NOT overwrite supervisor_decision — that's only for the supervisor.
-        # Instead, track what the data analyst reported in reasoning.
+        # Ensure da_response is a string (tool results can be dicts)
+        if not isinstance(da_response, str):
+            da_response = json.dumps(da_response, indent=2, default=str)
+
         updates["reasoning"] = [{"step_name": "Data Analyst", "step_text": da_response}]
         if da_response:
             updates["messages"] = [AIMessage(content=da_response)]

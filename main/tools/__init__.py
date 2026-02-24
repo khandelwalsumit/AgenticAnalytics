@@ -143,8 +143,15 @@ def apply_skill(skill_name: str, bucket: str) -> str:
         return json.dumps({"error": "DataStore not initialized"})
 
     skill_content = _skill_loader_ref.load_skill(skill_name)
-    meta = _data_store_ref.get_metadata(bucket)
-    df = _data_store_ref.get_dataframe(bucket)
+
+    # Fall back to main_dataset if bucket key doesn't exist
+    available = _data_store_ref.list_keys()
+    actual_key = bucket if bucket in available else "main_dataset"
+    if actual_key != bucket:
+        print(f"[apply_skill] Bucket '{bucket}' not found, using '{actual_key}'. Available: {available}")
+
+    meta = _data_store_ref.get_metadata(actual_key)
+    df = _data_store_ref.get_dataframe(actual_key)
 
     top_problems = (
         MetricsEngine.top_n(df, "exact_problem_statement", n=10)
@@ -156,10 +163,11 @@ def apply_skill(skill_name: str, bucket: str) -> str:
         {
             "skill": skill_name,
             "skill_content": skill_content,
-            "bucket": bucket,
+            "bucket": actual_key,
             "bucket_metadata": meta,
             "row_count": len(df),
             "top_problems": top_problems,
+            "available_buckets": available,
         },
         indent=2,
     )

@@ -87,6 +87,8 @@ MAX_DISPLAY_LENGTH = int(os.getenv("MAX_DISPLAY_LENGTH", "2000"))
 
 # Log level for console logging ("debug" | "info" | "warning" | "error")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "info").lower()
+LOG_FORMAT = os.getenv("LOG_FORMAT", " [%(levelname)s]---------[ %(name)s ]----------- %(message)s")
+LOG_DATE_FORMAT = os.getenv("LOG_DATE_FORMAT", "%H:%M:%S")
 
 # -- Agent groups (multi-agent subgraphs) ------------------------------------
 FRICTION_AGENTS = {
