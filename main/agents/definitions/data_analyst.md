@@ -110,19 +110,24 @@ Generate value distributions for key columns:
 
 ## Data Schema Context
 
-The datasets you work with contain LLM-processed call records with these key columns:
-- `exact_problem_statement` — Customer's exact problem from the call
-- `digital_friction` — Digital channel friction analysis
-- `policy_friction` — Policy-related friction analysis
-- `solution_by_ui` — Solution via UI/UX changes
-- `solution_by_ops` — Solution via operational changes
-- `solution_by_education` — Solution via customer education
-- `solution_by_technology` — Solution via technology fixes
-- `call_reason` — L1 top-level call reason
-- `call_reason_l2` through `granular_theme_l5` — Call reason hierarchy
-- `friction_driver_category` — Category of friction driver
+The datasets you work with contain LLM-processed call records. Key column types:
 
-Additional columns may exist and will be auto-discovered at runtime.
+**LLM Analysis Columns** (these are the ONLY columns sent to friction agents for analysis):
+- `digital_friction` — LLM-processed digital channel friction analysis per call
+- `key_solution` — LLM-processed solution summary per call
+
+**Grouping Columns** (used for bucketing, configured in GROUP_BY_COLUMNS):
+- `call_reason` — L1 top-level call reason
+- `broad_theme_l3` — L3 broad theme
+- `granular_theme_l5` — L5 granular theme
+
+**Bucketing Configuration** (from config.py):
+- `GROUP_BY_COLUMNS` — ordered list of columns for hierarchical grouping
+- `MIN_BUCKET_SIZE` — buckets smaller than this are merged into "Other"
+- `MAX_BUCKET_SIZE` — buckets larger than this are sub-bucketed by next column
+- `TAIL_BUCKET_ENABLED` — whether to collect small buckets into "Other"
+
+Additional columns may exist and will be auto-discovered at runtime. Use `load_dataset` to discover the full schema.
 
 ## Important Rules
 

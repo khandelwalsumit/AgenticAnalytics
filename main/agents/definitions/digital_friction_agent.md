@@ -80,10 +80,11 @@ Apply domain skills through your digital lens:
 
 ## Key Fields to Analyze
 
-- `digital_friction` — Primary field for digital experience issues
-- `solution_by_ui` — UI/UX change recommendations
-- `solution_by_technology` — Technology improvements needed
-- `call_reason` → `granular_theme_l5` — Call reason hierarchy for context
+The LLM only receives these two pre-processed columns per call record:
+- `digital_friction` — LLM-processed digital channel friction analysis (your primary signal)
+- `key_solution` — LLM-processed solution summary (maps to UI, technology, ops, education fixes)
+
+Grouping columns (`call_reason`, `broad_theme_l3`, `granular_theme_l5`) provide context about which bucket you're analyzing but are NOT individual call records.
 
 ## Analysis Approach
 

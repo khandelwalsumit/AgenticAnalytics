@@ -22,6 +22,10 @@ DATA_DIR = ROOT_DIR / os.getenv("DATA_DIR", "data")
 CACHE_DIR = ROOT_DIR / os.getenv("CACHE_DIR", ".cache")
 THREAD_STATES_DIR = CACHE_DIR / "thread_states"
 
+# Hardcoded default CSV path — user sets this to their dataset location.
+# Override via DEFAULT_CSV_PATH env var or change this line directly.
+DEFAULT_CSV_PATH = os.getenv("DEFAULT_CSV_PATH", str(ROOT_DIR / "dummy_data.csv"))
+
 # -- Google AI Studio / Gemini -------------------------------------------------------
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 
@@ -34,9 +38,39 @@ DEFAULT_MAX_TOKENS = int(os.getenv("DEFAULT_MAX_TOKENS", "8192"))
 # -- Thresholds ---------------------------------------------------------------
 MAX_SAMPLE_SIZE = 50  # Max rows returned by sample_data
 TOP_N_DEFAULT = 10  # Default for top-N distributions
-MIN_BUCKET_SIZE = 10  # Minimum rows for a meaningful bucket
 IMPACT_WEIGHT = 0.6  # Weight for impact in composite score
 EASE_WEIGHT = 0.4  # Weight for ease in composite score
+
+# -- Intelligent Bucketing ---------------------------------------------------
+# Columns used for hierarchical group-by (in order of priority).
+# Data is grouped by these columns sequentially to create analysis buckets.
+GROUP_BY_COLUMNS: list[str] = [
+    "call_reason",        # L1 — broadest grouping
+    "broad_theme_l3",     # L3 — mid-level theme
+    "granular_theme_l5",  # L5 — most granular
+]
+
+# Bucket size controls
+MIN_BUCKET_SIZE = 10     # Buckets smaller than this get merged into "Other"
+MAX_BUCKET_SIZE = 2000   # Buckets larger than this get sub-bucketed by next column
+
+# Tail-end collection: merge all small buckets into a single "Other" bucket
+TAIL_BUCKET_ENABLED = True
+
+# -- LLM Analysis Fields ----------------------------------------------------
+# ONLY these columns are passed to friction lens agents for LLM analysis.
+# All other columns are used for grouping/filtering but NOT sent to the LLM.
+# This keeps context small even with 10-12K records.
+LLM_ANALYSIS_COLUMNS: list[str] = [
+    "digital_friction",   # LLM-processed friction analysis per call
+    "key_solution",       # LLM-processed solution summary per call
+]
+
+# -- PPTX Template -----------------------------------------------------------
+# Path to an external .pptx template file with pre-designed slide layouts.
+# If the file exists, slides use its layouts. If not, falls back to code-based defaults.
+# Set to "" or leave as default to use code-based template.
+PPTX_TEMPLATE_PATH = os.getenv("PPTX_TEMPLATE_PATH", str(ROOT_DIR / "template.pptx"))
 
 # -- Display & Debug ---------------------------------------------------------
 # Master switch: when True, every node entry/exit, tool call, AI response,

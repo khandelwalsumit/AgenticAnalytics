@@ -11,7 +11,6 @@ Matches the test blueprint graph contract:
 from __future__ import annotations
 
 import os
-import tempfile
 from typing import Any
 
 import chainlit as cl
@@ -124,21 +123,30 @@ async def send_downloads(
     report_path: str,
     data_path: str,
 ) -> None:
-    """Render download action buttons for report and data files."""
-    tmp = tempfile.mkdtemp()
+    """Render download action buttons for report and data files.
 
-    rpt = os.path.join(tmp, os.path.basename(report_path))
-    with open(rpt, "w") as f:
-        f.write("[Placeholder] PPTX report content.")
+    Serves the actual generated files when they exist on disk.
+    Falls back to a notification if files are missing.
+    """
+    elements: list[Any] = []
 
-    dat = os.path.join(tmp, os.path.basename(data_path))
-    with open(dat, "w") as f:
-        f.write("col_a,col_b,col_c\n1,2,3\n4,5,6\n")
+    if report_path and os.path.isfile(report_path):
+        elements.append(
+            cl.File(name=os.path.basename(report_path), path=report_path, display="inline")
+        )
+
+    if data_path and os.path.isfile(data_path):
+        elements.append(
+            cl.File(name=os.path.basename(data_path), path=data_path, display="inline")
+        )
+
+    if not elements:
+        await cl.Message(
+            content="Report generation complete but download files are not yet available.",
+        ).send()
+        return
 
     await cl.Message(
         content="**Your files are ready for download:**",
-        elements=[
-            cl.File(name=os.path.basename(rpt), path=rpt, display="inline"),
-            cl.File(name=os.path.basename(dat), path=dat, display="inline"),
-        ],
+        elements=elements,
     ).send()

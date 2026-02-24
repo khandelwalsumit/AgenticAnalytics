@@ -22,7 +22,7 @@ from tools.data_tools import (
     sample_data,
 )
 from tools.metrics import MetricsEngine
-from tools.report_tools import REPORT_TOOLS, export_to_pptx, generate_markdown_report
+from tools.report_tools import REPORT_TOOLS, export_filtered_csv, export_to_pptx, generate_markdown_report
 
 # ------------------------------------------------------------------
 # Shared references — set by the graph at session init
@@ -60,6 +60,9 @@ def add_finding(finding: dict) -> None:
 def analyze_bucket(bucket: str, questions: list[str]) -> str:
     """Analyze a data bucket against specific questions.
 
+    Only LLM_ANALYSIS_COLUMNS are included in distributions and samples
+    to keep context small for downstream LLM agents.
+
     Args:
         bucket: DataStore key for the bucket.
         questions: List of analysis questions to investigate.
@@ -81,19 +84,35 @@ def analyze_bucket(bucket: str, questions: list[str]) -> str:
         "row_count": len(df),
     }
 
-    # Auto-generate distributions for text columns
-    text_cols = [c for c in df.columns if df[c].dtype == "object"]
+    # Distributions for LLM analysis columns only
+    from config import LLM_ANALYSIS_COLUMNS, GROUP_BY_COLUMNS
+
+    llm_cols = [c for c in LLM_ANALYSIS_COLUMNS if c in df.columns]
     distributions = {}
-    for col in text_cols[:5]:
+    for col in llm_cols:
         dist = MetricsEngine.get_distribution(df, col)
         if "distribution" in dist:
             dist["distribution"] = dist["distribution"][:10]
         distributions[col] = dist
 
+    # Also include grouping column distributions for context
+    for col in GROUP_BY_COLUMNS:
+        if col in df.columns and col not in distributions:
+            dist = MetricsEngine.get_distribution(df, col)
+            if "distribution" in dist:
+                dist["distribution"] = dist["distribution"][:10]
+            distributions[col] = dist
+
     analysis_context["distributions"] = distributions
 
-    # Sample rows for qualitative review
-    sample = df.sample(n=min(10, len(df)), random_state=42)
+    # Sample rows — only LLM-relevant columns
+    relevant_cols = list(dict.fromkeys(
+        LLM_ANALYSIS_COLUMNS + GROUP_BY_COLUMNS + ["exact_problem_statement"]
+    ))
+    available_cols = [c for c in relevant_cols if c in df.columns]
+    df_slim = df[available_cols] if available_cols else df
+
+    sample = df_slim.sample(n=min(10, len(df_slim)), random_state=42)
     rows = []
     for _, row in sample.iterrows():
         row_dict = {}
@@ -102,6 +121,7 @@ def analyze_bucket(bucket: str, questions: list[str]) -> str:
             row_dict[col] = s[:300] + "..." if len(s) > 300 else s
         rows.append(row_dict)
     analysis_context["sample_rows"] = rows
+    analysis_context["columns_included"] = available_cols
 
     return json.dumps(analysis_context, indent=2)
 
@@ -342,6 +362,7 @@ TOOL_REGISTRY: dict[str, Any] = {
     "get_findings_summary": get_findings_summary,
     "generate_markdown_report": generate_markdown_report,
     "export_to_pptx": export_to_pptx,
+    "export_filtered_csv": export_filtered_csv,
     "validate_findings": validate_findings,
     "score_quality": score_quality,
     "delegate_to_agent": delegate_to_agent,

@@ -60,8 +60,8 @@ class AnalyticsState(TypedDict):
     active_filters: dict[str, Any]
     data_buckets: dict[str, dict[str, Any]]
 
-    # Analysis — scored findings
-    findings: list[RankedFinding]
+    # Analysis — scored findings (dicts matching RankedFinding schema)
+    findings: list[dict[str, Any]]
     domain_analysis: dict[str, Any]
     operational_analysis: dict[str, Any]
 

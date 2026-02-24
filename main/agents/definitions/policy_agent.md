@@ -80,10 +80,11 @@ Apply domain skills through your policy lens:
 
 ## Key Fields to Analyze
 
-- `policy_friction` — Primary field for policy-related friction
-- `solution_by_education` — Customer communication improvements
-- `solution_by_ops` — Operational policy adjustments
-- `call_reason` → `granular_theme_l5` — Call reason hierarchy for context
+The LLM only receives these two pre-processed columns per call record:
+- `digital_friction` — LLM-processed friction analysis (look for policy signals: regulatory, compliance, internal rules, eligibility constraints)
+- `key_solution` — LLM-processed solution summary (look for policy-related fixes: rule simplification, exception handling, better disclosure)
+
+Grouping columns (`call_reason`, `broad_theme_l3`, `granular_theme_l5`) provide context about which bucket you're analyzing but are NOT individual call records.
 
 ## Analysis Approach
 

@@ -52,9 +52,9 @@ When analyzing payment & transfer issues, follow this structure:
 1. Categorize by failure type...
 ```
 
-### 2.2 Merged Supervisor (No Separate Planner)
+### 2.2 Supervisor + Planner (Separate Agents)
 
-The Supervisor generates `PlanStep`, executes it, and updates progress in a single pass. This halves latency and cost vs a separate Planner agent. Can be re-split later if planning logic becomes heavy.
+The Supervisor handles intent classification, routing, and plan execution. The Planner creates structured execution plans from confirmed objectives. Keeping them separate lets each prompt stay focused and testable.
 
 ### 2.3 AgentFactory Class
 
@@ -76,7 +76,7 @@ Raw DataFrames and large text blobs are stored in a session-scoped **DataStore**
 
 Agents output structured, scored findings — not free-text. Each finding includes `impact_score` (volume × friction_severity), `ease_score` (inverse complexity), and `confidence`.
 
-### 2.8 Multi-Dimensional Friction Analysis (4-Lens Parallel Subgraph)
+### 2.8 Multi-Dimensional Friction Analysis (4-Lens Parallel via asyncio.gather)
 
 Instead of a single Business Analyst doing all analysis, **4 independent friction lens agents** examine the same data in parallel through distinct lenses:
 - **Digital** — product/UX failures
@@ -86,12 +86,22 @@ Instead of a single Business Analyst doing all analysis, **4 independent frictio
 
 A **Synthesizer Agent** merges the 4 outputs, detects dominant drivers, ranks by impact × ease, and flags multi-factor themes.
 
-### 2.9 Parallel Reporting Subgraph
+Parallelism is implemented via `asyncio.gather` inside a composite `friction_analysis` graph node (no LangGraph Send API).
+
+**LLM Context Optimization**: Friction agents only receive `digital_friction` and `key_solution` columns (configured via `LLM_ANALYSIS_COLUMNS`). These two LLM-processed columns summarize each call effectively, keeping context small for 10-12K records.
+
+**Intelligent Bucketing**: Data is grouped hierarchically using `GROUP_BY_COLUMNS` (configurable order). Buckets smaller than `MIN_BUCKET_SIZE` are merged into "Other" (tail collection). Buckets larger than `MAX_BUCKET_SIZE` are sub-bucketed by the next column in the hierarchy. All thresholds configurable in `config.py`.
+
+### 2.9 Parallel Reporting Subgraph (via asyncio.gather)
 
 Instead of a single Report Analyst, **3 specialized agents** work in parallel:
-- **Narrative Agent** — executive storytelling
+- **Narrative Agent** — Presentation Architect: produces structured JSON slide plan (slide types, titles, points, visual suggestions)
 - **Data Visualization Agent** — chart generation via code execution
-- **Formatting Agent** — assembles everything into Markdown + PPT
+- **Formatting Agent** — assembles slide plan + chart images into template-based PPTX + Markdown + filtered CSV
+
+PPTX supports two modes: external `.pptx` template (Citi-branded) or code-based defaults with brand styling.
+
+Parallelism is implemented via `asyncio.gather` inside a composite `report_generation` graph node.
 
 ### 2.10 Scope Detector as Dedicated Classification Node
 
@@ -154,9 +164,9 @@ User (Chainlit UI)
 ```
 Supervisor → Data Analyst → [checkpoint] → Supervisor
 
-  → friction_analysis (Send API fan-out):
+  → friction_analysis (asyncio.gather composite node):
       ├── Digital Friction Agent ──┐
-      ├── Operations Agent ────────┤  (parallel execution)
+      ├── Operations Agent ────────┤  (asyncio.gather parallel)
       ├── Communication Agent ─────┤
       └── Policy Agent ────────────┘
                                    ↓
@@ -164,12 +174,12 @@ Supervisor → Data Analyst → [checkpoint] → Supervisor
                                    ↓
   → Supervisor → [checkpoint]
 
-  → report_generation (Send API fan-out):
-      ├── Narrative Agent ─────────┐  (parallel execution)
+  → report_generation (asyncio.gather composite node):
+      ├── Narrative Agent ─────────┐  (asyncio.gather parallel)
       ├── Data Visualization Agent ┤
       └───────────────────────────-┘
                                    ↓
-                      Formatting Agent (assembles Markdown + PPT)
+                      Formatting Agent (assembles Markdown + PPT + filtered CSV)
                                    ↓
   → Supervisor → Delivery (downloads + Q&A mode)
 ```
@@ -197,7 +207,7 @@ AgenticAnalytics/
 ├── agents/
 │   ├── __init__.py
 │   ├── state.py                        # AnalyticsState TypedDict + all structured types
-│   ├── graph.py                        # Main StateGraph with Send API fan-outs
+│   ├── graph.py                        # Main StateGraph with asyncio.gather composite nodes
 │   ├── nodes.py                        # Agent node functions (skill injection + state writing)
 │   └── definitions/                    # Agent definitions as Markdown
 │       ├── supervisor.md               # Orchestrator (plans, routes, checkpoints)
@@ -225,7 +235,7 @@ AgenticAnalytics/
 │   ├── __init__.py                     # Tool registry + analysis/critique/supervisor/chart tools
 │   ├── data_tools.py                   # load_dataset, filter_data, bucket_data, sample_data, get_distribution
 │   ├── metrics.py                      # MetricsEngine: deterministic computations
-│   └── report_tools.py                 # generate_markdown_report, export_to_pptx
+│   ├── report_tools.py                 # generate_markdown_report, export_to_pptx, export_filtered_csv
 ├── utils/
 │   ├── __init__.py
 │   └── pptx_export.py                  # Markdown → PowerPoint converter
@@ -298,8 +308,10 @@ AgenticAnalytics/
 
 ### 5.10 Narrative Agent (`agents/definitions/narrative_agent.md`)
 - **Tools**: `[get_findings_summary]`
-- **Role**: Executive Storyteller — transforms findings into compelling narratives
-- **Produces**: executive_summary (under 200 words), theme_narratives, quick_wins_highlight
+- **Role**: Presentation Architect — transforms findings into a structured JSON slide plan
+- **Slide types**: title, key_summary, theme_detail, impact_ease, recommendations, appendix
+- **Visual suggestions**: friction_distribution, impact_ease_scatter, driver_breakdown, preventability_bar, volume_treemap
+- **Produces**: Structured slide plan JSON (not prose) that drives PPTX generation
 
 ### 5.11 Data Visualization Agent (`agents/definitions/dataviz_agent.md`)
 - **Tools**: `[analyze_bucket, execute_chart_code]`
@@ -308,9 +320,10 @@ AgenticAnalytics/
 - **Saves**: chart image files to `data/` directory
 
 ### 5.12 Formatting Agent (`agents/definitions/formatting_agent.md`)
-- **Tools**: `[generate_markdown_report, export_to_pptx]`
-- **Role**: Report assembly — combines narrative + charts into final Markdown + PPT
-- **Report sections**: Executive Summary, Multi-Dimensional Findings, Charts, Impact vs Ease Matrix, Recommendations, Data Appendix
+- **Tools**: `[generate_markdown_report, export_to_pptx, export_filtered_csv]`
+- **Role**: Report assembly — receives Narrative Agent's slide plan JSON + DataViz chart paths
+- **Produces**: Template-based PPTX (via `export_to_pptx` with slide_plan_json), Markdown report, filtered CSV
+- **PPTX modes**: External .pptx template (if available) or code-based defaults with brand styling
 
 ### 5.13 Critique (`agents/definitions/critique.md`)
 - **Tools**: `[validate_findings, score_quality]`
@@ -390,7 +403,7 @@ TOOL_REGISTRY = {
     # Analysis tools
     "analyze_bucket", "apply_skill", "get_findings_summary",
     # Report tools
-    "generate_markdown_report", "export_to_pptx",
+    "generate_markdown_report", "export_to_pptx", "export_filtered_csv",
     # Critique tools
     "validate_findings", "score_quality",
     # Supervisor tools
@@ -474,51 +487,37 @@ class AnalyticsState(TypedDict):
 
 ## 9. Graph Assembly (`agents/graph.py`)
 
-### Node Registry (16 nodes)
-| Node | Source |
+### Node Registry (10 graph nodes)
+
+Individual agents are called internally by composite nodes, not as separate graph nodes.
+
+| Graph Node | Implementation |
 |---|---|
 | `supervisor` | AgentFactory + `supervisor.md` |
+| `planner` | AgentFactory + `planner.md` |
 | `data_analyst` | AgentFactory + `data_analyst.md` |
-| `business_analyst` | AgentFactory + `business_analyst.md` (with skill_loader) |
-| `digital_friction_agent` | AgentFactory + `digital_friction_agent.md` (with skill_loader) |
-| `operations_agent` | AgentFactory + `operations_agent.md` (with skill_loader) |
-| `communication_agent` | AgentFactory + `communication_agent.md` (with skill_loader) |
-| `policy_agent` | AgentFactory + `policy_agent.md` (with skill_loader) |
-| `synthesizer_agent` | AgentFactory + `synthesizer_agent.md` |
 | `report_analyst` | AgentFactory + `report_analyst.md` |
-| `narrative_agent` | AgentFactory + `narrative_agent.md` |
-| `dataviz_agent` | AgentFactory + `dataviz_agent.md` |
-| `formatting_agent` | AgentFactory + `formatting_agent.md` |
 | `critique` | AgentFactory + `critique.md` |
-| `scope_detector` | Direct LLM call with `with_structured_output` |
 | `user_checkpoint` | Simple passthrough (graph pauses via `interrupt_before`) |
+| `friction_analysis` | **Composite node**: asyncio.gather runs 4 friction agents in parallel, then Synthesizer |
+| `report_generation` | **Composite node**: asyncio.gather runs Narrative + DataViz in parallel, then Formatting |
 
 ### Edge Topology
 ```
 START → supervisor
 
-supervisor → {data_analyst, business_analyst, report_analyst, critique,
-              scope_detector, user_checkpoint, __end__}         (string routes)
-supervisor → [digital, ops, comm, policy]                       (Send fan-out: friction_analysis)
-supervisor → [narrative, dataviz]                                (Send fan-out: report_generation)
+supervisor → {data_analyst, planner, report_analyst, critique,
+              friction_analysis, report_generation,
+              user_checkpoint, __end__}         (conditional string routes)
 
-digital_friction_agent → synthesizer_agent
-operations_agent → synthesizer_agent
-communication_agent → synthesizer_agent
-policy_agent → synthesizer_agent
-synthesizer_agent → supervisor
-
-narrative_agent → formatting_agent
-dataviz_agent → formatting_agent
-formatting_agent → supervisor
+friction_analysis → supervisor       (composite: 4 agents + synthesizer internally)
+report_generation → supervisor       (composite: narrative + dataviz + formatting internally)
 
 data_analyst → supervisor
-business_analyst → supervisor
+planner → supervisor
 report_analyst → supervisor
 critique → supervisor
 user_checkpoint → supervisor
-
-scope_detector → {supervisor, __end__}
 ```
 
 ### Context Injection (`agents/nodes.py`)
@@ -560,21 +559,19 @@ Each friction/reporting agent writes to its dedicated state field via `AGENT_STA
 
 ## 11. Data Schema (CSV Columns)
 
-| Column | Description |
-|---|---|
-| `exact_problem_statement` | Customer's exact problem from the call |
-| `digital_friction` | Digital channel friction analysis |
-| `policy_friction` | Policy-related friction analysis |
-| `solution_by_ui` | Solution via UI/UX changes |
-| `solution_by_ops` | Solution via operational changes |
-| `solution_by_education` | Solution via customer education |
-| `solution_by_technology` | Solution via technology fixes |
-| `call_reason` | L1 — Top-level call reason |
-| `call_reason_l2` | L2 — Secondary call reason |
-| `broad_theme_l3` | L3 — Broad theme |
-| `intermediate_theme_l4` | L4 — Intermediate theme |
-| `granular_theme_l5` | L5 — Granular theme |
-| `friction_driver_category` | Category of friction driver |
+| Column | Description | LLM Access |
+|---|---|---|
+| `digital_friction` | Digital channel friction analysis | **Yes** (LLM_ANALYSIS_COLUMNS) |
+| `key_solution` | LLM-processed solution summary | **Yes** (LLM_ANALYSIS_COLUMNS) |
+| `exact_problem_statement` | Customer's exact problem from the call | Metadata only |
+| `call_reason` | L1 — Top-level call reason | GROUP_BY_COLUMNS |
+| `broad_theme_l3` | L3 — Broad theme | GROUP_BY_COLUMNS |
+| `granular_theme_l5` | L5 — Granular theme | GROUP_BY_COLUMNS |
+| `call_reason_l2` | L2 — Secondary call reason | Metadata only |
+| `intermediate_theme_l4` | L4 — Intermediate theme | Metadata only |
+| `friction_driver_category` | Category of friction driver | Metadata only |
+
+**LLM Context Rule**: Only `digital_friction` and `key_solution` are sent to friction agents via `analyze_bucket` and `sample_data` tools. Grouping columns provide context for which bucket is being analyzed. All other columns are available via data tools but not passed to LLM analysis.
 
 System auto-discovers additional columns at runtime via `load_dataset` tool.
 
@@ -673,7 +670,7 @@ Graph pauses at `user_checkpoint` node for user input after:
 
 ### Phase 6: Graph & Nodes (2 files)
 33. `agents/nodes.py` — Node functions (skill injection, context injection, state writing)
-34. `agents/graph.py` — Main StateGraph with Send API fan-outs
+34. `agents/graph.py` — Main StateGraph with asyncio.gather composite nodes
 
 ### Phase 7: UI & Integration (4 files)
 35. `ui/components.py` — Banner, reasoning steps, waiting indicator, download buttons
@@ -691,7 +688,7 @@ Graph pauses at `user_checkpoint` node for user input after:
 4. **DataStore test**: Store/retrieve DataFrames and text; verify metadata-only in state
 5. **Metrics test**: `MetricsEngine` methods produce correct deterministic results
 6. **Tool test**: Each tool works independently on sample data
-7. **Graph compilation**: `build_graph()` compiles with all 16 nodes, no errors
+7. **Graph compilation**: `build_graph()` compiles with all 10 graph nodes (including 2 composite nodes), no errors
 8. **Agent isolation**: Each friction lens stays in its lane
 9. **Scope Detector test**: Returns correct `ScopeDecision` for in/out-of-scope queries
 10. **ExecutionTrace test**: Traces capture step_id, agent, tools_used, latency_ms

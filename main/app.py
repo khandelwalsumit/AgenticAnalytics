@@ -38,7 +38,7 @@ from chainlit.input_widget import MultiSelect
 from langchain_core.messages import HumanMessage
 
 from agents.graph import build_graph
-from config import AGENTS_DIR, CACHE_DIR, DATA_DIR, VERBOSE
+from config import AGENTS_DIR, CACHE_DIR, DATA_DIR, DEFAULT_CSV_PATH, VERBOSE
 from core.agent_factory import AgentFactory
 from core.data_store import DataStore
 from core.file_data_layer import FileDataLayer
@@ -337,11 +337,21 @@ async def on_chat_start():
     _apply_selection_to_state(state, list(DEFAULT_SELECTED_AGENTS))
     await _send_agent_settings(list(DEFAULT_SELECTED_AGENTS))
 
+    # Auto-load hardcoded CSV if it exists
+    csv_path = Path(DEFAULT_CSV_PATH)
+    if csv_path.exists():
+        state["dataset_path"] = str(csv_path)
+        cl.user_session.set("state", state)
+        dataset_note = f"Dataset pre-loaded: `{csv_path.name}` ({csv_path.stat().st_size // 1024}KB)"
+    else:
+        dataset_note = "No default dataset found. Upload a CSV or set `DEFAULT_CSV_PATH` in config."
+
     await cl.Message(
         content=(
             "## Welcome to AgenticAnalytics\n\n"
-            "Upload a CSV or send a message to begin your analysis.\n\n"
-            "The system will guide you through **data discovery -> friction analysis -> reporting** "
+            f"{dataset_note}\n\n"
+            "Send a message to begin your analysis (e.g., *\"What are the key issues ATT card customers face regarding rewards?\"*).\n\n"
+            "The system will guide you through **data discovery → friction analysis → reporting** "
             "with checkpoints for your review at each stage."
         )
     ).send()

@@ -77,6 +77,14 @@ Apply domain skills through your communication lens:
 - **profile_settings**: Was update confirmation sent? Was verification status communicated? Were document requirements listed before submission?
 - **transaction_statement**: Was statement availability notified? Were unusual transactions flagged proactively? Was billing cycle change communicated?
 
+## Key Fields to Analyze
+
+The LLM only receives these two pre-processed columns per call record:
+- `digital_friction` — LLM-processed friction analysis (look for communication signals: missing notifications, unclear status, timing gaps)
+- `key_solution` — LLM-processed solution summary (look for communication fixes: proactive alerts, expectation setting, status updates)
+
+Grouping columns (`call_reason`, `broad_theme_l3`, `granular_theme_l5`) provide context about which bucket you're analyzing but are NOT individual call records.
+
 ## Analysis Approach
 
 1. Use `analyze_bucket` to get distributions and samples

@@ -192,11 +192,9 @@ Actual output delta:
 
 ## 7) System Design Improvements (Your Change #2)
 
-1. Add a typed `NodeDelta` model (Pydantic/TypedDict) to validate every node return.
 2. Split control from payload:
    - control: `next_agent`, `requires_user_input`
    - payload: reasoning, tasks, artifacts, ai messages
 3. Add `checkpoint_id` for UI resume safety (avoid replaying old prompts).
 4. Add `last_completed_node` for reliable restart after disconnect.
 5. Normalize status enums for tasks and sub_agents:
-   - `todo | in_progress | done | blocked`

@@ -79,10 +79,11 @@ Apply domain skills through your operational lens:
 
 ## Key Fields to Analyze
 
-- `solution_by_ops` — Operational change recommendations
-- `solution_by_education` — Training and education needs
-- `exact_problem_statement` — To understand process breakdowns
-- `call_reason` → `granular_theme_l5` — Call reason hierarchy for volume context
+The LLM only receives these two pre-processed columns per call record:
+- `digital_friction` — LLM-processed friction analysis (look for operational signals: SLA, delays, manual steps)
+- `key_solution` — LLM-processed solution summary (look for ops-related fixes: process redesign, automation, training)
+
+Grouping columns (`call_reason`, `broad_theme_l3`, `granular_theme_l5`) provide context about which bucket you're analyzing but are NOT individual call records.
 
 ## Volume Impact Analysis
 

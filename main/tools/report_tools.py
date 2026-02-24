@@ -8,7 +8,7 @@ from pathlib import Path
 from langchain_core.tools import tool
 
 from core.data_store import DataStore
-from utils.pptx_export import markdown_to_pptx
+from utils.pptx_export import generate_pptx_from_slides, markdown_to_pptx
 
 _data_store: DataStore | None = None
 
@@ -80,30 +80,113 @@ def generate_markdown_report(
         metadata={"title": title, "sections": 5},
     )
 
-    return json.dumps({"report_key": key, "char_count": len(report)})
+    # Also save the markdown as a downloadable .md file
+    from config import DATA_DIR
+    md_path = Path(DATA_DIR) / f"report_{store.session_id}.md"
+    md_path.parent.mkdir(parents=True, exist_ok=True)
+    md_path.write_text(report, encoding="utf-8")
+
+    return json.dumps({
+        "report_key": key,
+        "char_count": len(report),
+        "markdown_path": str(md_path),
+    })
 
 
 @tool
-def export_to_pptx(report_key: str = "report_markdown", output_dir: str = "data") -> str:
-    """Export a markdown report to PowerPoint.
+def export_to_pptx(
+    slide_plan_json: str = "",
+    chart_paths_json: str = "",
+    report_key: str = "report_markdown",
+    output_dir: str = "",
+) -> str:
+    """Export analysis to PowerPoint using a structured slide plan or markdown fallback.
+
+    Preferred mode: pass ``slide_plan_json`` (from the Narrative Agent) and
+    ``chart_paths_json`` (from the DataViz Agent) to generate a template-based
+    PPTX with per-slide control.
+
+    Fallback mode: if ``slide_plan_json`` is empty, converts the markdown report
+    stored under ``report_key`` into a simple PPTX.
 
     Args:
-        report_key: DataStore key for the markdown report.
-        output_dir: Directory to save the .pptx file.
+        slide_plan_json: JSON string of the Narrative Agent's slide plan.
+                         Must contain a ``slides`` list. If empty, uses markdown fallback.
+        chart_paths_json: JSON string mapping visual_id → chart image file path.
+                          Example: ``{"friction_distribution": "data/friction_distribution.png"}``
+        report_key: DataStore key for the markdown report (used in fallback mode).
+        output_dir: Directory to save the .pptx file. Uses default data dir if empty.
 
     Returns:
         JSON with the path to the generated .pptx file.
     """
     store = _get_store()
-    markdown_content = store.get_text(report_key)
 
-    out_dir = Path(output_dir)
+    from config import DATA_DIR, PPTX_TEMPLATE_PATH
+    out_dir = Path(output_dir) if output_dir else Path(DATA_DIR)
     out_dir.mkdir(parents=True, exist_ok=True)
     output_path = out_dir / f"report_{store.session_id}.pptx"
 
-    markdown_to_pptx(markdown_content, str(output_path))
+    if slide_plan_json:
+        # Template-based mode — structured slide plan from Narrative Agent
+        try:
+            slide_plan = json.loads(slide_plan_json)
+        except json.JSONDecodeError as e:
+            return json.dumps({"error": f"Invalid slide_plan_json: {e}"})
+
+        chart_paths: dict[str, str] = {}
+        if chart_paths_json:
+            try:
+                chart_paths = json.loads(chart_paths_json)
+            except json.JSONDecodeError:
+                chart_paths = {}
+
+        template_path = PPTX_TEMPLATE_PATH if Path(PPTX_TEMPLATE_PATH).exists() else ""
+        generate_pptx_from_slides(slide_plan, chart_paths, str(output_path), template_path)
+    else:
+        # Legacy fallback — convert markdown report to PPTX
+        markdown_content = store.get_text(report_key)
+        markdown_to_pptx(markdown_content, str(output_path))
 
     return json.dumps({"pptx_path": str(output_path)})
 
 
-REPORT_TOOLS = [generate_markdown_report, export_to_pptx]
+@tool
+def export_filtered_csv(output_dir: str = "") -> str:
+    """Export the filtered dataset as a downloadable CSV file.
+
+    Args:
+        output_dir: Directory to save the CSV file. Uses default data dir if empty.
+
+    Returns:
+        JSON with the path to the exported CSV.
+    """
+    store = _get_store()
+
+    # Try filtered dataset first, fall back to main
+    try:
+        df = store.get_dataframe("filtered_dataset")
+        source = "filtered_dataset"
+    except KeyError:
+        try:
+            df = store.get_dataframe("main_dataset")
+            source = "main_dataset"
+        except KeyError:
+            return json.dumps({"error": "No dataset available for export"})
+
+    from config import DATA_DIR
+    out_dir = Path(output_dir) if output_dir else Path(DATA_DIR)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    output_path = out_dir / f"filtered_data_{store.session_id}.csv"
+
+    df.to_csv(output_path, index=False)
+
+    return json.dumps({
+        "csv_path": str(output_path),
+        "source": source,
+        "row_count": len(df),
+        "column_count": len(df.columns),
+    })
+
+
+REPORT_TOOLS = [generate_markdown_report, export_to_pptx, export_filtered_csv]
