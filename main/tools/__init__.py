@@ -276,32 +276,6 @@ def score_quality(
 
 
 # ------------------------------------------------------------------
-# Supervisor tool (delegate_to_agent is a conceptual routing tool)
-# ------------------------------------------------------------------
-
-
-@tool
-def delegate_to_agent(agent_name: str, task_description: str) -> str:
-    """Delegate a task to a specific agent or subgraph. Used by the Supervisor.
-
-    Args:
-        agent_name: Target agent or subgraph trigger (data_analyst, business_analyst,
-                    friction_analysis, report_generation, report_analyst, critique).
-        task_description: Description of what the agent should do.
-
-    Returns:
-        Confirmation of delegation.
-    """
-    valid_agents = [
-        "data_analyst", "business_analyst", "friction_analysis",
-        "report_generation", "report_analyst", "critique",
-    ]
-    if agent_name not in valid_agents:
-        return json.dumps({"error": f"Unknown agent: {agent_name}", "valid": valid_agents})
-    return json.dumps({"delegated_to": agent_name, "task": task_description})
-
-
-# ------------------------------------------------------------------
 # DataViz tool (chart code execution)
 # ------------------------------------------------------------------
 
@@ -348,7 +322,6 @@ def execute_chart_code(code: str, output_filename: str) -> str:
 
 ANALYSIS_TOOLS = [analyze_bucket, apply_skill, get_findings_summary]
 CRITIQUE_TOOLS = [validate_findings, score_quality]
-SUPERVISOR_TOOLS = [delegate_to_agent]
 CHART_TOOLS = [execute_chart_code]
 
 TOOL_REGISTRY: dict[str, Any] = {
@@ -365,6 +338,5 @@ TOOL_REGISTRY: dict[str, Any] = {
     "export_filtered_csv": export_filtered_csv,
     "validate_findings": validate_findings,
     "score_quality": score_quality,
-    "delegate_to_agent": delegate_to_agent,
     "execute_chart_code": execute_chart_code,
 }

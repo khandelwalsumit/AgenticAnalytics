@@ -65,6 +65,9 @@ _DECISION_TO_NEXT: dict[str, str] = {
     "execute": "",  # resolved from plan_tasks
 }
 
+# Safety: max consecutive supervisor→data_analyst loops before forcing progress
+MAX_SUPERVISOR_LOOPS = 2
+
 
 # ------------------------------------------------------------------
 # Text helpers
@@ -439,36 +442,125 @@ def _apply_structured_updates(
                 if data.get("analysis_objective"):
                     updates["analysis_objective"] = data["analysis_objective"]
 
-    # === DATA ANALYST ===
-    elif agent_name == "data_analyst" and isinstance(structured, DataAnalystOutput):
-        updates["supervisor_decision"] = structured.decision
-        updates["reasoning"] = [{"step_name": "Data Analyst", "step_text": structured.response}]
-        if structured.response:
-            updates["messages"] = [AIMessage(content=structured.response)]
-        logger.info("Data Analyst: decision=%s, confidence=%d", structured.decision, structured.confidence)
+    # === DATA ANALYST (ReAct agent — extracts state from tool results) ===
+    elif agent_name == "data_analyst":
+        # Parse the last AI message for JSON summary (fallback)
+        da_data = {}
+        if last_msg and hasattr(last_msg, "content"):
+            da_data = _parse_json(_text(last_msg.content))
+
+        da_decision = da_data.get("decision", "success")
+        da_response = da_data.get("response", _text(last_msg.content) if last_msg else "")
+        da_confidence = da_data.get("confidence", 80)
+
+        # DO NOT overwrite supervisor_decision — that's only for the supervisor.
+        # Instead, track what the data analyst reported in reasoning.
+        updates["reasoning"] = [{"step_name": "Data Analyst", "step_text": da_response}]
+        if da_response:
+            updates["messages"] = [AIMessage(content=da_response)]
+
+        # Extract filters_applied and themes from tool result messages
+        # (filter_data and bucket_data tools populate these)
+        _extract_data_analyst_state(state, updates)
+
+        logger.info("Data Analyst: decision=%s, confidence=%s", da_decision, da_confidence)
 
     # === SYNTHESIZER ===
-    elif agent_name == "synthesizer_agent" and isinstance(structured, SynthesizerOutput):
-        narrative = structured.summary.executive_narrative
-        updates.update({
-            "synthesis_result": structured.summary.model_dump(),
-            "findings": [f.model_dump() for f in structured.findings],
-            "reasoning": [{"step_name": "Synthesizer Agent", "step_text": narrative}],
-        })
-        if narrative:
-            updates["messages"] = [AIMessage(content=narrative)]
-        logger.info("Synthesizer: %d findings, confidence=%d", len(structured.findings), structured.confidence)
+    elif agent_name == "synthesizer_agent":
+        if isinstance(structured, SynthesizerOutput):
+            narrative = structured.summary.executive_narrative
+            updates.update({
+                "synthesis_result": structured.summary.model_dump(),
+                "findings": [f.model_dump() for f in structured.findings],
+                "reasoning": [{"step_name": "Synthesizer Agent", "step_text": narrative}],
+            })
+            if narrative:
+                updates["messages"] = [AIMessage(content=narrative)]
+            logger.info("Synthesizer: %d findings, confidence=%d", len(structured.findings), structured.confidence)
+        elif last_msg and hasattr(last_msg, "content"):
+            # ReAct fallback: parse JSON from last message
+            data = _parse_json(_text(last_msg.content))
+            if data.get("summary"):
+                updates["synthesis_result"] = data["summary"]
+            if data.get("findings"):
+                updates["findings"] = data["findings"]
+            narrative = data.get("summary", {}).get("executive_narrative", _text(last_msg.content))
+            updates["reasoning"] = [{"step_name": "Synthesizer Agent", "step_text": narrative}]
+            if narrative:
+                updates["messages"] = [AIMessage(content=narrative)]
+            logger.info("Synthesizer (fallback): %d findings", len(data.get("findings", [])))
 
     # === CRITIQUE ===
-    elif agent_name == "critique" and isinstance(structured, CritiqueOutput):
-        text = f"Grade: {structured.grade} | Score: {structured.quality_score:.2f} | Decision: {structured.decision}\n{structured.summary}"
-        updates.update({
-            "critique_feedback": structured.model_dump(),
-            "quality_score": structured.quality_score,
-            "reasoning": [{"step_name": "Critique Agent", "step_text": text}],
-            "messages": [AIMessage(content=text)],
-        })
-        logger.info("Critique: grade=%s, score=%.2f, issues=%d", structured.grade, structured.quality_score, len(structured.issues))
+    elif agent_name == "critique":
+        if isinstance(structured, CritiqueOutput):
+            text = f"Grade: {structured.grade} | Score: {structured.quality_score:.2f} | Decision: {structured.decision}\n{structured.summary}"
+            updates.update({
+                "critique_feedback": structured.model_dump(),
+                "quality_score": structured.quality_score,
+                "reasoning": [{"step_name": "Critique Agent", "step_text": text}],
+                "messages": [AIMessage(content=text)],
+            })
+            logger.info("Critique: grade=%s, score=%.2f, issues=%d", structured.grade, structured.quality_score, len(structured.issues))
+        elif last_msg and hasattr(last_msg, "content"):
+            # ReAct fallback: parse JSON from last message
+            data = _parse_json(_text(last_msg.content))
+            quality_score = data.get("quality_score", data.get("overall_quality_score", 0.0))
+            grade = data.get("grade", "C")
+            decision = data.get("decision", "needs_revision")
+            summary_text = data.get("summary", _text(last_msg.content))
+            text = f"Grade: {grade} | Score: {quality_score:.2f} | Decision: {decision}\n{summary_text}"
+            updates.update({
+                "critique_feedback": data,
+                "quality_score": float(quality_score),
+                "reasoning": [{"step_name": "Critique Agent", "step_text": text}],
+                "messages": [AIMessage(content=text)],
+            })
+            logger.info("Critique (fallback): grade=%s, score=%.2f", grade, quality_score)
+
+
+def _extract_data_analyst_state(
+    state: AnalyticsState, updates: dict[str, Any]
+) -> None:
+    """Extract filters_applied and themes_for_analysis from tool results.
+
+    Scans messages for tool result messages from filter_data / bucket_data
+    and populates the corresponding state fields so the supervisor knows
+    extraction is complete.
+    """
+    messages = updates.get("messages", [])
+    for msg in messages:
+        if not hasattr(msg, "content"):
+            continue
+        content = _text(msg.content)
+        data = _parse_json(content)
+        if not data:
+            continue
+
+        # filter_data tool typically returns applied filters
+        if "filters" in data or "product" in data or "call_theme" in data:
+            filters = data.get("filters", {})
+            if not filters:
+                filters = {}
+                if data.get("product"):
+                    filters["product"] = data["product"]
+                if data.get("call_theme"):
+                    filters["call_theme"] = data["call_theme"]
+            if filters:
+                updates["filters_applied"] = filters
+                logger.info("Data Analyst: extracted filters_applied=%s", filters)
+
+        # bucket_data or distribution results may contain themes
+        if "themes" in data:
+            updates["themes_for_analysis"] = data["themes"]
+            logger.info("Data Analyst: extracted themes_for_analysis=%s", data["themes"])
+        if "buckets" in data:
+            updates["data_buckets"] = data["buckets"]
+
+    # If no tool results found, still mark that data_analyst ran
+    # by setting a minimal filters_applied so the supervisor knows.
+    if "filters_applied" not in updates and not state.get("filters_applied"):
+        updates["filters_applied"] = {"status": "extraction_attempted"}
+        logger.info("Data Analyst: no filter results found in tool messages, marking extraction_attempted")
 
 
 def _apply_supervisor(s: SupervisorOutput, state: AnalyticsState, updates: dict) -> None:
@@ -476,12 +568,38 @@ def _apply_supervisor(s: SupervisorOutput, state: AnalyticsState, updates: dict)
     updates["supervisor_decision"] = s.decision
     updates["reasoning"] = [{"step_name": "Supervisor", "step_text": s.reasoning}]
 
+    target_agent = _DECISION_TO_NEXT.get(s.decision, "__end__")
+
     if s.decision == "execute":
         plan, agent = _find_next_plan_agent(state.get("plan_tasks", []))
         updates["next_agent"] = agent
         updates["plan_tasks"] = plan
+    elif s.decision == "extract":
+        # Loop detection: count how many consecutive supervisor→data_analyst
+        # round-trips have already happened.
+        trace = state.get("execution_trace", [])
+        consecutive = 0
+        for entry in reversed(trace):
+            agent = entry.get("agent", "") if isinstance(entry, dict) else getattr(entry, "agent", "")
+            if agent == "data_analyst":
+                consecutive += 1
+            elif agent == "supervisor":
+                continue  # skip supervisor entries between
+            else:
+                break
+
+        if consecutive >= MAX_SUPERVISOR_LOOPS:
+            logger.warning(
+                "Supervisor loop detected: %d consecutive extract→data_analyst cycles. "
+                "Forcing transition to 'analyse' (planner).",
+                consecutive,
+            )
+            updates["next_agent"] = "planner"
+            updates["supervisor_decision"] = "analyse"
+        else:
+            updates["next_agent"] = target_agent
     else:
-        updates["next_agent"] = _DECISION_TO_NEXT.get(s.decision, "__end__")
+        updates["next_agent"] = target_agent
 
     if s.response:
         updates["messages"] = [AIMessage(content=s.response)]
@@ -502,6 +620,28 @@ def _apply_supervisor_fallback(raw: str, state: AnalyticsState, updates: dict) -
         plan, agent = _find_next_plan_agent(state.get("plan_tasks", []))
         updates["next_agent"] = agent
         updates["plan_tasks"] = plan
+    elif decision == "extract":
+        # Same loop detection as the structured path
+        trace = state.get("execution_trace", [])
+        consecutive = 0
+        for entry in reversed(trace):
+            agent = entry.get("agent", "") if isinstance(entry, dict) else getattr(entry, "agent", "")
+            if agent == "data_analyst":
+                consecutive += 1
+            elif agent == "supervisor":
+                continue
+            else:
+                break
+        if consecutive >= MAX_SUPERVISOR_LOOPS:
+            logger.warning(
+                "Supervisor fallback loop detected: %d consecutive extract→data_analyst cycles. "
+                "Forcing transition to 'analyse' (planner).",
+                consecutive,
+            )
+            updates["next_agent"] = "planner"
+            updates["supervisor_decision"] = "analyse"
+        else:
+            updates["next_agent"] = _DECISION_TO_NEXT[decision]
     else:
         updates["next_agent"] = _DECISION_TO_NEXT[decision]
 

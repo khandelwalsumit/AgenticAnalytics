@@ -8,9 +8,11 @@ model returns valid, parseable objects — eliminating the fragile
 Agents that use structured output:
   - supervisor        → SupervisorOutput
   - planner           → PlannerOutput
-  - data_analyst      → DataAnalystOutput
-  - synthesizer_agent → SynthesizerOutput
-  - critique          → CritiqueOutput
+
+Agents that use ReAct (tool-calling) with JSON fallback parsing:
+  - data_analyst      → DataAnalystOutput (schema kept for reference)
+  - synthesizer_agent → SynthesizerOutput (needs get_findings_summary tool)
+  - critique          → CritiqueOutput (needs validate_findings, score_quality tools)
 """
 
 from __future__ import annotations
@@ -214,7 +216,10 @@ class CritiqueOutput(BaseModel):
 STRUCTURED_OUTPUT_SCHEMAS: dict[str, type[BaseModel]] = {
     "supervisor": SupervisorOutput,
     "planner": PlannerOutput,
-    "data_analyst": DataAnalystOutput,
-    "synthesizer_agent": SynthesizerOutput,
-    "critique": CritiqueOutput,
+    # data_analyst removed: it needs ReAct (tool-calling) agent, not structured-only.
+    # DataAnalystOutput schema is kept for reference / fallback JSON parsing.
+    # synthesizer_agent removed: needs get_findings_summary tool.
+    # SynthesizerOutput schema is kept for reference / fallback JSON parsing.
+    # critique removed: needs validate_findings and score_quality tools.
+    # CritiqueOutput schema is kept for reference / fallback JSON parsing.
 }

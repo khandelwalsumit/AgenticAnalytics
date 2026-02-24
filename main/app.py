@@ -188,15 +188,7 @@ async def _send_resume_downloads_after_restore(state: dict[str, Any], delay_s: f
 
 
 def _runtime_flags_from_text(text: str) -> dict[str, Any]:
-    """Parse lightweight runtime controls from a user message.
 
-    Supported:
-    - /inject timeout
-    - /inject auth
-    - /inject token
-    - /auto on
-    - /auto off
-    """
     flags: dict[str, Any] = {}
     parts = (text or "").strip().lower().split()
     if len(parts) >= 2 and parts[0] == "/inject":
@@ -340,21 +332,37 @@ async def on_chat_start():
     # Auto-load hardcoded CSV if it exists
     csv_path = Path(DEFAULT_CSV_PATH)
     if csv_path.exists():
+        import pandas as pd
+        data_store: DataStore = cl.user_session.get("data_store")
+        df = pd.read_csv(str(csv_path))
+        data_store.store_dataframe("main_dataset", df, metadata={
+            "source": str(csv_path),
+            "row_count": len(df),
+            "columns": list(df.columns),
+        })
         state["dataset_path"] = str(csv_path)
         cl.user_session.set("state", state)
-        dataset_note = f"Dataset pre-loaded: `{csv_path.name}` ({csv_path.stat().st_size // 1024}KB)"
-    else:
-        dataset_note = "No default dataset found. Upload a CSV or set `DEFAULT_CSV_PATH` in config."
 
-    await cl.Message(
-        content=(
-            "## Welcome to AgenticAnalytics\n\n"
-            f"{dataset_note}\n\n"
-            "Send a message to begin your analysis (e.g., *\"What are the key issues ATT card customers face regarding rewards?\"*).\n\n"
-            "The system will guide you through **data discovery → friction analysis → reporting** "
-            "with checkpoints for your review at each stage."
-        )
-    ).send()
+
+@cl.set_starters
+async def set_starters():
+    return [
+        cl.Starter(
+            label="ATT Promotion Issues",
+            message="Can you check what promotion related issues ATT customers are facing?",
+            icon="https://img.icons8.com/fluency/96/discount.png",
+        ),
+        cl.Starter(
+            label="Rewards Friction Analysis",
+            message="Analyze the key friction points ATT card customers face regarding rewards redemption",
+            icon="https://img.icons8.com/fluency/96/gift.png",
+        ),
+        cl.Starter(
+            label="Top Call Drivers",
+            message="What are the top call drivers and digital friction themes across all products?",
+            icon="https://img.icons8.com/fluency/96/phone.png",
+        ),
+    ]
 
 
 @cl.on_message
@@ -413,7 +421,8 @@ async def on_message(message: cl.Message):
     await reasoning_step.send()
 
     try:
-        async for event in graph.astream(state, config=config, stream_mode="updates"):
+        stream = graph.astream(state, config=config, stream_mode="updates")
+        async for event in stream:
             for node_name, node_output in event.items():
                 if node_name == "__end__":
                     continue
@@ -486,6 +495,8 @@ async def on_message(message: cl.Message):
         reasoning_step.status = "failed"
         await reasoning_step.update()
         await cl.Message(content=f"System error: {exc}", author="System").send()
+    finally:
+        await stream.aclose()
 
     cl.user_session.set("state", state)
     await save_analysis_state(thread_id or config["configurable"]["thread_id"], state)

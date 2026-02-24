@@ -30,6 +30,9 @@ from core.agent_factory import AgentFactory
 from core.skill_loader import SkillLoader
 from tools import TOOL_REGISTRY
 
+import chainlit as cl
+from ui.components import sync_task_list
+
 logger = logging.getLogger("agenticanalytics.graph")
 
 
@@ -147,6 +150,12 @@ def _merge_parallel_outputs(
     return merged
 
 
+async def _emit_task_list_update(tasks: list[dict[str, Any]]) -> None:
+    """Push an intermediate TaskList update to Chainlit UI."""
+    task_list: cl.TaskList | None = cl.user_session.get("task_list")
+    task_list = await sync_task_list(task_list, tasks)
+    cl.user_session.set("task_list", task_list)
+
 def build_graph(
     agent_factory: AgentFactory | None = None,
     skill_loader: SkillLoader | None = None,
@@ -209,6 +218,18 @@ def build_graph(
             "communication_agent", "policy_agent",
         ]
 
+        # --- Emit "in_progress" sub-agents to UI BEFORE running ---
+        sub_agents_before = _make_sub_agent_entries(
+            FRICTION_SUB_AGENTS, lens_ids, status="in_progress"
+        )
+        tasks_before = _set_task_sub_agents(
+            state.get("plan_tasks", []),
+            agent_name="friction_analysis",
+            sub_agents=sub_agents_before,
+            task_status="in_progress",
+        )
+        await _emit_task_list_update(tasks_before)
+
         # Run all 4 lens agents concurrently
         results = await asyncio.gather(
             digital_node(state),
@@ -241,13 +262,14 @@ def build_graph(
             "status": "in_progress",
         })
 
-        # Update plan_tasks with sub-agents
+        # --- Emit "lens done, synth in_progress" to UI ---
         tasks = _set_task_sub_agents(
             state.get("plan_tasks", []),
             agent_name="friction_analysis",
             sub_agents=sub_agents,
             task_status="in_progress",
         )
+        await _emit_task_list_update(tasks)
 
         # Build intermediate state for synthesizer
         synth_state = dict(state)
@@ -282,6 +304,20 @@ def build_graph(
         """Run narrative + dataviz in parallel, then formatting."""
         logger.info("Report generation: starting narrative + dataviz in parallel")
 
+        parallel_ids = ["narrative_agent", "dataviz_agent"]
+
+        # --- Emit "in_progress" sub-agents to UI BEFORE running ---
+        sub_agents_before = _make_sub_agent_entries(
+            REPORTING_SUB_AGENTS, parallel_ids, status="in_progress"
+        )
+        tasks_before = _set_task_sub_agents(
+            state.get("plan_tasks", []),
+            agent_name="report_generation",
+            sub_agents=sub_agents_before,
+            task_status="in_progress",
+        )
+        await _emit_task_list_update(tasks_before)
+
         # Run narrative and dataviz concurrently
         results = await asyncio.gather(
             narrative_node(state),
@@ -292,7 +328,6 @@ def build_graph(
         merged = _merge_parallel_outputs(state, list(results))
 
         # Build sub-agent entries with parallel results
-        parallel_ids = ["narrative_agent", "dataviz_agent"]
         sub_agents = []
         for agent_id, result in zip(parallel_ids, results):
             meta = REPORTING_SUB_AGENTS[agent_id]
@@ -314,13 +349,14 @@ def build_graph(
             "status": "in_progress",
         })
 
-        # Update plan_tasks with sub-agents
+        # --- Emit "parallel done, formatting in_progress" to UI ---
         tasks = _set_task_sub_agents(
             state.get("plan_tasks", []),
             agent_name="report_generation",
             sub_agents=sub_agents,
             task_status="in_progress",
         )
+        await _emit_task_list_update(tasks)
 
         # Build intermediate state for formatting
         fmt_state = dict(state)
@@ -426,5 +462,7 @@ def build_graph(
         checkpointer=checkpointer,
         interrupt_before=["user_checkpoint"],
     )
+    # Safety: explicit recursion limit to prevent infinite loops
+    compiled.recursion_limit = 25
 
     return compiled

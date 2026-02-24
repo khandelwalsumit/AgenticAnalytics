@@ -1,34 +1,102 @@
-"""AgentFactory: create LangGraph agents from markdown skill definitions.
+"""AgentFactory: parse agent .md definitions and create LangGraph agents.
 
 Two agent creation paths:
 
 1. **Structured output** — ``create_structured_chain()`` returns a reusable
-   ``LLM.with_structured_output(Schema)`` chain.  Used by ``make_agent_node``
-   at graph-build time so the binding is done once, not per invocation.
+   ``LLM.with_structured_output(Schema)`` chain.
 
 2. **ReAct (tool-using)** — ``make_agent()`` builds a LangGraph
-   ``create_react_agent`` that can call tools.  Used for agents that need
-   dynamic tool resolution.
-
-Both paths read agent definitions from ``.md`` files via ``parse_agent_md``.
+   ``create_react_agent`` that can call tools.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+import yaml
 from langchain_core.messages import AIMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
 
 from agents.schemas import STRUCTURED_OUTPUT_SCHEMAS
 from config import AGENTS_DIR
-from core.agent_loader import AgentSkill, load_agent
 from core.llm import get_llm
 
 
+# ------------------------------------------------------------------
+# Agent definition dataclass + parser
+# ------------------------------------------------------------------
+
+
+@dataclass
+class AgentSkill:
+    """Parsed agent definition from a markdown skill file."""
+
+    name: str
+    description: str
+    system_prompt: str
+    model: str = "gemini-2.5-flash"
+    temperature: float = 0.1
+    top_p: float = 0.95
+    max_tokens: int = 8192
+    tools: list[str] = field(default_factory=list)
+    handoffs: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    source_file: str = ""
+
+
+def _split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
+    """Return parsed YAML frontmatter and markdown body."""
+    if not text.startswith("---"):
+        return {}, text.strip()
+
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return {}, text.strip()
+
+    raw = parts[1].strip()
+    body = parts[2].strip()
+    frontmatter = yaml.safe_load(raw) if raw else {}
+    if not isinstance(frontmatter, dict):
+        frontmatter = {}
+    return frontmatter, body
+
+
+def load_agent(filepath: str | Path) -> AgentSkill:
+    """Load a single agent definition from disk."""
+    path = Path(filepath)
+    text = path.read_text(encoding="utf-8")
+    fm, body = _split_frontmatter(text)
+
+    return AgentSkill(
+        name=fm.get("name", path.stem),
+        description=fm.get("description", ""),
+        system_prompt=body,
+        model=fm.get("model", "gemini-2.5-flash"),
+        temperature=fm.get("temperature", 0.1),
+        top_p=fm.get("top_p", 0.95),
+        max_tokens=fm.get("max_tokens", 8192),
+        tools=fm.get("tools") or [],
+        handoffs=fm.get("handoffs") or [],
+        metadata=fm.get("metadata", {}),
+        source_file=str(path),
+    )
+
+
+def load_all_agents(agents_dir: str | Path) -> dict[str, AgentSkill]:
+    """Load all markdown agent definitions from a directory."""
+    root = Path(agents_dir)
+    return {skill.name: skill for path in sorted(root.glob("*.md")) for skill in [load_agent(path)]}
+
+
+# ------------------------------------------------------------------
+# Factory
+# ------------------------------------------------------------------
+
+
 class AgentFactory:
-    """Reads agent markdown files and instantiates LangGraph agents."""
+    """Reads agent .md files and creates LangGraph agents."""
 
     def __init__(
         self,
@@ -41,21 +109,14 @@ class AgentFactory:
         self.tool_registry = tool_registry or {}
         self._cache: dict[str, AgentSkill] = {}
 
-    # -- Parsing -------------------------------------------------------------
-
     def parse_agent_md(self, name: str) -> AgentSkill:
         """Parse an agent markdown file into AgentSkill (cached)."""
         if name not in self._cache:
             path = self.definitions_dir / f"{name}.md"
-            if not path.exists():
-                raise FileNotFoundError(f"Agent definition not found: {path}")
             self._cache[name] = load_agent(path)
         return self._cache[name]
 
-    # -- Internal helpers ----------------------------------------------------
-
     def _create_llm(self, name: str) -> Any:
-        """Instantiate an LLM from the agent's .md config."""
         cfg = self.parse_agent_md(name)
         return self.llm_factory(
             model=cfg.model,
@@ -65,43 +126,16 @@ class AgentFactory:
         )
 
     def _resolve_tools(self, tool_names: list[str]) -> list[Callable]:
-        """Resolve tool names to callables from registry."""
-        resolved: list[Callable] = []
-        for name in tool_names:
-            if name not in self.tool_registry:
-                raise KeyError(
-                    f"Tool '{name}' not found in registry. "
-                    f"Available: {list(self.tool_registry.keys())}"
-                )
-            resolved.append(self.tool_registry[name])
-        return resolved
-
-    # -- Public API ----------------------------------------------------------
+        return [self.tool_registry[n] for n in tool_names]
 
     def create_structured_chain(self, name: str) -> tuple[Any, type]:
-        """Create a reusable ``with_structured_output`` chain for *name*.
-
-        Returns ``(chain, schema)`` — store the chain and reuse it across
-        invocations; wrap it in ``StructuredOutputAgent`` with a per-call
-        system prompt to execute.
-
-        Raises ``KeyError`` if *name* is not in ``STRUCTURED_OUTPUT_SCHEMAS``.
-        """
-        schema = STRUCTURED_OUTPUT_SCHEMAS.get(name)
-        if schema is None:
-            raise KeyError(
-                f"Agent '{name}' has no structured-output schema. "
-                f"Available: {list(STRUCTURED_OUTPUT_SCHEMAS.keys())}"
-            )
+        """Create a reusable ``with_structured_output`` chain."""
+        schema = STRUCTURED_OUTPUT_SCHEMAS[name]
         llm = self._create_llm(name)
         return llm.with_structured_output(schema), schema
 
     def make_agent(self, name: str, extra_context: str = "") -> Any:
-        """Create a ReAct (tool-using) agent from an agent definition.
-
-        For structured-output agents, use ``create_structured_chain`` instead
-        — it is faster because the chain is built once and reused.
-        """
+        """Create a ReAct (tool-using) agent."""
         config = self.parse_agent_md(name)
         prompt = config.system_prompt
         if extra_context:
@@ -116,38 +150,24 @@ class AgentFactory:
         )
 
 
-# ---------------------------------------------------------------------------
-# StructuredOutputAgent
-# ---------------------------------------------------------------------------
+# ------------------------------------------------------------------
+# StructuredOutputAgent — thin wrapper so node code is identical
+# for structured-output and ReAct agents
+# ------------------------------------------------------------------
 
 
 class StructuredOutputAgent:
-    """Thin async wrapper around ``LLM.with_structured_output(Schema)``.
-
-    Exposes ``ainvoke({"messages": [...]})`` so node code works identically
-    for structured-output and ReAct agents.
-
-    Result dict contains:
-      ``structured_output`` — the validated Pydantic object
-      ``messages``          — synthetic ``[AIMessage(json)]`` for message-chain compat
-    """
+    """Wraps ``LLM.with_structured_output(Schema)`` with async ainvoke."""
 
     __slots__ = ("name", "system_prompt", "chain", "output_schema")
 
-    def __init__(
-        self,
-        name: str,
-        system_prompt: str,
-        chain: Any,
-        output_schema: type,
-    ) -> None:
+    def __init__(self, name: str, system_prompt: str, chain: Any, output_schema: type) -> None:
         self.name = name
         self.system_prompt = system_prompt
         self.chain = chain
         self.output_schema = output_schema
 
     async def ainvoke(self, input: dict[str, Any]) -> dict[str, Any]:
-        """Invoke the structured-output chain."""
         messages = input.get("messages", [])
         full_messages = [SystemMessage(content=self.system_prompt)] + list(messages)
         result_obj = await self.chain.ainvoke(full_messages)
