@@ -266,7 +266,9 @@ def sample_data(bucket: str, n: int = 5) -> str:
     store = _get_store()
     n = min(n, MAX_SAMPLE_SIZE)
 
-    df = store.get_dataframe(bucket)
+    available_keys = store.list_keys()
+    actual_key = bucket if bucket in available_keys else "main_dataset"
+    df = store.get_dataframe(actual_key)
 
     # Only include LLM-relevant columns + grouping columns for context
     relevant_cols = list(dict.fromkeys(
@@ -307,7 +309,9 @@ def get_distribution(column: str, bucket: str = "") -> str:
     store = _get_store()
 
     if bucket:
-        df = store.get_dataframe(bucket)
+        available_keys = store.list_keys()
+        actual_key = bucket if bucket in available_keys else "main_dataset"
+        df = store.get_dataframe(actual_key)
     else:
         try:
             df = store.get_dataframe("filtered_dataset")

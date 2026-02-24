@@ -74,8 +74,12 @@ def analyze_bucket(bucket: str, questions: list[str]) -> str:
         return json.dumps({"error": "DataStore not initialized"})
 
     store = _data_store_ref
-    df = store.get_dataframe(bucket)
-    meta = store.get_metadata(bucket)
+    available = store.list_keys()
+    actual_key = bucket if bucket in available else "main_dataset"
+    if actual_key != bucket:
+        print(f"[analyze_bucket] Bucket '{bucket}' not found, using '{actual_key}'. Available: {available}")
+    df = store.get_dataframe(actual_key)
+    meta = store.get_metadata(actual_key)
 
     analysis_context: dict[str, Any] = {
         "bucket": bucket,

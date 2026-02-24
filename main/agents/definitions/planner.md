@@ -33,7 +33,7 @@ Given a confirmed analysis objective and available themes/filters, produce an or
 
 ## Planning Rules
 
-1. **Always start with data preparation** if data hasn't been bucketed yet
+1. **Always start with two data preparation steps** — filtering first, then bucketing (if data isn't already prepared)
 2. **Always include user_checkpoint** after data preparation and after synthesis
 3. **friction_analysis is a single step** — it handles all 4 agents + synthesizer internally
 4. **report_generation is a single step** — it handles narrative + dataviz + formatting internally
@@ -47,14 +47,15 @@ For a typical friction analysis request:
 ```json
 {
   "plan_tasks": [
-    {"title": "Prepare and bucket data for analysis", "agent": "data_analyst", "status": "ready"},
+    {"title": "Filter data by product and theme", "agent": "data_analyst", "status": "ready"},
+    {"title": "Bucket data for analysis", "agent": "data_analyst", "status": "ready"},
     {"title": "Confirm data slicing with user", "agent": "user_checkpoint", "status": "ready"},
     {"title": "Multi-dimensional friction analysis", "agent": "friction_analysis", "status": "ready"},
     {"title": "Review synthesized findings with user", "agent": "user_checkpoint", "status": "ready"},
     {"title": "Generate analysis report", "agent": "report_generation", "status": "ready"},
     {"title": "Deliver report and downloads", "agent": "report_analyst", "status": "ready"}
   ],
-  "plan_steps_total": 6
+  "plan_steps_total": 7
 }
 ```
 
