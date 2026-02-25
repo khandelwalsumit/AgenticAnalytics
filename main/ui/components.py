@@ -11,9 +11,12 @@ Matches the test blueprint graph contract:
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 import chainlit as cl
+
+from config import DATA_DIR
 
 
 # ------------------------------------------------------------------
@@ -120,31 +123,44 @@ async def clear_awaiting_prompt() -> None:
 
 
 async def send_downloads(
-    report_path: str,
-    data_path: str,
+    file_paths: list[str] | None = None,
+    report_path: str = "",
+    data_path: str = "",
     markdown_path: str = "",
 ) -> None:
-    """Render download action buttons for report and data files.
+    """Render download action buttons by looping over resolved files.
 
     Serves the actual generated files when they exist on disk.
     Falls back to a notification if files are missing.
     """
+    def _resolve(path: str) -> str:
+        raw = str(path or "").strip()
+        if not raw:
+            return ""
+        p = Path(raw)
+        if p.exists() and p.is_file():
+            return str(p.resolve())
+        if not p.is_absolute():
+            alt = Path(DATA_DIR) / p.name
+            if alt.exists() and alt.is_file():
+                return str(alt.resolve())
+        return ""
+
+    source_paths = list(file_paths or [])
+    if not source_paths:
+        source_paths = [markdown_path, report_path, data_path]
+
     elements: list[Any] = []
-
-    if markdown_path and os.path.isfile(markdown_path):
-        elements.append(
-            cl.File(name=os.path.basename(markdown_path), path=markdown_path, display="inline")
-        )
-
-    if report_path and os.path.isfile(report_path):
-        elements.append(
-            cl.File(name=os.path.basename(report_path), path=report_path, display="inline")
-        )
-
-    if data_path and os.path.isfile(data_path):
-        elements.append(
-            cl.File(name=os.path.basename(data_path), path=data_path, display="inline")
-        )
+    seen: set[str] = set()
+    for raw_path in source_paths:
+        resolved = _resolve(raw_path)
+        if not resolved or resolved in seen:
+            continue
+        seen.add(resolved)
+        if os.path.isfile(resolved):
+            elements.append(
+                cl.File(name=os.path.basename(resolved), path=resolved, display="inline")
+            )
 
     if not elements:
         await cl.Message(

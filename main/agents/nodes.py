@@ -415,6 +415,37 @@ def make_agent_node(
 # ------------------------------------------------------------------
 
 
+def _extract_agent_json(payload: Any) -> dict[str, Any]:
+    """Parse JSON payload from an agent state field."""
+    if not isinstance(payload, dict):
+        return {}
+    return _parse_json(payload.get("full_response", "")) or _parse_json(payload.get("output", ""))
+
+
+def _build_formatting_context(summary_ctx: dict[str, Any], state: AnalyticsState) -> dict[str, Any]:
+    """Build compact assembly context for formatting agent."""
+    narrative_json = _extract_agent_json(state.get("narrative_output", {}))
+    charts_json = _extract_agent_json(state.get("dataviz_output", {}))
+
+    chart_list = charts_json.get("charts", []) if isinstance(charts_json, dict) else []
+    chart_map = {
+        str(c.get("type", "")): str(c.get("file_path", ""))
+        for c in chart_list
+        if isinstance(c, dict) and c.get("type")
+    }
+
+    return {
+        "summary": summary_ctx,
+        "filters_applied": state.get("filters_applied", {}),
+        "narrative_plan": narrative_json,
+        # Back-compat with prompt wording expecting narrative.full_response/charts mapping.
+        "narrative": {"full_response": json.dumps(narrative_json, default=str)},
+        "charts": chart_list,
+        "chart_map": chart_map,
+        "chart_count": len(chart_list),
+    }
+
+
 def _build_extra_context(
     agent_name: str,
     state: AnalyticsState,
@@ -547,9 +578,12 @@ def _build_extra_context(
                 "themes": compact_themes,
                 "findings": compact_findings,
                 "filters_applied": state.get("filters_applied", {}),
+                "report_file_path": state.get("report_file_path", ""),
+                "markdown_file_path": state.get("markdown_file_path", ""),
+                "data_file_path": state.get("data_file_path", ""),
             }
             parts = [
-                "\n\n## Analysis Context\nUse this data to populate the report sections.\n",
+                "\n\n## Analysis Context\nUse this data to verify and deliver report artifacts.\n",
                 json.dumps(ctx, indent=2, default=str),
             ]
             if isinstance(retry_ctx, dict) and retry_ctx.get("agent") == agent_name:
@@ -564,34 +598,7 @@ def _build_extra_context(
             "filters_applied": state.get("filters_applied", {}),
         }
         if agent_name == "formatting_agent":
-            narrative_raw = state.get("narrative_output", {})
-            charts_raw = state.get("dataviz_output", {})
-
-            narrative_json: dict[str, Any] = {}
-            if isinstance(narrative_raw, dict):
-                narrative_json = _parse_json(narrative_raw.get("full_response", "")) or _parse_json(narrative_raw.get("output", ""))
-
-            charts_json: dict[str, Any] = {}
-            if isinstance(charts_raw, dict):
-                charts_json = _parse_json(charts_raw.get("full_response", "")) or _parse_json(charts_raw.get("output", ""))
-
-            chart_list = charts_json.get("charts", []) if isinstance(charts_json, dict) else []
-            chart_map = {
-                str(c.get("type", "")): str(c.get("file_path", ""))
-                for c in chart_list
-                if isinstance(c, dict) and c.get("type")
-            }
-            # Formatting needs assembly inputs, not full analytic payloads.
-            ctx = {
-                "summary": summary_ctx,
-                "filters_applied": state.get("filters_applied", {}),
-                "narrative_plan": narrative_json,
-            }
-            # Back-compat with prompt wording that expects narrative.full_response/charts mapping.
-            ctx["narrative"] = {"full_response": json.dumps(narrative_json, default=str)}
-            ctx["charts"] = chart_list
-            ctx["chart_map"] = chart_map
-            ctx["chart_count"] = len(ctx["charts"]) if isinstance(ctx["charts"], list) else 0
+            ctx = _build_formatting_context(summary_ctx, state)
 
         rules = ""
         if agent_name == "narrative_agent":

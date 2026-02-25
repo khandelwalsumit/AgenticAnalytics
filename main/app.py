@@ -18,7 +18,17 @@ from chainlit.input_widget import MultiSelect
 from langchain_core.messages import AIMessage, HumanMessage
 
 from agents.graph import build_graph
-from config import AGENTS_DIR, CACHE_DIR, DATA_DIR, DEFAULT_CSV_PATH, LOG_LEVEL, LOG_FORMAT, LOG_DATE_FORMAT, VERBOSE
+from config import (
+    AGENTS_DIR,
+    CACHE_DIR,
+    DATA_INPUT_DIR,
+    DATA_OUTPUT_DIR,
+    DEFAULT_CSV_PATH,
+    LOG_LEVEL,
+    LOG_FORMAT,
+    LOG_DATE_FORMAT,
+    VERBOSE,
+)
 from core.agent_factory import AgentFactory
 from core.data_store import DataStore
 from core.file_data_layer import FileDataLayer
@@ -37,8 +47,10 @@ logging.basicConfig(
     level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),
 )
 
-# Ensure Chainlit .files directory exists (prevents WinError 3)
+# Ensure runtime directories exist.
 Path(".files").mkdir(parents=True, exist_ok=True)
+Path(DATA_INPUT_DIR).mkdir(parents=True, exist_ok=True)
+Path(DATA_OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
 
 # ------------------------------------------------------------------
 # Config
@@ -126,6 +138,63 @@ def _build_filter_catalog(df: pd.DataFrame, max_unique: int = 50) -> dict[str, l
             values = sorted(df[col].dropna().unique().astype(str).tolist())
             catalog[col] = values
     return catalog
+
+
+def _safe_thread_id(raw: str) -> str:
+    value = str(raw or "").strip() or "unknown_thread"
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", value)[:80]
+
+
+def _find_input_csv() -> Path | None:
+    """Resolve input CSV from explicit path or data/input/*.csv."""
+    explicit = Path(DEFAULT_CSV_PATH)
+    if explicit.exists() and explicit.is_file():
+        return explicit
+
+    candidates = sorted(
+        [p for p in Path(DATA_INPUT_DIR).glob("*.csv") if p.is_file()],
+        key=lambda p: p.name.lower(),
+    )
+    return candidates[0] if candidates else None
+
+
+def _unique_input_destination(filename: str) -> Path:
+    """Create a non-colliding path under data/input for uploaded files."""
+    base = Path(DATA_INPUT_DIR)
+    candidate = base / Path(filename).name
+    if not candidate.exists():
+        return candidate
+
+    stem = candidate.stem
+    suffix = candidate.suffix
+    idx = 1
+    while True:
+        alt = base / f"{stem}_{idx}{suffix}"
+        if not alt.exists():
+            return alt
+        idx += 1
+
+
+def _collect_output_files(thread_id: str) -> list[str]:
+    """Collect final output files from data/output/<thread_id>."""
+    output_dir = Path(DATA_OUTPUT_DIR) / _safe_thread_id(thread_id)
+    if not output_dir.exists() or not output_dir.is_dir():
+        return []
+
+    preferred_order = [
+        output_dir / "complete_analysis.md",
+        output_dir / "report.pptx",
+        output_dir / "filtered_data.csv",
+    ]
+    files: list[str] = [str(p.resolve()) for p in preferred_order if p.exists() and p.is_file()]
+
+    known = {Path(p) for p in files}
+    extras = sorted(
+        [p for p in output_dir.iterdir() if p.is_file() and p not in known],
+        key=lambda p: p.name.lower(),
+    )
+    files.extend([str(p.resolve()) for p in extras])
+    return files
 
 
 def _create_runtime() -> tuple[str, DataStore, Any]:
@@ -261,9 +330,9 @@ async def on_chat_start():
     _apply_agent_selection(state, DEFAULT_SELECTED_AGENTS)
     await _send_agent_settings(DEFAULT_SELECTED_AGENTS)
 
-    # Auto-load CSV into DataStore
-    csv_path = Path(DEFAULT_CSV_PATH)
-    if csv_path.exists():
+    # Auto-load CSV from configured path or data/input.
+    csv_path = _find_input_csv()
+    if csv_path:
         data_store: DataStore = cl.user_session.get("data_store")
         df = pd.read_csv(str(csv_path))
         data_store.store_dataframe("main_dataset", df, metadata={
@@ -308,7 +377,7 @@ async def on_message(message: cl.Message):
     if message.elements:
         for el in message.elements:
             if hasattr(el, "path") and el.path:
-                dest = Path(DATA_DIR) / f"{cl.user_session.get('session_id', 'x')}_{Path(el.path).name}"
+                dest = _unique_input_destination(Path(el.path).name)
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(el.path, dest)
                 state["dataset_path"] = str(dest)
@@ -440,35 +509,18 @@ async def on_message(message: cl.Message):
                  state.get("plan_steps_completed", 0), state.get("plan_steps_total", 0))
 
         # --- Downloads ---
-        rpt = state.get("report_file_path", "")
-        dat = state.get("data_file_path", "")
-        mdf = state.get("markdown_file_path", "")
+        output_files = _collect_output_files(thread_id)
         log.info(
-            "Download check: report_file_path=%r  data_file_path=%r  markdown_file_path=%r  analysis_complete=%s",
-            rpt, dat, mdf, state.get("analysis_complete"),
+            "Download check: output_dir=%r files=%d analysis_complete=%s",
+            str(Path(DATA_OUTPUT_DIR) / _safe_thread_id(thread_id)),
+            len(output_files),
+            state.get("analysis_complete"),
         )
 
-        # Fallback: if paths are empty, scan the data directory for files from this session
-        if not rpt and not dat and not mdf:
-            session_id = cl.user_session.get("session_id", "")
-            if session_id:
-                data_dir = Path(DATA_DIR)
-                for f in data_dir.glob(f"*{session_id}*"):
-                    fname = f.name.lower()
-                    if fname.endswith(".pptx") and not rpt:
-                        rpt = str(f)
-                        log.info("Fallback: found PPTX %s", rpt)
-                    elif fname.endswith(".csv") and not dat:
-                        dat = str(f)
-                        log.info("Fallback: found CSV %s", dat)
-                    elif fname.endswith(".md") and not mdf:
-                        mdf = str(f)
-                        log.info("Fallback: found MD %s", mdf)
-
-        if rpt or dat or mdf:
-            await send_downloads(report_path=rpt, data_path=dat, markdown_path=mdf)
+        if output_files:
+            await send_downloads(file_paths=output_files)
         else:
-            log.warning("No download files found in state or on disk.")
+            log.warning("No download files found in data/output/%s.", _safe_thread_id(thread_id))
 
         if state.get("analysis_complete") and task_list:
             done = [{**t, "status": "done"} for t in state.get("plan_tasks", [])]

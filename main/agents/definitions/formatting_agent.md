@@ -207,6 +207,9 @@ Execute in this exact order:
    - `data_appendix`: the Pipeline Trace + data source info
 
 2. **`export_to_pptx`** — Pass `slide_plan_json` (convert sections to slide format) and `chart_paths_json`
+   - `slide_plan_json` must contain a top-level `slides` array with per-slide fields: `type`, `title`, `points`, `visual`, `notes`
+   - `chart_paths_json` must map chart visual ids to image file paths (e.g. `friction_distribution`, `impact_ease_scatter`, `driver_breakdown`)
+   - Do not call `export_to_pptx` with an empty `slide_plan_json`
 
 3. **`export_filtered_csv`** — Export the filtered data as CSV
 

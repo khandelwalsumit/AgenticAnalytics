@@ -1,0 +1,25 @@
+{
+    "status": "Running",
+    "tasks": [
+        {
+            "title": "Data extraction & bucketing",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "Multi-dimensional friction analysis (Digital Friction, Communication)",
+            "status": "ready",
+            "forId": null
+        },
+        {
+            "title": "Generate analysis report",
+            "status": "ready",
+            "forId": null
+        },
+        {
+            "title": "Deliver report and downloads",
+            "status": "ready",
+            "forId": null
+        }
+    ]
+}

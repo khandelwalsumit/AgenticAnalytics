@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from langchain_core.tools import tool
@@ -22,6 +23,34 @@ def _get_store() -> DataStore:
     if _data_store is None:
         raise RuntimeError("DataStore not initialized.")
     return _data_store
+
+
+def _safe_thread_id(raw: str) -> str:
+    text = str(raw or "").strip() or "unknown_thread"
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", text)[:80]
+
+
+def _get_thread_id(store: DataStore) -> str:
+    """Resolve thread_id from Chainlit session when available."""
+    try:
+        import chainlit as cl
+        thread_id = cl.user_session.get("thread_id")
+        if thread_id:
+            return _safe_thread_id(str(thread_id))
+    except Exception:
+        pass
+    return _safe_thread_id(store.session_id)
+
+
+def _get_artifact_dirs(store: DataStore) -> tuple[Path, Path, str]:
+    from config import DATA_OUTPUT_DIR, DATA_TMP_DIR
+
+    thread_id = _get_thread_id(store)
+    tmp_dir = Path(DATA_TMP_DIR) / thread_id
+    out_dir = Path(DATA_OUTPUT_DIR) / thread_id
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return tmp_dir, out_dir, thread_id
 
 
 @tool
@@ -51,6 +80,7 @@ def generate_markdown_report(
         JSON with the DataStore key for the stored report.
     """
     store = _get_store()
+    _tmp_dir, out_dir, _thread_id = _get_artifact_dirs(store)
 
     # Section order matches Narrative Agent's 4-section structure:
     # 1. Executive Summary → 2. Impact vs Ease → 3. Recommendations → 4. Theme Deep Dives
@@ -85,10 +115,8 @@ def generate_markdown_report(
         metadata={"title": title, "sections": 5},
     )
 
-    # Also save the markdown as a downloadable .md file
-    from config import DATA_DIR
-    md_path = Path(DATA_DIR) / f"report_{store.session_id}.md"
-    md_path.parent.mkdir(parents=True, exist_ok=True)
+    # Save markdown in the per-thread final output folder.
+    md_path = out_dir / "complete_analysis.md"
     md_path.write_text(report, encoding="utf-8")
 
     return json.dumps({
@@ -126,11 +154,12 @@ def export_to_pptx(
         JSON with the path to the generated .pptx file.
     """
     store = _get_store()
+    _tmp_dir, default_out_dir, _thread_id = _get_artifact_dirs(store)
 
-    from config import DATA_DIR, PPTX_TEMPLATE_PATH
-    out_dir = Path(output_dir) if output_dir else Path(DATA_DIR)
+    from config import PPTX_TEMPLATE_PATH
+    out_dir = Path(output_dir) if output_dir else default_out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
-    output_path = out_dir / f"report_{store.session_id}.pptx"
+    output_path = out_dir / "report.pptx"
 
     if slide_plan_json:
         # Template-based mode — structured slide plan from Narrative Agent
@@ -170,6 +199,7 @@ def export_filtered_csv(output_dir: str = "") -> str:
         JSON with the path to the exported CSV.
     """
     store = _get_store()
+    _tmp_dir, default_out_dir, _thread_id = _get_artifact_dirs(store)
 
     # Try filtered dataset first, fall back to main
     try:
@@ -182,10 +212,9 @@ def export_filtered_csv(output_dir: str = "") -> str:
         except KeyError:
             return json.dumps({"error": "No dataset available for export"})
 
-    from config import DATA_DIR
-    out_dir = Path(output_dir) if output_dir else Path(DATA_DIR)
+    out_dir = Path(output_dir) if output_dir else default_out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
-    output_path = out_dir / f"filtered_data_{store.session_id}.csv"
+    output_path = out_dir / "filtered_data.csv"
 
     df.to_csv(output_path, index=False)
 

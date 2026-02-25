@@ -19,12 +19,15 @@ ROOT_DIR = Path(__file__).resolve().parent
 AGENTS_DIR = ROOT_DIR / "agents" / "definitions"
 SKILLS_DIR = ROOT_DIR / "skills"
 DATA_DIR = ROOT_DIR / "data"
+DATA_INPUT_DIR = DATA_DIR / "input"
+DATA_TMP_DIR = DATA_DIR / "tmp"
+DATA_OUTPUT_DIR = DATA_DIR / "output"
 CACHE_DIR = ROOT_DIR / ".cache"
 THREAD_STATES_DIR = CACHE_DIR / "thread_states"
 
 # Hardcoded default CSV path — user sets this to their dataset location.
 # Override via DEFAULT_CSV_PATH env var or change this line directly.
-DEFAULT_CSV_PATH = os.getenv("DEFAULT_CSV_PATH", str(ROOT_DIR / "dummy_data.csv"))
+DEFAULT_CSV_PATH = os.getenv("DEFAULT_CSV_PATH", str(DATA_INPUT_DIR / "input.csv"))
 
 # -- Google AI Studio / Gemini -------------------------------------------------------
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")

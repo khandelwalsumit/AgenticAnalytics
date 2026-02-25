@@ -508,6 +508,51 @@ def _build_chart_paths_map(dataviz_json: dict[str, Any]) -> dict[str, str]:
     return chart_paths
 
 
+def _apply_structured_ppt_override(
+    merged_outputs: dict[str, Any],
+    formatting_result: dict[str, Any],
+) -> None:
+    """Force a structured PPT export from narrative/dataviz outputs.
+
+    Keeps report generation deterministic even when formatting agent falls back
+    to markdown-based PPT conversion.
+    """
+    narrative_payload = merged_outputs.get("narrative_output", {})
+    narrative_json = _extract_json(
+        narrative_payload.get("full_response", "") if isinstance(narrative_payload, dict) else ""
+    )
+    dataviz_payload = merged_outputs.get("dataviz_output", {})
+    dataviz_json = _extract_json(
+        dataviz_payload.get("full_response", "") if isinstance(dataviz_payload, dict) else ""
+    )
+
+    slide_plan = _build_structured_slide_plan(narrative_json)
+    chart_paths = _build_chart_paths_map(dataviz_json)
+
+    pptx_tool = TOOL_REGISTRY["export_to_pptx"]
+    pptx_raw = pptx_tool.invoke({
+        "slide_plan_json": json.dumps(slide_plan, default=str),
+        "chart_paths_json": json.dumps(chart_paths, default=str),
+        "report_key": str(formatting_result.get("report_markdown_key", "report_markdown")),
+    })
+    pptx_data = _extract_json(str(pptx_raw))
+    structured_pptx_path = _resolve_existing_path(str(pptx_data.get("pptx_path", "")))
+
+    if structured_pptx_path and _path_exists(structured_pptx_path):
+        formatting_result["report_file_path"] = structured_pptx_path
+        logger.info(
+            "Report generation: structured PPT export override applied (slides=%d, charts=%d): %s",
+            len(slide_plan.get("slides", [])) if isinstance(slide_plan, dict) else 0,
+            len(chart_paths),
+            structured_pptx_path,
+        )
+        return
+
+    logger.warning(
+        "Report generation: structured PPT export did not return a valid path. Keeping formatter output."
+    )
+
+
 def _validate_formatting(result: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     rpt = str(result.get("report_file_path", "")).strip()
@@ -1122,40 +1167,7 @@ def build_graph(
             len(fmt_result.get("messages", [])),
         )
 
-        # Deterministic PPT export: build slide plan + chart map from validated
-        # narrative/dataviz outputs so PPT is structured even if formatter used
-        # markdown fallback internally.
-        narrative_payload = merged.get("narrative_output", {})
-        narrative_json = _extract_json(
-            narrative_payload.get("full_response", "") if isinstance(narrative_payload, dict) else ""
-        )
-        dataviz_payload = merged.get("dataviz_output", {})
-        dataviz_json = _extract_json(
-            dataviz_payload.get("full_response", "") if isinstance(dataviz_payload, dict) else ""
-        )
-        slide_plan = _build_structured_slide_plan(narrative_json)
-        chart_paths = _build_chart_paths_map(dataviz_json)
-
-        pptx_tool = TOOL_REGISTRY["export_to_pptx"]
-        pptx_raw = pptx_tool.invoke({
-            "slide_plan_json": json.dumps(slide_plan, default=str),
-            "chart_paths_json": json.dumps(chart_paths, default=str),
-            "report_key": str(fmt_result.get("report_markdown_key", "report_markdown")),
-        })
-        pptx_data = _extract_json(str(pptx_raw))
-        structured_pptx_path = _resolve_existing_path(str(pptx_data.get("pptx_path", "")))
-        if structured_pptx_path and _path_exists(structured_pptx_path):
-            fmt_result["report_file_path"] = structured_pptx_path
-            logger.info(
-                "Report generation: structured PPT export override applied (slides=%d, charts=%d): %s",
-                len(slide_plan.get("slides", [])) if isinstance(slide_plan, dict) else 0,
-                len(chart_paths),
-                structured_pptx_path,
-            )
-        else:
-            logger.warning(
-                "Report generation: structured PPT export did not return a valid path. Keeping formatter output."
-            )
+        _apply_structured_ppt_override(merged, fmt_result)
 
         # Update formatting sub-agent to done
         fmt_summary = ""
