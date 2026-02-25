@@ -1142,7 +1142,10 @@ def _apply_supervisor(s: SupervisorOutput, state: AnalyticsState, updates: dict)
     else:
         updates["next_agent"] = target_agent
 
-    if s.response and not suppress_model_response:
+    # Only emit supervisor chat text for direct user answers/clarifications.
+    # For orchestration decisions (extract/analyse/execute), keep reasoning trace
+    # but suppress extra chat chatter to avoid repetitive status messages.
+    if s.response and not suppress_model_response and s.decision in ("answer", "clarify"):
         updates["messages"] = [AIMessage(content=s.response)]
 
     logger.info("Supervisor (structured): %s -> %s (confidence=%d)", s.decision, updates["next_agent"], s.confidence)

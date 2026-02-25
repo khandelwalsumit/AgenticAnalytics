@@ -508,6 +508,104 @@ def _build_chart_paths_map(dataviz_json: dict[str, Any]) -> dict[str, str]:
     return chart_paths
 
 
+def _build_executive_summary_message(narrative_payload: dict[str, Any]) -> str:
+    """Build a concise user-facing summary from narrative executive section."""
+    full = narrative_payload.get("full_response", "") if isinstance(narrative_payload, dict) else ""
+    data = _extract_json(full)
+    if not isinstance(data, dict):
+        return "Executive summary is ready in the final report artifacts."
+
+    sections = data.get("sections", [])
+    if not isinstance(sections, list):
+        return "Executive summary is ready in the final report artifacts."
+
+    exec_section = None
+    for sec in sections:
+        if isinstance(sec, dict) and str(sec.get("type", "")).strip() == "executive_summary":
+            exec_section = sec
+            break
+
+    if not isinstance(exec_section, dict):
+        return "Executive summary is ready in the final report artifacts."
+
+    content = exec_section.get("content", {})
+    if not isinstance(content, dict):
+        return "Executive summary is ready in the final report artifacts."
+
+    opening = str(content.get("opening", "")).strip()
+    issues = content.get("top_3_issues", []) if isinstance(content.get("top_3_issues", []), list) else []
+    highlights: list[str] = []
+    for issue in issues[:3]:
+        if not isinstance(issue, dict):
+            continue
+        title = str(issue.get("title", "")).strip()
+        calls = _safe_int(issue.get("call_volume", 0), 0)
+        if title:
+            highlights.append(f"{title} ({calls} calls)")
+
+    parts: list[str] = []
+    if opening:
+        parts.append(opening)
+    if highlights:
+        parts.append("Top priorities: " + ", ".join(highlights) + ".")
+    if not parts:
+        return "Executive summary is ready in the final report artifacts."
+    return " ".join(parts)
+
+
+def _build_friction_reasoning_entries(
+    lens_ids: list[str],
+    state: dict[str, Any],
+    synth_result: dict[str, Any],
+) -> list[dict[str, str]]:
+    """Curated reasoning entries for friction-analysis composite step."""
+    bucket_count = len(state.get("data_buckets", {})) if isinstance(state.get("data_buckets", {}), dict) else 0
+    bucket_count = bucket_count or 1
+    entries: list[dict[str, str]] = []
+    for aid in lens_ids:
+        title = FRICTION_SUB_AGENTS.get(aid, {}).get("title", aid.replace("_", " ").title())
+        lens_name = title.replace(" Agent", "")
+        entries.append({
+            "step_name": title,
+            "step_text": f"Running {bucket_count} theme bucket(s) through the {lens_name} lens.",
+            "agent": aid,
+        })
+
+    synth_text = ""
+    for r in synth_result.get("reasoning", []):
+        if isinstance(r, dict):
+            synth_text = str(r.get("step_text", "")).strip()
+            if synth_text:
+                break
+    entries.append({
+        "step_name": "Synthesizer Agent",
+        "step_text": synth_text or "Consolidating cross-lens findings into a single executive synthesis.",
+        "agent": "synthesizer_agent",
+    })
+    return entries
+
+
+def _build_report_reasoning_entries() -> list[dict[str, str]]:
+    """Curated reasoning entries for report-generation composite step."""
+    return [
+        {
+            "step_name": "Narrative Agent",
+            "step_text": "Shaping a strategy-grade narrative with quantified findings and clear executive flow.",
+            "agent": "narrative_agent",
+        },
+        {
+            "step_name": "DataViz Agent",
+            "step_text": "Executing Python chart scripts to generate crisp visual evidence for the core themes.",
+            "agent": "dataviz_agent",
+        },
+        {
+            "step_name": "Formatting Agent",
+            "step_text": "Creating PPT, data and markdown files with presentation-ready structure and actionable framing.",
+            "agent": "formatting_agent",
+        },
+    ]
+
+
 def _apply_structured_ppt_override(
     merged_outputs: dict[str, Any],
     formatting_result: dict[str, Any],
@@ -994,11 +1092,8 @@ def build_graph(
         )
 
         # Update synthesizer sub-agent to done
-        synth_summary = ""
-        for r in synth_result.get("reasoning", []):
-            synth_summary = r.get("step_text", "")
         sub_agents[-1]["status"] = "done"
-        sub_agents[-1]["detail"] = synth_summary[:120] if synth_summary else sub_agents[-1]["detail"]
+        sub_agents[-1]["detail"] = "Consolidating cross-lens signals into an executive synthesis."
 
         tasks = _set_task_sub_agents(
             tasks,
@@ -1008,7 +1103,7 @@ def build_graph(
         )
 
         # Build final delta: all analysis fields from sub-agents, only synth messages for UI
-        list_keys = {"reasoning", "execution_trace", "io_trace"}
+        list_keys = {"execution_trace", "io_trace"}
         final: dict[str, Any] = {}
         for src in (merged, synth_result):
             for k, v in src.items():
@@ -1019,6 +1114,9 @@ def build_graph(
                     final[k].extend(v)
                 else:
                     final[k] = v
+        # Keep only curated reasoning text for clean user-visible tracing.
+        final["reasoning"] = _build_friction_reasoning_entries(lens_ids, state, synth_result)
+
         # Only synthesizer message goes to UI (friction agent messages are internal)
         final["messages"] = synth_result.get("messages", [])
         final["plan_tasks"] = tasks
@@ -1170,11 +1268,8 @@ def build_graph(
         _apply_structured_ppt_override(merged, fmt_result)
 
         # Update formatting sub-agent to done
-        fmt_summary = ""
-        for r in fmt_result.get("reasoning", []):
-            fmt_summary = r.get("step_text", "")
         sub_agents[-1]["status"] = "done"
-        sub_agents[-1]["detail"] = fmt_summary[:120] if fmt_summary else sub_agents[-1]["detail"]
+        sub_agents[-1]["detail"] = "Creating PPT, data and markdown files."
 
         tasks = _set_task_sub_agents(
             tasks,
@@ -1184,7 +1279,7 @@ def build_graph(
         )
 
         # Build final delta: all fields from sub-agents, only formatter messages for UI
-        list_keys = {"reasoning", "execution_trace", "io_trace"}
+        list_keys = {"execution_trace", "io_trace"}
         final: dict[str, Any] = {}
         for src in (merged, fmt_result):
             for k, v in src.items():
@@ -1196,16 +1291,12 @@ def build_graph(
                 else:
                     final[k] = v
 
-        # Build a clean user-facing summary message (tool call/result messages
-        # are filtered by _message_text in app.py, so add an explicit summary)
-        report_path = final.get("report_file_path", "")
-        data_path = final.get("data_file_path", "")
-        summary_parts = ["Report generation complete."]
-        if report_path:
-            summary_parts.append(f"PPTX report saved.")
-        if data_path:
-            summary_parts.append(f"Filtered CSV exported.")
-        summary_msg = AIMessage(content=" ".join(summary_parts))
+        # Keep only curated reasoning text for clean user-visible tracing.
+        final["reasoning"] = _build_report_reasoning_entries()
+
+        # Show executive summary text in chat instead of internal status boilerplate.
+        executive_msg = _build_executive_summary_message(final.get("narrative_output", {}))
+        summary_msg = AIMessage(content=executive_msg)
         final["messages"] = [summary_msg]
 
         final["plan_tasks"] = tasks

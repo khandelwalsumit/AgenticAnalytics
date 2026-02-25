@@ -125,6 +125,70 @@ def _message_text(msg: Any) -> str:
     return text
 
 
+def _normalize_message_for_dedupe(text: str) -> str:
+    """Normalize text for lightweight semantic dedupe."""
+    normalized = text.lower().strip()
+    normalized = re.sub(r"\s+", " ", normalized)
+    normalized = re.sub(r"[^a-z0-9\s]", "", normalized)
+    return normalized
+
+
+def _should_surface_message(node_name: str, text: str) -> bool:
+    """Hide internal/repetitive orchestration chatter from chat UI."""
+    if not text:
+        return False
+
+    # Report analyst is a delivery checkpoint; download elements already convey output.
+    if node_name == "report_analyst":
+        return False
+
+    t = text.lower()
+    orchestration_markers = (
+        "i'm starting",
+        "i am starting",
+        "starting multi-dimensional friction analysis",
+        "friction analysis is complete",
+        "now generating the detailed analysis report",
+        "preparing to deliver the report",
+        "all report artifacts are complete and ready for delivery",
+        "the following files were already present",
+        "analysis report focusing on",
+        "ready for your review",
+        "you can find the full report",
+        "here are the file paths",
+        "let me know if you'd like to dive into any specific findings",
+    )
+    if any(marker in t for marker in orchestration_markers):
+        return False
+
+    return True
+
+
+def _should_surface_reasoning(step_name: str, text: str) -> bool:
+    """Suppress repetitive orchestration reasoning while keeping core analysis."""
+    if not text:
+        return False
+    s = str(step_name or "").strip().lower()
+    t = text.lower()
+
+    if s == "supervisor":
+        supervisor_noise_markers = (
+            "next step in the plan",
+            "executing this task",
+            "the previous step",
+            "all plan tasks are complete",
+            "falls under the 'answer' decision",
+            "including report generation and delivery",
+        )
+        if any(marker in t for marker in supervisor_noise_markers):
+            return False
+
+    if s == "report analyst":
+        return False
+
+    return True
+
+
 def _build_filter_catalog(df: pd.DataFrame, max_unique: int = 50) -> dict[str, list[str]]:
     """Build a catalog of filterable columns with their unique values.
 
@@ -197,6 +261,83 @@ def _collect_output_files(thread_id: str) -> list[str]:
     return files
 
 
+def _mark_tasks_done(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return a copy of plan tasks with all rows marked done."""
+    done_tasks: list[dict[str, Any]] = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        row = dict(task)
+        row["status"] = "done"
+        sub_agents = row.get("sub_agents", [])
+        if isinstance(sub_agents, list):
+            normalized_sub_agents: list[dict[str, Any]] = []
+            for sub in sub_agents:
+                if not isinstance(sub, dict):
+                    continue
+                sub_row = dict(sub)
+                sub_row["status"] = "done"
+                normalized_sub_agents.append(sub_row)
+            row["sub_agents"] = normalized_sub_agents
+        done_tasks.append(row)
+    return done_tasks
+
+
+async def _restore_resume_ui(thread_id: str, state: dict[str, Any]) -> None:
+    """Rehydrate TaskList and download buttons during chat resume."""
+    task_list: cl.TaskList | None = cl.user_session.get("task_list")
+    tasks = state.get("plan_tasks", [])
+    if isinstance(tasks, list) and tasks:
+        ui_tasks = _mark_tasks_done(tasks) if state.get("analysis_complete") else tasks
+        task_list = await sync_task_list(task_list, ui_tasks)
+        task_list.status = "Done" if state.get("analysis_complete") else "Running"
+        await task_list.send()
+        cl.user_session.set("task_list", task_list)
+        log.info(
+            "Resume UI: restored task list (%d rows, complete=%s)",
+            len(tasks),
+            state.get("analysis_complete"),
+        )
+
+    await _maybe_send_downloads(thread_id, state)
+
+
+async def _maybe_send_downloads(thread_id: str, state: dict[str, Any]) -> bool:
+    """Send download elements once per thread state."""
+    if state.get("downloads_sent"):
+        log.info("Download check: skipped (already sent for this thread)")
+        return False
+
+    output_files = _collect_output_files(thread_id)
+    log.info(
+        "Download check: output_dir=%r files=%d analysis_complete=%s",
+        str(Path(DATA_OUTPUT_DIR) / _safe_thread_id(thread_id)),
+        len(output_files),
+        state.get("analysis_complete"),
+    )
+    if not output_files:
+        return False
+
+    await send_downloads(file_paths=output_files)
+    state["downloads_sent"] = True
+    cl.user_session.set("state", state)
+    log.info("Download check: sent %d file(s)", len(output_files))
+    return True
+
+
+def _is_new_analysis_plan(tasks: list[dict[str, Any]]) -> bool:
+    """Detect whether plan tasks indicate a fresh analysis run is underway."""
+    if not tasks:
+        return False
+    statuses = {str(t.get("status", "")).strip().lower() for t in tasks if isinstance(t, dict)}
+    if not statuses:
+        return False
+    # Fresh/active runs have at least one actionable task and are not fully done.
+    has_actionable = bool(statuses & {"in_progress", "ready", "todo"})
+    all_done = all(s in {"done", ""} for s in statuses)
+    return has_actionable and not all_done
+
+
 def _create_runtime() -> tuple[str, DataStore, Any]:
     """Build per-session runtime: DataStore, tools, graph."""
     session_id = str(uuid.uuid4())[:12]
@@ -240,6 +381,7 @@ def make_initial_state() -> dict[str, Any]:
         "critique_feedback": {}, "quality_score": 0.0,
         "next_agent": "", "supervisor_decision": "",
         "analysis_complete": False, "phase": "analysis",
+        "downloads_sent": False,
         "filters_applied": {}, "themes_for_analysis": [],
         "navigation_log": [], "analysis_objective": "",
         "error_count": 0, "recoverable_error": "",
@@ -403,7 +545,10 @@ async def on_message(message: cl.Message):
 
     config = {"configurable": {"thread_id": thread_id}}
     task_list: cl.TaskList | None = cl.user_session.get("task_list")
-    displayed_msg_ids: set[str] = set()  # Dedup safety net
+    displayed_msg_ids: set[str] = set()  # ID-level dedupe safety net
+    displayed_msg_norms: set[str] = set()  # text-level dedupe safety net
+    was_complete_before_run = bool(state.get("analysis_complete"))
+    downloads_reset_for_run = False
 
     # Resume from checkpoint interrupt or start fresh
     snapshot = graph.get_state(config)
@@ -453,12 +598,27 @@ async def on_message(message: cl.Message):
                 for r in node_output.get("reasoning", []):
                     if r.get("verbose") and not VERBOSE:
                         continue
-                    reasoning_step.output += f"**{r.get('step_name', node_name)}**: {r.get('step_text', '')}\n\n"
+                    step_name = r.get("step_name", node_name)
+                    step_text = r.get("step_text", "")
+                    if not _should_surface_reasoning(step_name, step_text):
+                        continue
+                    reasoning_step.output += f"**{step_name}**: {step_text}\n\n"
                 await reasoning_step.update()
 
                 # Sync task list
                 new_tasks = node_output.get("plan_tasks")
                 if new_tasks is not None:
+                    if (
+                        was_complete_before_run
+                        and not downloads_reset_for_run
+                        and _is_new_analysis_plan(new_tasks)
+                    ):
+                        state["downloads_sent"] = False
+                        state["analysis_complete"] = False
+                        state["phase"] = "analysis"
+                        cl.user_session.set("state", state)
+                        downloads_reset_for_run = True
+                        log.info("Detected fresh analysis run in same thread; reset downloads_sent flag.")
                     statuses = {t.get('status', '?') for t in new_tasks}
                     log.info("TaskList updated: %d tasks, statuses=%s", len(new_tasks), statuses)
                     task_list = await sync_task_list(task_list, new_tasks)
@@ -483,16 +643,24 @@ async def on_message(message: cl.Message):
                         continue
                     displayed_msg_ids.add(msg_id)
                     text = _message_text(msg)
-                    if text:
-                        if node_name in STEP_NODES:
-                            # Render as collapsible step bar
-                            label = STEP_NODE_LABELS.get(node_name, node_name)
-                            first_line = text.split("\n")[0].strip()
-                            step = cl.Step(name=f"{label}: {first_line[:80]}", type="tool")
-                            step.output = text
-                            await step.send()
-                        else:
-                            await cl.Message(content=text).send()
+                    if not _should_surface_message(node_name, text):
+                        continue
+
+                    norm = _normalize_message_for_dedupe(text)
+                    if norm and norm in displayed_msg_norms:
+                        continue
+                    if norm:
+                        displayed_msg_norms.add(norm)
+
+                    if node_name in STEP_NODES:
+                        # Render as collapsible step bar
+                        label = STEP_NODE_LABELS.get(node_name, node_name)
+                        first_line = text.split("\n")[0].strip()
+                        step = cl.Step(name=f"{label}: {first_line[:80]}", type="tool")
+                        step.output = text
+                        await step.send()
+                    else:
+                        await cl.Message(content=text).send()
 
                 # Merge node output into local state (append lists, replace scalars)
                 for k, v in node_output.items():
@@ -509,18 +677,9 @@ async def on_message(message: cl.Message):
                  state.get("plan_steps_completed", 0), state.get("plan_steps_total", 0))
 
         # --- Downloads ---
-        output_files = _collect_output_files(thread_id)
-        log.info(
-            "Download check: output_dir=%r files=%d analysis_complete=%s",
-            str(Path(DATA_OUTPUT_DIR) / _safe_thread_id(thread_id)),
-            len(output_files),
-            state.get("analysis_complete"),
-        )
-
-        if output_files:
-            await send_downloads(file_paths=output_files)
-        else:
-            log.warning("No download files found in data/output/%s.", _safe_thread_id(thread_id))
+        sent = await _maybe_send_downloads(thread_id, state)
+        if not sent:
+            log.warning("No new download elements rendered for thread=%s.", _safe_thread_id(thread_id))
 
         if state.get("analysis_complete") and task_list:
             done = [{**t, "status": "done"} for t in state.get("plan_tasks", [])]
@@ -608,6 +767,8 @@ async def on_chat_resume(thread: dict):
     _apply_agent_selection(state, selected)
     await _send_agent_settings(selected)
     cl.user_session.set("state", state)
+    if saved:
+        await _restore_resume_ui(thread_id, state)
 
 
 @cl.on_chat_end
