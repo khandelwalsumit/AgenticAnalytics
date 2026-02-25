@@ -399,7 +399,6 @@ def _setup_session(thread_id: str, state: dict[str, Any]) -> None:
     cl.user_session.set("state", state)
     cl.user_session.set("task_list", None)
     cl.user_session.set("awaiting_prompt", None)
-    cl.user_session.set("resume_from_saved_state", False)
 
 
 def _rehydrate_friction_outputs(state: dict[str, Any]) -> None:
@@ -553,16 +552,12 @@ async def on_message(message: cl.Message):
     # Resume from checkpoint interrupt or start fresh
     snapshot = graph.get_state(config)
     is_resuming = bool(snapshot and snapshot.next)
-    resume_from_saved_state = bool(cl.user_session.get("resume_from_saved_state"))
-    if is_resuming and resume_from_saved_state and not state.get("requires_user_input"):
-        graph_input = {}
-        cl.user_session.set("resume_from_saved_state", False)
-        log.info("Continuing from restored checkpoint without appending a new user message (next=%s)", snapshot.next)
-    elif is_resuming:
-        graph_input = {"messages": [HumanMessage(content=user_text)]}
-        log.info("Resuming from checkpoint (next=%s)", snapshot.next)
+    human_msg = HumanMessage(content=user_text)
+    state["messages"].append(human_msg)
+    if is_resuming:
+        graph_input = {"messages": [human_msg]}
+        log.info("Resuming from checkpoint with user message (next=%s)", snapshot.next)
     else:
-        state["messages"].append(HumanMessage(content=user_text))
         graph_input = state
         log.info("Fresh graph run (messages=%d)", len(state["messages"]))
 
@@ -727,11 +722,17 @@ async def on_chat_resume(thread: dict):
     if saved:
         raw_msgs = saved.pop("messages", [])
         state.update(saved)
-        state["messages"] = [
-            HumanMessage(content=m["content"]) if m.get("role") == "human"
-            else AIMessage(content=m["content"])
-            for m in raw_msgs if m.get("content")
-        ]
+        state["messages"] = []
+        for m in raw_msgs:
+            role = str(m.get("role", "")).strip().lower()
+            if role not in {"human", "ai"}:
+                continue
+            content = m.get("content")
+            if content is None or content == "":
+                continue
+            state["messages"].append(
+                HumanMessage(content=content) if role == "human" else AIMessage(content=content)
+            )
         log.info("Restored %d messages from saved state", len(state["messages"]))
         # Re-load CSV into DataStore if path is saved
         csv_path = state.get("dataset_path", "")
@@ -758,8 +759,6 @@ async def on_chat_resume(thread: dict):
             state.get("plan_steps_total", 0),
             state.get("analysis_complete"),
         )
-        if not state.get("analysis_complete"):
-            cl.user_session.set("resume_from_saved_state", True)
     else:
         log.warning("No saved state found for thread=%s", thread_id)
 

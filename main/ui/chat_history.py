@@ -15,11 +15,15 @@ async def save_analysis_state(thread_id: str, state: dict[str, Any]) -> None:
     THREAD_STATES_DIR.mkdir(parents=True, exist_ok=True)
 
     # Serialize messages as plain dicts
-    messages = [
-        {"role": getattr(m, "type", "ai"), "content": getattr(m, "content", str(m))}
-        for m in state.get("messages", [])
-        if getattr(m, "content", None)
-    ]
+    messages = []
+    for m in state.get("messages", []):
+        role = str(getattr(m, "type", "") or "").strip().lower()
+        if role not in {"human", "ai"}:
+            continue
+        content = getattr(m, "content", None)
+        if content is None or content == "":
+            continue
+        messages.append({"role": role, "content": content})
 
     # Keep only JSON-safe values
     out: dict[str, Any] = {"messages": messages}

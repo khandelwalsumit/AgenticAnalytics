@@ -14,6 +14,7 @@ wheels/
 
 # Cache
 .cache/
+main/.files/*/*.json
 
 # Data artifacts (keep .gitkeep)
 data/*.csv
