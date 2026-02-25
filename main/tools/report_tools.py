@@ -145,7 +145,10 @@ def export_to_pptx(
         generate_pptx_from_slides(slide_plan, chart_paths, str(output_path), template_path)
     else:
         # Legacy fallback — convert markdown report to PPTX
-        markdown_content = store.get_text(report_key)
+        try:
+            markdown_content = store.get_text(report_key)
+        except KeyError:
+            return json.dumps({"error": f"Report '{report_key}' not found. Generate a markdown report first."})
         markdown_to_pptx(markdown_content, str(output_path))
 
     return json.dumps({"pptx_path": str(output_path)})

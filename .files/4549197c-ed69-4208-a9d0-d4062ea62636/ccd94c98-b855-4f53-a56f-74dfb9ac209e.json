@@ -1,0 +1,65 @@
+{
+    "status": "Running",
+    "tasks": [
+        {
+            "title": "Filter data by product and theme",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "Bucket data for analysis",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "Confirm data slicing with user",
+            "status": "running",
+            "forId": null
+        },
+        {
+            "title": "Multi-dimensional friction analysis",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "  -> Digital Friction Agent  -  Here's a detailed analysis of the key friction points ATT card customers face regarding rewards redemption, categorized ",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "  -> Operations Agent  -  I have completed the multi-dimensional friction analysis, applying the `rewards` domain skill to each identified frictio",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "  -> Communication Agent  -  Here's a detailed analysis of the key friction points ATT card customers face regarding rewards redemption, viewed throu",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "  -> Policy Agent  -  Here's an analysis of the policy-driven friction points for ATT card customers, based on the provided data, with a speci",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "  -> Synthesizer Agent  -  Synthesis cannot be completed due to missing or empty outputs from the friction lens agents. No findings were available ",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "Review synthesized findings with user",
+            "status": "running",
+            "forId": null
+        },
+        {
+            "title": "Generate analysis report",
+            "status": "ready",
+            "forId": null
+        },
+        {
+            "title": "Deliver report and downloads",
+            "status": "ready",
+            "forId": null
+        }
+    ]
+}
