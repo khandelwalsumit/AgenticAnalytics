@@ -71,6 +71,9 @@ class AnalyticsState(TypedDict):
     communication_analysis: dict[str, Any]
     policy_analysis: dict[str, Any]
 
+    # Friction agent output file references (agent_id → DataStore key)
+    friction_output_files: dict[str, str]
+
     # Synthesis output (written by Synthesizer Agent)
     synthesis_result: dict[str, Any]
 
@@ -109,6 +112,8 @@ class AnalyticsState(TypedDict):
     # Session agent selection
     selected_agents: list[str]
     selected_friction_agents: list[str]
+    expected_friction_lenses: list[str]
+    missing_friction_lenses: list[str]
     auto_approve_checkpoints: bool
 
     # Fault injection / resilience (dev/test)

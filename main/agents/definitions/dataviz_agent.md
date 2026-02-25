@@ -6,7 +6,6 @@ top_p: 0.95
 max_tokens: 8192
 description: "Generates publication-quality interactive charts using Plotly from analysis data"
 tools:
-  - analyze_bucket
   - execute_chart_code
 ---
 

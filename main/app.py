@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import uuid
 from pathlib import Path
@@ -67,6 +68,12 @@ AGENT_ID_TO_LABEL = {
 }
 AGENT_LABEL_TO_ID = {v: k for k, v in AGENT_ID_TO_LABEL.items()}
 DEFAULT_SELECTED_AGENTS = list(FRICTION_AGENT_IDS)
+FRICTION_STATE_FIELDS = {
+    "digital_friction_agent": "digital_analysis",
+    "operations_agent": "operations_analysis",
+    "communication_agent": "communication_analysis",
+    "policy_agent": "policy_analysis",
+}
 
 # Ensure auth secret is long enough
 if len(os.environ.get("CHAINLIT_AUTH_SECRET", "")) < 32:
@@ -94,6 +101,14 @@ def _message_text(msg: Any) -> str:
         return ""
     # Don't surface messages containing large JSON blocks (agent dumps)
     if "```json" in text or (text.count("{") > 5 and text.count("}") > 5):
+        return ""
+
+    # Hide local filesystem path lines from chat UI (downloads are shown via buttons/elements).
+    # Example: "The report is here: D:\\Workspace\\...\\report_xxx.pptx"
+    path_line_re = re.compile(r"[A-Za-z]:\\")
+    filtered_lines = [ln for ln in text.splitlines() if not path_line_re.search(ln)]
+    text = "\n".join(filtered_lines).strip()
+    if not text:
         return ""
     return text
 
@@ -134,6 +149,8 @@ def make_initial_state() -> dict[str, Any]:
         "critique_enabled": False,
         "selected_agents": list(DEFAULT_SELECTED_AGENTS),
         "selected_friction_agents": list(DEFAULT_SELECTED_AGENTS),
+        "expected_friction_lenses": list(DEFAULT_SELECTED_AGENTS),
+        "missing_friction_lenses": [],
         "auto_approve_checkpoints": False,
         "plan_steps_total": 0, "plan_steps_completed": 0, "plan_tasks": [],
         "requires_user_input": False,
@@ -147,6 +164,7 @@ def make_initial_state() -> dict[str, Any]:
         "domain_analysis": {}, "operational_analysis": {},
         "digital_analysis": {}, "operations_analysis": {},
         "communication_analysis": {}, "policy_analysis": {},
+        "friction_output_files": {},
         "synthesis_result": {},
         "narrative_output": {}, "dataviz_output": {}, "formatting_output": {},
         "report_markdown_key": "", "report_file_path": "", "data_file_path": "", "markdown_file_path": "",
@@ -170,11 +188,36 @@ def _setup_session(thread_id: str, state: dict[str, Any]) -> None:
     cl.user_session.set("state", state)
     cl.user_session.set("task_list", None)
     cl.user_session.set("awaiting_prompt", None)
+    cl.user_session.set("resume_from_saved_state", False)
+
+
+def _rehydrate_friction_outputs(state: dict[str, Any]) -> None:
+    """Recreate friction output files in the current session DataStore from saved state."""
+    data_store: DataStore | None = cl.user_session.get("data_store")
+    if not data_store:
+        return
+
+    rebuilt: dict[str, str] = {}
+    for agent_id, field in FRICTION_STATE_FIELDS.items():
+        payload = state.get(field, {})
+        if not isinstance(payload, dict):
+            continue
+        full_response = str(payload.get("full_response", "")).strip()
+        if not full_response:
+            continue
+        key = f"{agent_id}_output"
+        data_store.store_text(key, full_response, {"agent": agent_id, "type": "friction_output"})
+        rebuilt[agent_id] = key
+
+    if rebuilt:
+        state["friction_output_files"] = rebuilt
+        log.info("Rehydrated friction outputs into DataStore: %s", list(rebuilt.keys()))
 
 
 def _apply_agent_selection(state: dict[str, Any], selected: list[str]) -> None:
     state["selected_agents"] = list(selected)
     state["selected_friction_agents"] = [a for a in selected if a in FRICTION_AGENT_IDS]
+    state["expected_friction_lenses"] = list(state["selected_friction_agents"])
     state["critique_enabled"] = "critique" in selected
 
 
@@ -296,7 +339,12 @@ async def on_message(message: cl.Message):
     # Resume from checkpoint interrupt or start fresh
     snapshot = graph.get_state(config)
     is_resuming = bool(snapshot and snapshot.next)
-    if is_resuming:
+    resume_from_saved_state = bool(cl.user_session.get("resume_from_saved_state"))
+    if is_resuming and resume_from_saved_state and not state.get("requires_user_input"):
+        graph_input = {}
+        cl.user_session.set("resume_from_saved_state", False)
+        log.info("Continuing from restored checkpoint without appending a new user message (next=%s)", snapshot.next)
+    elif is_resuming:
         graph_input = {"messages": [HumanMessage(content=user_text)]}
         log.info("Resuming from checkpoint (next=%s)", snapshot.next)
     else:
@@ -482,6 +530,25 @@ async def on_chat_resume(thread: dict):
             data_store.store_dataframe("main_dataset", df, metadata={})
             state["dataset_schema"] = _build_filter_catalog(df)
             log.info("Re-loaded CSV: %s (%d rows), filter catalog rebuilt", csv_path, len(df))
+
+        # Rehydrate friction outputs so synthesizer/reporting can continue without re-running prior agents.
+        _rehydrate_friction_outputs(state)
+
+        # Seed graph checkpoint state from restored state so next run continues from checkpoint.
+        graph = cl.user_session.get("graph")
+        cfg = {"configurable": {"thread_id": thread_id}}
+        graph.update_state(cfg, state)
+        snap = graph.get_state(cfg)
+        log.info(
+            "Checkpoint restored for thread=%s (next=%s, plan=%d/%d, complete=%s)",
+            thread_id,
+            snap.next if snap else (),
+            state.get("plan_steps_completed", 0),
+            state.get("plan_steps_total", 0),
+            state.get("analysis_complete"),
+        )
+        if not state.get("analysis_complete"):
+            cl.user_session.set("resume_from_saved_state", True)
     else:
         log.warning("No saved state found for thread=%s", thread_id)
 

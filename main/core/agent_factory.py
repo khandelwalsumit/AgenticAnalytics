@@ -143,8 +143,25 @@ class AgentFactory:
 
         llm = self._create_llm(name)
         tools = self._resolve_tools(config.tools)
+
+        # Some report agents occasionally return empty AI messages without any tool call.
+        # Force at least one tool call on the first turn, then allow normal tool selection.
+        # NOTE: Gemini has shown unstable behavior for dataviz when tool_choice is "required".
+        # Keep strict forcing only for formatting, and rely on retry contracts for dataviz.
+        force_initial_tool_call_for = {"formatting_agent"}
+        model: Any = llm
+        if name in force_initial_tool_call_for and tools:
+            def _select_model(state: dict[str, Any], runtime: Any) -> Any:  # noqa: ARG001
+                messages = state.get("messages", []) if isinstance(state, dict) else []
+                has_tool_result = any(getattr(m, "type", "") == "tool" for m in messages)
+                if not has_tool_result:
+                    return llm.bind_tools(tools, tool_choice="required")
+                return llm.bind_tools(tools)
+
+            model = _select_model
+
         return create_react_agent(
-            model=llm,
+            model=model,
             tools=tools,
             prompt=SystemMessage(content=prompt),
         )

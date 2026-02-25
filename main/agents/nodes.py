@@ -136,9 +136,16 @@ def _parse_json(text: str) -> dict[str, Any]:
 def _find_next_plan_agent(plan_tasks: list[dict]) -> tuple[list[dict], str]:
     """Find the first pending task, mark it in_progress, return (updated_tasks, agent).
 
-    Returns ("__end__", ...) if no pending task is found.
+    Resume any existing in-progress task first.
+    Returns ("__end__", ...) if no task is actionable.
     """
     updated = [dict(t) for t in plan_tasks]
+
+    # Resume interrupted work before advancing to the next ready task.
+    for task in updated:
+        if task.get("status") == "in_progress":
+            return updated, task.get("agent", "__end__")
+
     for task in updated:
         if task.get("status") in ("ready", "todo"):
             task["status"] = "in_progress"
@@ -357,9 +364,14 @@ def make_agent_node(
 
         # Dedicated state field (friction/reporting agents)
         if agent_name in AGENT_STATE_FIELDS:
+            # Collect full output from ALL new AI messages (not just last)
+            full_output = "\n\n".join(
+                _text(m.content) for m in new_msgs
+                if hasattr(m, "type") and m.type == "ai" and _text(m.content)
+            )
             updates[AGENT_STATE_FIELDS[agent_name]] = {
                 "output": summary,
-                "full_response": str(last_msg.content) if last_msg else "",
+                "full_response": full_output,
                 "agent": agent_name,
             }
 
@@ -417,44 +429,201 @@ def _build_extra_context(
         )
 
     if agent_name == "synthesizer_agent":
-        return (
-            "\n\n## Friction Agent Outputs\n"
-            "Synthesize the following 4 independent analyses:\n\n"
-            + json.dumps({
-                "digital": state.get("digital_analysis", {}),
-                "operations": state.get("operations_analysis", {}),
-                "communication": state.get("communication_analysis", {}),
-                "policy": state.get("policy_analysis", {}),
-            }, indent=2, default=str)
-        )
+        # Read full friction agent outputs from DataStore files (written by friction_analysis_node)
+        from core.data_store import DataStore
+        import chainlit as cl
+        expected = state.get("expected_friction_lenses", []) or state.get("selected_friction_agents", [])
+        expected = list(dict.fromkeys([a for a in expected if a]))
+        parts = [
+            "\n\n## Friction Agent Outputs\n",
+            "Synthesize the following independent analyses into 10-12 top themes:\n",
+        ]
+        if expected:
+            parts.append(
+                "\nExpected lenses for this run: "
+                + ", ".join(expected)
+                + ". Set decision='complete' when all expected lenses have outputs.\n"
+            )
+        friction_files = state.get("friction_output_files", {})
+        data_store: DataStore | None = cl.user_session.get("data_store") if friction_files else None
+
+        dimension_labels = {
+            "digital_friction_agent": "Digital Friction",
+            "operations_agent": "Operations",
+            "communication_agent": "Communication",
+            "policy_agent": "Policy",
+        }
+        for agent_id, label in dimension_labels.items():
+            key = friction_files.get(agent_id, "")
+            content = ""
+            if key and data_store:
+                try:
+                    content = data_store.get_text(key)
+                    logger.info("Synthesizer context: loaded %s from DataStore (%d chars)", agent_id, len(content))
+                except KeyError:
+                    pass
+            if not content:
+                # Fallback to state dict
+                field = AGENT_STATE_FIELDS.get(agent_id, "")
+                state_data = state.get(field, {}) if field else {}
+                content = state_data.get("full_response", "") if isinstance(state_data, dict) else str(state_data)
+                if content:
+                    logger.info("Synthesizer context: using state fallback for %s (%d chars)", agent_id, len(content))
+            if content:
+                parts.append(f"\n### {label} Agent Output\n{content}\n")
+            else:
+                parts.append(f"\n### {label} Agent Output\n(No output available)\n")
+
+        return "\n".join(parts)
 
     if agent_name in REPORTING_AGENTS:
         synthesis = state.get("synthesis_result", {})
         findings = state.get("findings", [])
+        retry_ctx = state.get("report_retry_context", {})
+        def _clip(value: Any, limit: int = 240) -> str:
+            text = str(value or "")
+            return text if len(text) <= limit else text[:limit] + "..."
+
+        summary_ctx = {
+            "executive_narrative": _clip(synthesis.get("executive_narrative", ""), 700),
+            "total_calls_analyzed": synthesis.get("total_calls_analyzed", 0),
+            "total_themes": synthesis.get("total_themes", 0),
+            "overall_preventability": synthesis.get("overall_preventability", 0),
+            "dominant_drivers": synthesis.get("dominant_drivers", {}),
+            "quick_wins_count": synthesis.get("quick_wins_count", 0),
+        }
+
+        compact_themes: list[dict[str, Any]] = []
+        for t in synthesis.get("themes", []) if isinstance(synthesis, dict) else []:
+            if not isinstance(t, dict):
+                continue
+            compact_themes.append({
+                "theme": t.get("theme", ""),
+                "call_count": t.get("call_count", 0),
+                "call_percentage": t.get("call_percentage", 0.0),
+                "impact_score": t.get("impact_score", 0.0),
+                "ease_score": t.get("ease_score", 0.0),
+                "priority_score": t.get("priority_score", 0.0),
+                "priority_quadrant": t.get("priority_quadrant", ""),
+                "dominant_driver": t.get("dominant_driver", ""),
+                "contributing_factors": [_clip(x, 120) for x in (t.get("contributing_factors", []) or [])[:6]],
+                "quick_wins": [_clip(x, 180) for x in (t.get("quick_wins", []) or [])[:6]],
+                "all_drivers": [
+                    {
+                        "driver": _clip(d.get("driver", ""), 180),
+                        "call_count": d.get("call_count", 0),
+                        "contribution_pct": d.get("contribution_pct", 0.0),
+                        "type": d.get("type", ""),
+                        "dimension": d.get("dimension", ""),
+                        "recommended_solution": _clip(d.get("recommended_solution", ""), 180),
+                    }
+                    for d in (t.get("all_drivers", []) or [])[:8]
+                    if isinstance(d, dict)
+                ],
+            })
+
+        compact_findings: list[dict[str, Any]] = []
+        if isinstance(findings, list):
+            for f in findings[:30]:
+                if not isinstance(f, dict):
+                    continue
+                compact_findings.append({
+                    "finding": _clip(f.get("finding", ""), 180),
+                    "theme": _clip(f.get("theme", ""), 120),
+                    "category": _clip(f.get("category", ""), 80),
+                    "call_count": f.get("call_count", 0),
+                    "call_percentage": f.get("call_percentage", 0.0),
+                    "impact_score": f.get("impact_score", 0.0),
+                    "ease_score": f.get("ease_score", 0.0),
+                    "dominant_driver": f.get("dominant_driver", ""),
+                    "priority_quadrant": f.get("priority_quadrant", ""),
+                    "recommended_action": _clip(f.get("recommended_action", ""), 180),
+                })
 
         if agent_name == "report_analyst":
             # Give report_analyst rich, structured context for report generation
             ctx: dict[str, Any] = {
-                "executive_narrative": synthesis.get("executive_narrative", ""),
-                "total_calls_analyzed": synthesis.get("total_calls_analyzed", 0),
-                "total_themes": synthesis.get("total_themes", 0),
-                "overall_preventability": synthesis.get("overall_preventability", 0),
-                "dominant_drivers": synthesis.get("dominant_drivers", {}),
-                "quick_wins_count": synthesis.get("quick_wins_count", 0),
-                "themes": synthesis.get("themes", []),
-                "findings": findings,
+                **summary_ctx,
+                "themes": compact_themes,
+                "findings": compact_findings,
                 "filters_applied": state.get("filters_applied", {}),
             }
-            return "\n\n## Analysis Context\nUse this data to populate the report sections.\n" + json.dumps(ctx, indent=2, default=str)
+            parts = [
+                "\n\n## Analysis Context\nUse this data to populate the report sections.\n",
+                json.dumps(ctx, indent=2, default=str),
+            ]
+            if isinstance(retry_ctx, dict) and retry_ctx.get("agent") == agent_name:
+                parts.append("\n\n## Retry Requirements (Mandatory)\n")
+                parts.append(json.dumps(retry_ctx, indent=2, default=str))
+            return "".join(parts)
 
-        ctx = {
-            "synthesis": synthesis,
-            "findings": findings,
+        ctx: dict[str, Any] = {
+            "summary": summary_ctx,
+            "themes": compact_themes,
+            "findings": compact_findings,
+            "filters_applied": state.get("filters_applied", {}),
         }
         if agent_name == "formatting_agent":
-            ctx["narrative"] = state.get("narrative_output", {})
-            ctx["charts"] = state.get("dataviz_output", {})
-        return "\n\n## Analysis Context\n" + json.dumps(ctx, indent=2, default=str)
+            narrative_raw = state.get("narrative_output", {})
+            charts_raw = state.get("dataviz_output", {})
+
+            narrative_json: dict[str, Any] = {}
+            if isinstance(narrative_raw, dict):
+                narrative_json = _parse_json(narrative_raw.get("full_response", "")) or _parse_json(narrative_raw.get("output", ""))
+
+            charts_json: dict[str, Any] = {}
+            if isinstance(charts_raw, dict):
+                charts_json = _parse_json(charts_raw.get("full_response", "")) or _parse_json(charts_raw.get("output", ""))
+
+            chart_list = charts_json.get("charts", []) if isinstance(charts_json, dict) else []
+            chart_map = {
+                str(c.get("type", "")): str(c.get("file_path", ""))
+                for c in chart_list
+                if isinstance(c, dict) and c.get("type")
+            }
+            # Formatting needs assembly inputs, not full analytic payloads.
+            ctx = {
+                "summary": summary_ctx,
+                "filters_applied": state.get("filters_applied", {}),
+                "narrative_plan": narrative_json,
+            }
+            # Back-compat with prompt wording that expects narrative.full_response/charts mapping.
+            ctx["narrative"] = {"full_response": json.dumps(narrative_json, default=str)}
+            ctx["charts"] = chart_list
+            ctx["chart_map"] = chart_map
+            ctx["chart_count"] = len(ctx["charts"]) if isinstance(ctx["charts"], list) else 0
+
+        rules = ""
+        if agent_name == "narrative_agent":
+            rules = (
+                "\n\n## Tool Execution Requirements (Mandatory)\n"
+                "- Call `get_findings_summary` before final output.\n"
+                "- Final output must be valid JSON with `report_title`, `report_subtitle`, and `sections`.\n"
+                "- Include at least 4 sections in the required order.\n"
+            )
+        elif agent_name == "dataviz_agent":
+            rules = (
+                "\n\n## Tool Execution Requirements (Mandatory)\n"
+                "- Call `execute_chart_code` to generate all three charts.\n"
+                "- Required chart types: `friction_distribution`, `impact_ease_scatter`, `driver_breakdown`.\n"
+                "- Final output must include a `charts` array with file paths.\n"
+            )
+        elif agent_name == "formatting_agent":
+            rules = (
+                "\n\n## Tool Execution Requirements (Mandatory)\n"
+                "- Call tools in this order: `generate_markdown_report` -> `export_to_pptx` -> `export_filtered_csv`.\n"
+                "- Do not finish until all three tool calls succeed.\n"
+                "- Return with valid report, markdown, and csv paths.\n"
+            )
+
+        parts = ["\n\n## Analysis Context\n", json.dumps(ctx, indent=2, default=str), rules]
+        if isinstance(retry_ctx, dict) and retry_ctx.get("agent") == agent_name:
+            parts.append("\n\n## Retry Requirements (Mandatory)\n")
+            parts.append(json.dumps(retry_ctx, indent=2, default=str))
+            parts.append(
+                "\nRetry now. Do not provide an empty response. Execute all required tools before finalizing.\n"
+            )
+        return "".join(parts)
 
     if agent_name == "supervisor":
         parts = []
@@ -620,6 +789,9 @@ def _apply_structured_updates(
             narrative = structured.summary.executive_narrative
             # Store full synthesis: summary + themes + findings for downstream agents
             synthesis_data = structured.summary.model_dump()
+            synthesis_data["decision"] = structured.decision
+            synthesis_data["confidence"] = structured.confidence
+            synthesis_data["reasoning"] = structured.reasoning
             if structured.themes:
                 synthesis_data["themes"] = [t.model_dump() for t in structured.themes]
             if structured.findings:
@@ -640,6 +812,12 @@ def _apply_structured_updates(
             synthesis_data: dict[str, Any] = {}
             if data.get("summary"):
                 synthesis_data = dict(data["summary"])
+            if "decision" in data:
+                synthesis_data["decision"] = data.get("decision")
+            if "confidence" in data:
+                synthesis_data["confidence"] = data.get("confidence")
+            if "reasoning" in data:
+                synthesis_data["reasoning"] = data.get("reasoning")
             if data.get("themes"):
                 synthesis_data["themes"] = data["themes"]
             if data.get("findings"):
@@ -820,14 +998,78 @@ def _parse_dimension_preferences(
             seen.add(agent_id)
 
     if mentioned:
-        updates["selected_friction_agents"] = mentioned
-        logger.info("Supervisor: user selected dimensions=%s", mentioned)
+        selected_unique = list(dict.fromkeys(mentioned))
+        updates["selected_friction_agents"] = selected_unique
+        updates["expected_friction_lenses"] = selected_unique
+        logger.info("Supervisor: user selected dimensions=%s", selected_unique)
+
+
+def _enforce_synthesis_completeness_guard(
+    state: AnalyticsState,
+    updates: dict[str, Any],
+    planned_next_agent: str,
+) -> bool:
+    """Before report_generation, reroute if synthesis is incomplete.
+
+    Returns True if routing was overridden.
+    """
+    if planned_next_agent != "report_generation":
+        return False
+
+    expected = state.get("expected_friction_lenses", []) or state.get("selected_friction_agents", [])
+    expected = list(dict.fromkeys([a for a in expected if a]))
+    available = list((state.get("friction_output_files", {}) or {}).keys())
+    missing = state.get("missing_friction_lenses", []) or [a for a in expected if a not in available]
+    missing = list(dict.fromkeys([a for a in missing if a]))
+
+    synthesis = state.get("synthesis_result", {})
+    decision = synthesis.get("decision", "") if isinstance(synthesis, dict) else ""
+    # Deterministic gate: if all expected lens outputs are present, allow progress.
+    if not missing:
+        if expected or decision != "incomplete":
+            return False
+        # decision is incomplete and expected lenses are unknown -> ask user to clarify.
+        updates["next_agent"] = "user_checkpoint"
+        updates["requires_user_input"] = True
+        updates["checkpoint_message"] = (
+            "Synthesis is incomplete and expected friction lenses are not clearly defined."
+        )
+        updates["checkpoint_prompt"] = (
+            "Reply 'rerun all lenses' to rerun friction analysis, or specify lenses to rerun "
+            "(digital, operations, communication, policy)."
+        )
+        updates["pending_input_for"] = "synthesis_completion_check"
+        updates["checkpoint_token"] = str(uuid.uuid4())[:8]
+        updates["plan_tasks"] = state.get("plan_tasks", [])
+        logger.warning(
+            "Supervisor guard: synthesis incomplete with unknown expected lenses; requesting user checkpoint."
+        )
+        return True
+
+    if missing:
+        updates["next_agent"] = "friction_analysis"
+        updates["selected_friction_agents"] = missing
+        updates["expected_friction_lenses"] = expected or missing
+        updates["missing_friction_lenses"] = missing
+        updates["plan_tasks"] = state.get("plan_tasks", [])
+        updates["reasoning"] = [{
+            "step_name": "Supervisor",
+            "step_text": f"Synthesis incomplete. Re-running missing friction lenses: {', '.join(missing)}.",
+        }]
+        logger.warning(
+            "Supervisor guard: blocked report_generation due incomplete synthesis; rerouting to friction_analysis with missing=%s",
+            missing,
+        )
+        return True
+
+    return False
 
 
 def _apply_supervisor(s: SupervisorOutput, state: AnalyticsState, updates: dict) -> None:
     """Map SupervisorOutput -> state updates."""
     updates["supervisor_decision"] = s.decision
     updates["reasoning"] = [{"step_name": "Supervisor", "step_text": s.reasoning}]
+    suppress_model_response = False
 
     target_agent = _DECISION_TO_NEXT.get(s.decision, "__end__")
 
@@ -835,6 +1077,8 @@ def _apply_supervisor(s: SupervisorOutput, state: AnalyticsState, updates: dict)
         plan, agent = _find_next_plan_agent(state.get("plan_tasks", []))
         updates["next_agent"] = agent
         updates["plan_tasks"] = plan
+        if _enforce_synthesis_completeness_guard(state, updates, agent):
+            suppress_model_response = True
     elif s.decision == "extract":
         # If filters are already applied with real data, skip re-extraction
         # and force transition to analyse (planner).
@@ -884,10 +1128,14 @@ def _apply_supervisor(s: SupervisorOutput, state: AnalyticsState, updates: dict)
         updates["next_agent"] = target_agent
         # Parse user's dimension preferences from their last message
         _parse_dimension_preferences(state, updates)
+        if "expected_friction_lenses" not in updates:
+            current = state.get("selected_friction_agents", [])
+            updates["expected_friction_lenses"] = list(dict.fromkeys([a for a in current if a]))
+        updates["missing_friction_lenses"] = []
     else:
         updates["next_agent"] = target_agent
 
-    if s.response:
+    if s.response and not suppress_model_response:
         updates["messages"] = [AIMessage(content=s.response)]
 
     logger.info("Supervisor (structured): %s -> %s (confidence=%d)", s.decision, updates["next_agent"], s.confidence)
@@ -902,10 +1150,13 @@ def _apply_supervisor_fallback(raw: str, state: AnalyticsState, updates: dict) -
         return
 
     updates["supervisor_decision"] = decision
+    suppress_model_response = False
     if decision == "execute":
         plan, agent = _find_next_plan_agent(state.get("plan_tasks", []))
         updates["next_agent"] = agent
         updates["plan_tasks"] = plan
+        if _enforce_synthesis_completeness_guard(state, updates, agent):
+            suppress_model_response = True
     elif decision == "extract":
         # If filters are already applied with real data, skip re-extraction
         existing_filters = state.get("filters_applied", {})
@@ -947,10 +1198,14 @@ def _apply_supervisor_fallback(raw: str, state: AnalyticsState, updates: dict) -
     elif decision == "analyse":
         updates["next_agent"] = _DECISION_TO_NEXT[decision]
         _parse_dimension_preferences(state, updates)
+        if "expected_friction_lenses" not in updates:
+            current = state.get("selected_friction_agents", [])
+            updates["expected_friction_lenses"] = list(dict.fromkeys([a for a in current if a]))
+        updates["missing_friction_lenses"] = []
     else:
         updates["next_agent"] = _DECISION_TO_NEXT[decision]
 
-    if decision in ("answer", "clarify") and data.get("response"):
+    if decision in ("answer", "clarify") and data.get("response") and not suppress_model_response:
         updates["messages"] = [AIMessage(content=data["response"])]
 
     logger.info("Supervisor (fallback): %s -> %s (confidence=%s)", decision, updates.get("next_agent", "?"), data.get("confidence", "?"))
