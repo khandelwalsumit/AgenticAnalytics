@@ -252,9 +252,9 @@ def _collect_output_files(thread_id: str) -> list[str]:
     ]
     files: list[str] = [str(p.resolve()) for p in preferred_order if p.exists() and p.is_file()]
 
-    known = {Path(p) for p in files}
+    known = {Path(p).resolve() for p in files}
     extras = sorted(
-        [p for p in output_dir.iterdir() if p.is_file() and p not in known],
+        [p for p in output_dir.iterdir() if p.is_file() and p.resolve() not in known],
         key=lambda p: p.name.lower(),
     )
     files.extend([str(p.resolve()) for p in extras])
@@ -566,6 +566,7 @@ async def on_message(message: cl.Message):
     reasoning_step.output = ""
     await reasoning_step.send()
 
+    stream = None
     try:
         stream = graph.astream(graph_input, config=config, stream_mode="updates")
         async for event in stream:
@@ -689,7 +690,8 @@ async def on_message(message: cl.Message):
         await reasoning_step.update()
         await cl.Message(content=f"System error: {exc}", author="System").send()
     finally:
-        await stream.aclose()
+        if stream is not None:
+            await stream.aclose()
 
     cl.user_session.set("state", state)
     await save_analysis_state(thread_id, state)

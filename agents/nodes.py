@@ -19,7 +19,7 @@ from langchain_core.messages import AIMessage
 
 from agents.schemas import (
     CritiqueOutput,
-    DataAnalystOutput,
+    FormattingDeckOutput,
     PlannerOutput,
     STRUCTURED_OUTPUT_SCHEMAS,
     SupervisorOutput,
@@ -52,7 +52,6 @@ AGENT_STATE_FIELDS: dict[str, str] = {
     "policy_agent": "policy_analysis",
     "synthesizer_agent": "synthesis_result",
     "narrative_agent": "narrative_output",
-    "dataviz_agent": "dataviz_output",
     "formatting_agent": "formatting_output",
 }
 
@@ -424,25 +423,25 @@ def _extract_agent_json(payload: Any) -> dict[str, Any]:
 
 def _build_formatting_context(summary_ctx: dict[str, Any], state: AnalyticsState) -> dict[str, Any]:
     """Build compact assembly context for formatting agent."""
-    narrative_json = _extract_agent_json(state.get("narrative_output", {}))
-    charts_json = _extract_agent_json(state.get("dataviz_output", {}))
+    narrative_payload = state.get("narrative_output", {})
+    narrative_markdown = ""
+    if isinstance(narrative_payload, dict):
+        narrative_markdown = str(narrative_payload.get("full_response", "")).strip()
+    elif narrative_payload:
+        narrative_markdown = str(narrative_payload)
 
-    chart_list = charts_json.get("charts", []) if isinstance(charts_json, dict) else []
-    chart_map = {
-        str(c.get("type", "")): str(c.get("file_path", ""))
-        for c in chart_list
-        if isinstance(c, dict) and c.get("type")
-    }
+    chart_placeholders = [
+        "{{chart.friction_distribution}}",
+        "{{chart.impact_ease_scatter}}",
+        "{{chart.driver_breakdown}}",
+    ]
 
     return {
         "summary": summary_ctx,
         "filters_applied": state.get("filters_applied", {}),
-        "narrative_plan": narrative_json,
-        # Back-compat with prompt wording expecting narrative.full_response/charts mapping.
-        "narrative": {"full_response": json.dumps(narrative_json, default=str)},
-        "charts": chart_list,
-        "chart_map": chart_map,
-        "chart_count": len(chart_list),
+        "narrative_markdown": narrative_markdown,
+        "narrative": {"full_response": narrative_markdown},
+        "chart_placeholders": chart_placeholders,
     }
 
 
@@ -605,22 +604,17 @@ def _build_extra_context(
             rules = (
                 "\n\n## Tool Execution Requirements (Mandatory)\n"
                 "- Call `get_findings_summary` before final output.\n"
-                "- Final output must be valid JSON with `report_title`, `report_subtitle`, and `sections`.\n"
-                "- Include at least 4 sections in the required order.\n"
-            )
-        elif agent_name == "dataviz_agent":
-            rules = (
-                "\n\n## Tool Execution Requirements (Mandatory)\n"
-                "- Call `execute_chart_code` to generate all three charts.\n"
-                "- Required chart types: `friction_distribution`, `impact_ease_scatter`, `driver_breakdown`.\n"
-                "- Final output must include a `charts` array with file paths.\n"
+                "- Final output must be pure markdown.\n"
+                "- Include explicit `<!-- SLIDE: ... -->` boundary tags for every slide.\n"
+                "- Do not return JSON.\n"
             )
         elif agent_name == "formatting_agent":
             rules = (
-                "\n\n## Tool Execution Requirements (Mandatory)\n"
-                "- Call tools in this order: `generate_markdown_report` -> `export_to_pptx` -> `export_filtered_csv`.\n"
-                "- Do not finish until all three tool calls succeed.\n"
-                "- Return with valid report, markdown, and csv paths.\n"
+                "\n\n## Output Contract (Mandatory)\n"
+                "- Return ONLY valid JSON matching the structured slide blueprint schema.\n"
+                "- Include deck-level fields plus slide-level `slide_number`, `section_type`, `layout`, and `title`.\n"
+                "- Use explicit `image_prompt.placeholder_id` values from `chart_placeholders`.\n"
+                "- Do not call export tools from this agent.\n"
             )
 
         parts = ["\n\n## Analysis Context\n", json.dumps(ctx, indent=2, default=str), rules]
@@ -628,7 +622,7 @@ def _build_extra_context(
             parts.append("\n\n## Retry Requirements (Mandatory)\n")
             parts.append(json.dumps(retry_ctx, indent=2, default=str))
             parts.append(
-                "\nRetry now. Do not provide an empty response. Execute all required tools before finalizing.\n"
+                "\nRetry now. Do not provide an empty response. Satisfy all mandatory constraints before finalizing.\n"
             )
         return "".join(parts)
 
@@ -871,19 +865,31 @@ def _apply_structured_updates(
             })
             logger.info("Critique (fallback): grade=%s, score=%.2f", grade, quality_score)
 
-    # === FORMATTING / REPORT ANALYST (ReAct agents -- extract file paths from tool results) ===
-    elif agent_name in ("formatting_agent", "report_analyst"):
+    # === FORMATTING (structured deck blueprint) ===
+    elif agent_name == "formatting_agent":
+        if isinstance(structured, FormattingDeckOutput):
+            slide_count = len(structured.slides)
+            qa_count = len(structured.qa_enhancements_applied)
+            updates["reasoning"] = [{
+                "step_name": "Formatting Agent",
+                "step_text": (
+                    f"Prepared structured slide blueprint with {slide_count} slides "
+                    f"and {qa_count} QA enhancement note(s) for deterministic artifact assembly."
+                ),
+            }]
+
+    # === REPORT ANALYST (ReAct agent -- extracts file paths from tool results) ===
+    elif agent_name == "report_analyst":
         _extract_formatting_state(state, updates)
 
 
 def _extract_formatting_state(
     state: AnalyticsState, updates: dict[str, Any]
 ) -> None:
-    """Extract report_file_path and data_file_path from formatting agent tool results.
+    """Extract report artifact paths from tool-result messages.
 
-    Scans messages for tool result messages from export_to_pptx,
-    export_filtered_csv, and generate_markdown_report, then populates
-    the corresponding state fields so app.py can serve downloads.
+    Used primarily by report_analyst when it performs tool-based recovery.
+    It scans tool JSON payloads and updates report/ppt/csv/markdown paths.
     """
     messages = updates.get("messages", [])
     logger.info(
@@ -909,7 +915,7 @@ def _extract_formatting_state(
             updates["data_file_path"] = data["csv_path"]
             logger.info("Formatting Agent: extracted data_file_path=%s", data["csv_path"])
 
-        # generate_markdown_report returns {"report_key": "...", "markdown_path": "..."}
+        # markdown artifact payload returns {"report_key": "...", "markdown_path": "..."}
         if "report_key" in data:
             updates["report_markdown_key"] = data["report_key"]
             logger.info("Formatting Agent: extracted report_markdown_key=%s", data["report_key"])
@@ -1072,6 +1078,75 @@ def _enforce_synthesis_completeness_guard(
     return False
 
 
+def _has_real_filters(state: AnalyticsState) -> bool:
+    existing_filters = state.get("filters_applied", {})
+    return bool(
+        existing_filters
+        and isinstance(existing_filters, dict)
+        and existing_filters.get("status") != "extraction_attempted"
+        and any(k != "status" for k in existing_filters)
+    )
+
+
+def _count_consecutive_data_analyst_loops(state: AnalyticsState) -> int:
+    trace = state.get("execution_trace", [])
+    consecutive = 0
+    for entry in reversed(trace):
+        agent = entry.get("agent", "") if isinstance(entry, dict) else getattr(entry, "agent", "")
+        if agent == "data_analyst":
+            consecutive += 1
+        elif agent == "supervisor":
+            continue
+        else:
+            break
+    return consecutive
+
+
+def _apply_analyse_transition(state: AnalyticsState, updates: dict[str, Any], target_agent: str) -> None:
+    updates["next_agent"] = target_agent
+    _parse_dimension_preferences(state, updates)
+    if "expected_friction_lenses" not in updates:
+        current = state.get("selected_friction_agents", [])
+        updates["expected_friction_lenses"] = list(dict.fromkeys([a for a in current if a]))
+    updates["missing_friction_lenses"] = []
+
+
+def _apply_extract_transition(
+    state: AnalyticsState,
+    updates: dict[str, Any],
+    *,
+    target_agent: str,
+    log_prefix: str,
+    bootstrap_tasks: bool,
+) -> None:
+    if _has_real_filters(state):
+        logger.info(
+            "%s: filters already applied (%s), forcing extract -> analyse",
+            log_prefix,
+            state.get("filters_applied", {}),
+        )
+        updates["next_agent"] = "planner"
+        updates["supervisor_decision"] = "analyse"
+        return
+
+    consecutive = _count_consecutive_data_analyst_loops(state)
+    if consecutive >= MAX_SUPERVISOR_LOOPS:
+        logger.warning(
+            "%s loop detected: %d consecutive extract->data_analyst cycles. "
+            "Forcing transition to 'analyse' (planner).",
+            log_prefix,
+            consecutive,
+        )
+        updates["next_agent"] = "planner"
+        updates["supervisor_decision"] = "analyse"
+        return
+
+    updates["next_agent"] = target_agent
+    if bootstrap_tasks and not state.get("plan_tasks"):
+        updates["plan_tasks"] = _PRELIMINARY_PLAN_TASKS()
+        updates["plan_steps_total"] = len(updates["plan_tasks"])
+
+
 def _apply_supervisor(s: SupervisorOutput, state: AnalyticsState, updates: dict) -> None:
     """Map SupervisorOutput -> state updates."""
     updates["supervisor_decision"] = s.decision
@@ -1087,58 +1162,15 @@ def _apply_supervisor(s: SupervisorOutput, state: AnalyticsState, updates: dict)
         if _enforce_synthesis_completeness_guard(state, updates, agent):
             suppress_model_response = True
     elif s.decision == "extract":
-        # If filters are already applied with real data, skip re-extraction
-        # and force transition to analyse (planner).
-        existing_filters = state.get("filters_applied", {})
-        has_real_filters = (
-            existing_filters
-            and isinstance(existing_filters, dict)
-            and existing_filters.get("status") != "extraction_attempted"
-            and any(k != "status" for k in existing_filters)
+        _apply_extract_transition(
+            state,
+            updates,
+            target_agent=target_agent,
+            log_prefix="Supervisor",
+            bootstrap_tasks=True,
         )
-        if has_real_filters:
-            logger.info(
-                "Supervisor: filters already applied (%s), forcing extract -> analyse",
-                existing_filters,
-            )
-            updates["next_agent"] = "planner"
-            updates["supervisor_decision"] = "analyse"
-        else:
-            # Loop detection: count how many consecutive supervisor->data_analyst
-            # round-trips have already happened.
-            trace = state.get("execution_trace", [])
-            consecutive = 0
-            for entry in reversed(trace):
-                agent = entry.get("agent", "") if isinstance(entry, dict) else getattr(entry, "agent", "")
-                if agent == "data_analyst":
-                    consecutive += 1
-                elif agent == "supervisor":
-                    continue  # skip supervisor entries between
-                else:
-                    break
-
-            if consecutive >= MAX_SUPERVISOR_LOOPS:
-                logger.warning(
-                    "Supervisor loop detected: %d consecutive extract->data_analyst cycles. "
-                    "Forcing transition to 'analyse' (planner).",
-                    consecutive,
-                )
-                updates["next_agent"] = "planner"
-                updates["supervisor_decision"] = "analyse"
-            else:
-                updates["next_agent"] = target_agent
-                # Create preliminary task list so UI shows progress immediately
-                if not state.get("plan_tasks"):
-                    updates["plan_tasks"] = _PRELIMINARY_PLAN_TASKS()
-                    updates["plan_steps_total"] = len(updates["plan_tasks"])
     elif s.decision == "analyse":
-        updates["next_agent"] = target_agent
-        # Parse user's dimension preferences from their last message
-        _parse_dimension_preferences(state, updates)
-        if "expected_friction_lenses" not in updates:
-            current = state.get("selected_friction_agents", [])
-            updates["expected_friction_lenses"] = list(dict.fromkeys([a for a in current if a]))
-        updates["missing_friction_lenses"] = []
+        _apply_analyse_transition(state, updates, target_agent)
     else:
         updates["next_agent"] = target_agent
 
@@ -1168,50 +1200,15 @@ def _apply_supervisor_fallback(raw: str, state: AnalyticsState, updates: dict) -
         if _enforce_synthesis_completeness_guard(state, updates, agent):
             suppress_model_response = True
     elif decision == "extract":
-        # If filters are already applied with real data, skip re-extraction
-        existing_filters = state.get("filters_applied", {})
-        has_real_filters = (
-            existing_filters
-            and isinstance(existing_filters, dict)
-            and existing_filters.get("status") != "extraction_attempted"
-            and any(k != "status" for k in existing_filters)
+        _apply_extract_transition(
+            state,
+            updates,
+            target_agent=_DECISION_TO_NEXT[decision],
+            log_prefix="Supervisor fallback",
+            bootstrap_tasks=False,
         )
-        if has_real_filters:
-            logger.info(
-                "Supervisor fallback: filters already applied (%s), forcing extract -> analyse",
-                existing_filters,
-            )
-            updates["next_agent"] = "planner"
-            updates["supervisor_decision"] = "analyse"
-        else:
-            # Same loop detection as the structured path
-            trace = state.get("execution_trace", [])
-            consecutive = 0
-            for entry in reversed(trace):
-                agent = entry.get("agent", "") if isinstance(entry, dict) else getattr(entry, "agent", "")
-                if agent == "data_analyst":
-                    consecutive += 1
-                elif agent == "supervisor":
-                    continue
-                else:
-                    break
-            if consecutive >= MAX_SUPERVISOR_LOOPS:
-                logger.warning(
-                    "Supervisor fallback loop detected: %d consecutive extract->data_analyst cycles. "
-                    "Forcing transition to 'analyse' (planner).",
-                    consecutive,
-                )
-                updates["next_agent"] = "planner"
-                updates["supervisor_decision"] = "analyse"
-            else:
-                updates["next_agent"] = _DECISION_TO_NEXT[decision]
     elif decision == "analyse":
-        updates["next_agent"] = _DECISION_TO_NEXT[decision]
-        _parse_dimension_preferences(state, updates)
-        if "expected_friction_lenses" not in updates:
-            current = state.get("selected_friction_agents", [])
-            updates["expected_friction_lenses"] = list(dict.fromkeys([a for a in current if a]))
-        updates["missing_friction_lenses"] = []
+        _apply_analyse_transition(state, updates, _DECISION_TO_NEXT[decision])
     else:
         updates["next_agent"] = _DECISION_TO_NEXT[decision]
 

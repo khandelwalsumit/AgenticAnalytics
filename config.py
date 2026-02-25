@@ -73,7 +73,7 @@ LLM_ANALYSIS_COLUMNS: list[str] = [
 # Path to an external .pptx template file with pre-designed slide layouts.
 # If the file exists, slides use its layouts. If not, falls back to code-based defaults.
 # Set to "" or leave as default to use code-based template.
-PPTX_TEMPLATE_PATH = os.getenv("PPTX_TEMPLATE_PATH", str(ROOT_DIR / "template.pptx"))
+PPTX_TEMPLATE_PATH = os.getenv("PPTX_TEMPLATE_PATH", str(DATA_INPUT_DIR / "template.pptx"))
 
 # -- Display & Debug ---------------------------------------------------------
 # Master switch: when True, every node entry/exit, tool call, AI response,
@@ -102,7 +102,6 @@ FRICTION_AGENTS = {
 }
 REPORTING_AGENTS = {
     "narrative_agent",
-    "dataviz_agent",
     "formatting_agent",
     "report_analyst",
 }
