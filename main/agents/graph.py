@@ -337,6 +337,177 @@ def _build_dataviz_fallback(state: dict[str, Any], *, reason: str) -> dict[str, 
     }
 
 
+def _resolve_existing_path(raw_path: str) -> str:
+    path = str(raw_path or "").strip()
+    if not path:
+        return ""
+    p = Path(path)
+    if p.exists():
+        return str(p)
+    if not p.is_absolute():
+        alt = Path(DATA_DIR) / p.name
+        if alt.exists():
+            return str(alt)
+    return path
+
+
+def _stringify(value: Any, *, limit: int = 220) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        text = value.strip()
+    elif isinstance(value, (int, float, bool)):
+        text = str(value)
+    elif isinstance(value, list):
+        parts = [_stringify(v, limit=limit) for v in value]
+        text = "; ".join([p for p in parts if p])
+    elif isinstance(value, dict):
+        parts: list[str] = []
+        for k, v in value.items():
+            rendered = _stringify(v, limit=limit)
+            if rendered:
+                label = str(k).replace("_", " ").strip().title()
+                parts.append(f"{label}: {rendered}")
+        text = " | ".join(parts)
+    else:
+        text = str(value).strip()
+    if len(text) > limit:
+        return text[: limit - 3].rstrip() + "..."
+    return text
+
+
+def _build_slide_points(section_type: str, content: Any) -> list[str]:
+    points: list[str] = []
+    if not isinstance(content, dict):
+        rendered = _stringify(content)
+        return [rendered] if rendered else []
+
+    if section_type == "executive_summary":
+        opening = _stringify(content.get("opening", ""), limit=180)
+        if opening:
+            points.append(opening)
+        for issue in content.get("top_3_issues", [])[:4] if isinstance(content.get("top_3_issues", []), list) else []:
+            if not isinstance(issue, dict):
+                continue
+            title = _stringify(issue.get("title", "Issue"), limit=90)
+            calls = _safe_int(issue.get("call_volume", 0), 0)
+            pct = _safe_float(issue.get("call_percentage", 0.0), 0.0)
+            solution = _stringify(issue.get("recommended_solution", ""), limit=110)
+            points.append(f"{title}: {calls} calls ({pct:.1f}%). {solution}")
+        for quick_win in content.get("quick_wins", [])[:3] if isinstance(content.get("quick_wins", []), list) else []:
+            if not isinstance(quick_win, dict):
+                continue
+            points.append(_stringify(quick_win, limit=180))
+    elif section_type == "impact_ease_matrix":
+        rows = content.get("matrix_rows", []) if isinstance(content.get("matrix_rows", []), list) else []
+        for row in rows[:6]:
+            if not isinstance(row, dict):
+                continue
+            theme = _stringify(row.get("theme", "Theme"), limit=80)
+            calls = _safe_int(row.get("volume_calls", 0), 0)
+            impact = _safe_float(row.get("impact_score", 0.0), 0.0)
+            ease = _safe_float(row.get("ease_score", 0.0), 0.0)
+            priority = _safe_float(row.get("priority_score", 0.0), 0.0)
+            points.append(
+                f"{theme}: {calls} calls | Impact {impact:.1f} | Ease {ease:.1f} | Priority {priority:.1f}"
+            )
+    elif section_type == "recommendations_by_dimension":
+        dims = content.get("dimensions", {}) if isinstance(content.get("dimensions", {}), dict) else {}
+        for dim_name, actions in dims.items():
+            if not isinstance(actions, list):
+                continue
+            for action in actions[:2]:
+                if not isinstance(action, dict):
+                    continue
+                action_text = _stringify(action.get("action", ""), limit=110)
+                theme = _stringify(action.get("theme", ""), limit=70)
+                calls = _safe_int(action.get("impact_calls", 0), 0)
+                points.append(f"{str(dim_name).title()}: {action_text} ({theme}, ~{calls} calls)")
+    elif section_type == "theme_deep_dive":
+        theme = _stringify(content.get("theme", "Theme"), limit=90)
+        calls = _safe_int(content.get("call_count", 0), 0)
+        impact = _safe_float(content.get("impact_score", 0.0), 0.0)
+        ease = _safe_float(content.get("ease_score", 0.0), 0.0)
+        points.append(f"{theme}: {calls} calls | Impact {impact:.1f} | Ease {ease:.1f}")
+        drivers = content.get("drivers", []) if isinstance(content.get("drivers", []), list) else []
+        for driver in drivers[:4]:
+            if not isinstance(driver, dict):
+                continue
+            d_name = _stringify(driver.get("driver", "Driver"), limit=100)
+            d_calls = _safe_int(driver.get("call_count", 0), 0)
+            d_type = _stringify(driver.get("type", ""), limit=40)
+            points.append(f"{d_name} ({d_type}) - {d_calls} calls")
+
+    if not points:
+        for key, value in content.items():
+            rendered = _stringify(value, limit=170)
+            if rendered:
+                points.append(f"{str(key).replace('_', ' ').title()}: {rendered}")
+            if len(points) >= 6:
+                break
+
+    cleaned = [p for p in points if p]
+    return cleaned[:8]
+
+
+def _build_structured_slide_plan(narrative_json: dict[str, Any]) -> dict[str, Any]:
+    title = _stringify(narrative_json.get("report_title", ""), limit=140) or "Friction Analysis Report"
+    subtitle = _stringify(narrative_json.get("report_subtitle", ""), limit=140)
+
+    slides: list[dict[str, Any]] = [{
+        "type": "title",
+        "title": title,
+        "subtitle": subtitle,
+        "points": [],
+        "visual": "none",
+        "notes": "Auto-generated title slide",
+    }]
+
+    sections = narrative_json.get("sections", [])
+    if isinstance(sections, list):
+        type_map = {
+            "executive_summary": "key_summary",
+            "impact_ease_matrix": "impact_ease",
+            "recommendations_by_dimension": "recommendations",
+            "theme_deep_dive": "theme_detail",
+        }
+        for idx, section in enumerate(sections, start=1):
+            if not isinstance(section, dict):
+                continue
+            source_type = str(section.get("type", "")).strip()
+            title_text = _stringify(section.get("title", ""), limit=140) or f"Section {idx}"
+            content = section.get("content", {})
+            visual = _stringify(section.get("visual", ""), limit=80) or "none"
+            notes = _stringify(section.get("notes", ""), limit=200)
+            slide_type = type_map.get(source_type, "content")
+
+            slides.append({
+                "type": slide_type,
+                "title": title_text,
+                "points": _build_slide_points(source_type, content),
+                "visual": visual,
+                "notes": notes,
+            })
+
+    return {"slides": slides}
+
+
+def _build_chart_paths_map(dataviz_json: dict[str, Any]) -> dict[str, str]:
+    chart_paths: dict[str, str] = {}
+    charts = dataviz_json.get("charts", []) if isinstance(dataviz_json, dict) else []
+    if not isinstance(charts, list):
+        return chart_paths
+    for chart in charts:
+        if not isinstance(chart, dict):
+            continue
+        chart_type = _stringify(chart.get("type", ""), limit=80)
+        raw_path = _stringify(chart.get("file_path", ""), limit=400)
+        resolved_path = _resolve_existing_path(raw_path)
+        if chart_type and resolved_path:
+            chart_paths[chart_type] = resolved_path
+    return chart_paths
+
+
 def _validate_formatting(result: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     rpt = str(result.get("report_file_path", "")).strip()
@@ -950,6 +1121,41 @@ def build_graph(
             fmt_result.get("markdown_file_path", ""),
             len(fmt_result.get("messages", [])),
         )
+
+        # Deterministic PPT export: build slide plan + chart map from validated
+        # narrative/dataviz outputs so PPT is structured even if formatter used
+        # markdown fallback internally.
+        narrative_payload = merged.get("narrative_output", {})
+        narrative_json = _extract_json(
+            narrative_payload.get("full_response", "") if isinstance(narrative_payload, dict) else ""
+        )
+        dataviz_payload = merged.get("dataviz_output", {})
+        dataviz_json = _extract_json(
+            dataviz_payload.get("full_response", "") if isinstance(dataviz_payload, dict) else ""
+        )
+        slide_plan = _build_structured_slide_plan(narrative_json)
+        chart_paths = _build_chart_paths_map(dataviz_json)
+
+        pptx_tool = TOOL_REGISTRY["export_to_pptx"]
+        pptx_raw = pptx_tool.invoke({
+            "slide_plan_json": json.dumps(slide_plan, default=str),
+            "chart_paths_json": json.dumps(chart_paths, default=str),
+            "report_key": str(fmt_result.get("report_markdown_key", "report_markdown")),
+        })
+        pptx_data = _extract_json(str(pptx_raw))
+        structured_pptx_path = _resolve_existing_path(str(pptx_data.get("pptx_path", "")))
+        if structured_pptx_path and _path_exists(structured_pptx_path):
+            fmt_result["report_file_path"] = structured_pptx_path
+            logger.info(
+                "Report generation: structured PPT export override applied (slides=%d, charts=%d): %s",
+                len(slide_plan.get("slides", [])) if isinstance(slide_plan, dict) else 0,
+                len(chart_paths),
+                structured_pptx_path,
+            )
+        else:
+            logger.warning(
+                "Report generation: structured PPT export did not return a valid path. Keeping formatter output."
+            )
 
         # Update formatting sub-agent to done
         fmt_summary = ""

@@ -1,0 +1,60 @@
+{
+    "status": "Running",
+    "tasks": [
+        {
+            "title": "Data extraction & bucketing",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "Multi-dimensional friction analysis",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "  -> Digital Friction Agent  -  Digital product & UX gap analysis",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "  -> Operations Agent  -  Process & SLA breakdown analysis",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "  -> Communication Agent  -  Notification & expectation gap analysis",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "  -> Policy Agent  -  Regulatory & governance constraint analysis",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "  -> Synthesizer Agent  -  Analysis of 4 calls for ATT customers regarding Rewards & Loyalty revealed 1 core theme with 4 distinct friction points.",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "Generate analysis report",
+            "status": "running",
+            "forId": null
+        },
+        {
+            "title": "  -> Narrative Agent  -  Slide deck structure & story design",
+            "status": "running",
+            "forId": null
+        },
+        {
+            "title": "  -> DataViz Agent  -  Chart generation via code execution",
+            "status": "running",
+            "forId": null
+        },
+        {
+            "title": "Deliver report and downloads",
+            "status": "ready",
+            "forId": null
+        }
+    ]
+}
