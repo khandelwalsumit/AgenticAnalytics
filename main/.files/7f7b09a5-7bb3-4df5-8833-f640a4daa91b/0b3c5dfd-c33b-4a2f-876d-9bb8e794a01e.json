@@ -2,18 +2,8 @@
     "status": "Running",
     "tasks": [
         {
-            "title": "Filter data by product and theme",
+            "title": "Data extraction & bucketing",
             "status": "done",
-            "forId": null
-        },
-        {
-            "title": "Bucket data for analysis",
-            "status": "done",
-            "forId": null
-        },
-        {
-            "title": "Confirm data slicing with user",
-            "status": "running",
             "forId": null
         },
         {
@@ -23,27 +13,27 @@
         },
         {
             "title": "  -> Digital Friction Agent  -  Digital product & UX gap analysis",
-            "status": "running",
+            "status": "done",
             "forId": null
         },
         {
             "title": "  -> Operations Agent  -  Process & SLA breakdown analysis",
-            "status": "running",
+            "status": "done",
             "forId": null
         },
         {
             "title": "  -> Communication Agent  -  Notification & expectation gap analysis",
-            "status": "running",
+            "status": "done",
             "forId": null
         },
         {
             "title": "  -> Policy Agent  -  Regulatory & governance constraint analysis",
-            "status": "running",
+            "status": "done",
             "forId": null
         },
         {
-            "title": "Review synthesized findings with user",
-            "status": "ready",
+            "title": "  -> Synthesizer Agent  -  Cross-lens root cause synthesis & ranking",
+            "status": "running",
             "forId": null
         },
         {

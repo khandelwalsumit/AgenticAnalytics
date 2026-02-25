@@ -93,13 +93,31 @@ def filter_data(filters: dict[str, Any]) -> str:
 
     mask = pd.Series(True, index=df.index)
     applied = {}
+    skipped = {}
 
     for col, val in filters.items():
         if col not in df.columns:
+            # Find close matches to suggest
+            from difflib import get_close_matches
+            close = get_close_matches(col, list(df.columns), n=3, cutoff=0.4)
+            skipped[col] = {
+                "reason": f"Column '{col}' not found in dataset",
+                "suggestions": close,
+                "available_columns": sorted(df.columns.tolist()),
+            }
             continue
         if isinstance(val, list):
+            # Check which values actually exist in the column
+            existing = set(df[col].dropna().unique().astype(str))
+            missing_vals = [v for v in val if str(v) not in existing]
             mask &= df[col].isin(val)
             applied[col] = val
+            if missing_vals:
+                skipped[f"{col}_values"] = {
+                    "reason": f"Some values not found in column '{col}'",
+                    "missing": missing_vals,
+                    "available": sorted(list(existing))[:30],
+                }
         else:
             mask &= df[col] == val
             applied[col] = val
@@ -111,6 +129,15 @@ def filter_data(filters: dict[str, Any]) -> str:
         "filters_applied": applied,
         "reduction_pct": round((1 - len(filtered) / max(len(df), 1)) * 100, 2),
     }
+
+    if skipped:
+        metadata["skipped_filters"] = skipped
+
+    if not applied:
+        metadata["warning"] = (
+            "No filters were applied. All requested columns were not found. "
+            "Check the 'skipped_filters' field for suggestions."
+        )
 
     store.store_dataframe("filtered_dataset", filtered, metadata=metadata)
     return json.dumps(metadata, indent=2)

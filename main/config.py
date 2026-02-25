@@ -18,8 +18,8 @@ load_dotenv()
 ROOT_DIR = Path(__file__).resolve().parent
 AGENTS_DIR = ROOT_DIR / "agents" / "definitions"
 SKILLS_DIR = ROOT_DIR / "skills"
-DATA_DIR = ROOT_DIR / os.getenv("DATA_DIR", "data")
-CACHE_DIR = ROOT_DIR / os.getenv("CACHE_DIR", ".cache")
+DATA_DIR = ROOT_DIR / "data"
+CACHE_DIR = ROOT_DIR / ".cache"
 THREAD_STATES_DIR = CACHE_DIR / "thread_states"
 
 # Hardcoded default CSV path — user sets this to their dataset location.
@@ -75,7 +75,7 @@ PPTX_TEMPLATE_PATH = os.getenv("PPTX_TEMPLATE_PATH", str(ROOT_DIR / "template.pp
 # -- Display & Debug ---------------------------------------------------------
 # Master switch: when True, every node entry/exit, tool call, AI response,
 # and supervisor reasoning is rendered as collapsible Chainlit Steps.
-VERBOSE = os.getenv("VERBOSE", "true").lower() in ("1", "true", "yes")
+VERBOSE = False
 
 # Individual toggles (only matter when VERBOSE is True)
 SHOW_TOOL_CALLS = os.getenv("SHOW_TOOL_CALLS", "true").lower() in ("1", "true", "yes")
@@ -86,7 +86,7 @@ SHOW_SUPERVISOR_REASONING = os.getenv("SHOW_SUPERVISOR_REASONING", "true").lower
 MAX_DISPLAY_LENGTH = int(os.getenv("MAX_DISPLAY_LENGTH", "2000"))
 
 # Log level for console logging ("debug" | "info" | "warning" | "error")
-LOG_LEVEL = os.getenv("LOG_LEVEL", "info").lower()
+LOG_LEVEL = os.getenv("LOG_LEVEL", "debug").lower()
 LOG_FORMAT = os.getenv("LOG_FORMAT", " [%(levelname)s]---------[ %(name)s ]----------- %(message)s")
 LOG_DATE_FORMAT = os.getenv("LOG_DATE_FORMAT", "%H:%M:%S")
 

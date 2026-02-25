@@ -2,7 +2,7 @@
 
 Each node is a thin async wrapper that:
 1. Invokes the agent (pre-bound structured chain or per-call ReAct agent)
-2. Applies structured-output → state mapping for decision agents
+2. Applies structured-output -> state mapping for decision agents
 3. Tracks plan progress (only for agents listed in plan_tasks)
 4. Records ExecutionTrace + reasoning for the Chainlit UI
 """
@@ -42,7 +42,7 @@ logger.setLevel(getattr(logging, LOG_LEVEL.upper(), logging.INFO))
 
 
 # ------------------------------------------------------------------
-# Agent → dedicated state field
+# Agent -> dedicated state field
 # ------------------------------------------------------------------
 
 AGENT_STATE_FIELDS: dict[str, str] = {
@@ -56,7 +56,7 @@ AGENT_STATE_FIELDS: dict[str, str] = {
     "formatting_agent": "formatting_output",
 }
 
-# Supervisor decision → next node routing
+# Supervisor decision -> next node routing
 _DECISION_TO_NEXT: dict[str, str] = {
     "answer": "__end__",
     "clarify": "__end__",
@@ -65,8 +65,18 @@ _DECISION_TO_NEXT: dict[str, str] = {
     "execute": "",  # resolved from plan_tasks
 }
 
-# Safety: max consecutive supervisor→data_analyst loops before forcing progress
+# Safety: max consecutive supervisor->data_analyst loops before forcing progress
 MAX_SUPERVISOR_LOOPS = 2
+
+
+def _PRELIMINARY_PLAN_TASKS() -> list[dict[str, str]]:
+    """Return a preliminary task list shown as soon as extraction starts."""
+    return [
+        {"title": "Data extraction & bucketing", "agent": "data_analyst", "status": "in_progress"},
+        {"title": "Multi-dimensional friction analysis", "agent": "friction_analysis", "status": "ready"},
+        {"title": "Generate analysis report", "agent": "report_generation", "status": "ready"},
+        {"title": "Deliver report and downloads", "agent": "report_analyst", "status": "ready"},
+    ]
 
 
 # ------------------------------------------------------------------
@@ -234,13 +244,24 @@ def make_agent_node(
 
     if is_structured:
         structured_chain, output_schema = agent_factory.create_structured_chain(agent_name)
-        logger.info("Pre-created structured chain for [%s] → %s", agent_name, output_schema.__name__)
+        logger.info("Pre-created structured chain for [%s] -> %s", agent_name, output_schema.__name__)
 
     # -- Closure: the actual node function ---------------------------------
     async def node_fn(state: AnalyticsState) -> dict[str, Any]:
         start_ms = int(time.time() * 1000)
         step_id = str(uuid.uuid4())[:8]
-        logger.info("Node [%s] starting (step=%s)", agent_name, step_id)
+        logger.info(
+            "---- Node [%s] START (step=%s) | input msgs=%d | plan=%d/%d | phase=%s",
+            agent_name, step_id, len(state["messages"]),
+            state.get("plan_steps_completed", 0), state.get("plan_steps_total", 0),
+            state.get("phase", "?"),
+        )
+        # Log key state fields for context
+        logger.debug(
+            "  State context: next_agent=%s decision=%s filters=%s objective=%s",
+            state.get("next_agent", ""), state.get("supervisor_decision", ""),
+            state.get("filters_applied", {}), state.get("analysis_objective", "")[:80] if state.get("analysis_objective") else "",
+        )
 
         # -- Build dynamic context ----------------------------------------
         extra_context = _build_extra_context(agent_name, state, skill_loader)
@@ -250,8 +271,11 @@ def make_agent_node(
         if extra_context:
             system_prompt += f"\n\n{extra_context}"
 
-        logger.info("Node [%s] system prompt length=%d, input messages=%d",
-                     agent_name, len(system_prompt), len(state["messages"]))
+        logger.info(
+            "  Agent [%s] system prompt=%d chars, input msgs=%d, mode=%s",
+            agent_name, len(system_prompt), len(state["messages"]),
+            "structured" if (is_structured and structured_chain) else "react",
+        )
 
         # -- Invoke agent --------------------------------------------------
         if is_structured and structured_chain is not None:
@@ -267,20 +291,46 @@ def make_agent_node(
             result = await agent.ainvoke({"messages": state["messages"]})
 
         elapsed = int(time.time() * 1000) - start_ms
-        msgs = result["messages"]
-        last_msg = msgs[-1] if msgs else None
+        all_msgs = result["messages"]
+
+        # Filter to only NEW messages (exclude input messages already in state)
+        input_msg_ids = {
+            m.id for m in state["messages"]
+            if hasattr(m, "id") and m.id
+        }
+        new_msgs = [
+            m for m in all_msgs
+            if not (hasattr(m, "id") and m.id and m.id in input_msg_ids)
+        ]
+
+        last_msg = new_msgs[-1] if new_msgs else (all_msgs[-1] if all_msgs else None)
         summary = _trunc(_text(last_msg.content), 200) if last_msg and hasattr(last_msg, "content") else ""
 
-        # -- Build tools_used list -----------------------------------------
+        logger.info(
+            "  Agent [%s] returned %d msgs total, %d new | last_msg type=%s",
+            agent_name, len(all_msgs), len(new_msgs),
+            getattr(last_msg, "type", "?") if last_msg else "none",
+        )
+        # Log new message types and content previews
+        for i, m in enumerate(new_msgs):
+            mtype = getattr(m, "type", "?")
+            mcontent = _text(m.content)[:150] if hasattr(m, "content") and m.content else ""
+            has_tc = bool(hasattr(m, "tool_calls") and m.tool_calls)
+            logger.debug(
+                "    new_msg[%d] type=%s tool_calls=%s content=%s",
+                i, mtype, has_tc, mcontent if mcontent else "(empty)",
+            )
+
+        # -- Build tools_used list (from new messages only) ----------------
         tools_used = [
             tc.get("name", "?")
-            for m in msgs if hasattr(m, "tool_calls")
+            for m in new_msgs if hasattr(m, "tool_calls")
             for tc in m.tool_calls
         ]
 
         # -- Base updates --------------------------------------------------
         updates: dict[str, Any] = {
-            "messages": msgs,
+            "messages": new_msgs,
             "execution_trace": state.get("execution_trace", []) + [ExecutionTrace(
                 step_id=step_id,
                 agent=agent_name,
@@ -294,7 +344,7 @@ def make_agent_node(
                 "step_name": agent_name.replace("_", " ").title(),
                 "step_text": summary,
                 "agent": agent_name,
-                **({"verbose": _verbose_details(msgs)} if VERBOSE else {}),
+                **({"verbose": _verbose_details(new_msgs)} if VERBOSE else {}),
             }],
             **_clear_checkpoint_fields(),
         }
@@ -313,7 +363,7 @@ def make_agent_node(
                 "agent": agent_name,
             }
 
-        # -- Structured output → state mapping -----------------------------
+        # -- Structured output -> state mapping -----------------------------
         structured = result.get("structured_output")
         plan_agents = {t.get("agent", "") for t in state.get("plan_tasks", [])}
 
@@ -323,7 +373,25 @@ def make_agent_node(
         if agent_name in plan_agents:
             _advance_plan(agent_name, state, updates)
 
-        logger.info("Node [%s] done in %dms (tools: %s)", agent_name, elapsed, ", ".join(tools_used) or "none")
+        # Log state fields being written
+        written_fields = [k for k in updates if updates[k] and k not in ("messages", "reasoning", "execution_trace")]
+        logger.info(
+            "---- Node [%s] DONE %dms | tools=%s | new_msgs=%d | state_writes=%s",
+            agent_name, elapsed, ", ".join(tools_used) or "none",
+            len(updates.get("messages", [])), ", ".join(written_fields),
+        )
+        if agent_name in AGENT_STATE_FIELDS:
+            field = AGENT_STATE_FIELDS[agent_name]
+            val = updates.get(field, {})
+            logger.info(
+                "  -> %s.output = %s",
+                field, _trunc(str(val.get("output", "")), 200) if isinstance(val, dict) else "(not dict)",
+            )
+        if updates.get("next_agent"):
+            logger.info("  -> next_agent=%s decision=%s", updates.get("next_agent"), updates.get("supervisor_decision", ""))
+        if updates.get("plan_tasks"):
+            statuses = {t.get("status", "?") for t in updates["plan_tasks"]}
+            logger.info("  -> plan_tasks=%d statuses=%s", len(updates["plan_tasks"]), statuses)
         return updates
 
     node_fn.__name__ = f"{agent_name}_node"
@@ -371,18 +439,30 @@ def _build_extra_context(
         return "\n\n## Analysis Context\n" + json.dumps(ctx, indent=2, default=str)
 
     if agent_name == "supervisor":
-        return (
-            "\n\n## Current State Context\n"
-            + json.dumps({
-                "filters_applied": state.get("filters_applied", {}),
-                "themes_for_analysis": state.get("themes_for_analysis", []),
-                "navigation_log": state.get("navigation_log", []),
-                "analysis_objective": state.get("analysis_objective", ""),
-                "plan_tasks": state.get("plan_tasks", []),
-                "plan_steps_completed": state.get("plan_steps_completed", 0),
-                "plan_steps_total": state.get("plan_steps_total", 0),
-            }, indent=2, default=str)
-        )
+        parts = []
+        # Inject available filters so supervisor can match user queries to real columns
+        schema = state.get("dataset_schema", {})
+        if schema:
+            parts.append("## Available Dataset Filters\n")
+            parts.append("Use these to match user queries to actual data columns and values.\n\n")
+            for col, values in schema.items():
+                if len(values) <= 20:
+                    parts.append(f"- **{col}**: {values}\n")
+                else:
+                    parts.append(f"- **{col}**: {values[:20]} ... ({len(values)} total)\n")
+            parts.append("\n")
+
+        parts.append("## Current State Context\n")
+        parts.append(json.dumps({
+            "filters_applied": state.get("filters_applied", {}),
+            "themes_for_analysis": state.get("themes_for_analysis", []),
+            "navigation_log": state.get("navigation_log", []),
+            "analysis_objective": state.get("analysis_objective", ""),
+            "plan_tasks": state.get("plan_tasks", []),
+            "plan_steps_completed": state.get("plan_steps_completed", 0),
+            "plan_steps_total": state.get("plan_steps_total", 0),
+        }, indent=2, default=str))
+        return "\n\n" + "\n".join(parts)
 
     if agent_name == "planner":
         return (
@@ -396,11 +476,37 @@ def _build_extra_context(
             }, indent=2, default=str)
         )
 
+    if agent_name == "data_analyst":
+        parts = []
+        # Inject available filters from dataset schema
+        schema = state.get("dataset_schema", {})
+        if schema:
+            parts.append("## Available Filters (from loaded dataset)\n")
+            parts.append("Use ONLY these exact column names and values when calling filter_data.\n")
+            parts.append("Do NOT guess column names -- use the ones listed here.\n\n")
+            for col, values in schema.items():
+                if len(values) <= 20:
+                    parts.append(f"- **{col}**: {values}\n")
+                else:
+                    parts.append(f"- **{col}**: {values[:20]} ... ({len(values)} total)\n")
+        else:
+            parts.append("## Available Filters\n")
+            parts.append("No filter catalog available yet. Use load_dataset first to discover the schema.\n")
+
+        # Also inject current state context
+        parts.append("\n## Current Data State\n")
+        parts.append(json.dumps({
+            "filters_applied": state.get("filters_applied", {}),
+            "dataset_path": state.get("dataset_path", ""),
+            "analysis_objective": state.get("analysis_objective", ""),
+        }, indent=2, default=str))
+        return "\n\n" + "\n".join(parts)
+
     return ""
 
 
 # ------------------------------------------------------------------
-# Structured output → state mapping
+# Structured output -> state mapping
 # ------------------------------------------------------------------
 
 
@@ -423,27 +529,42 @@ def _apply_structured_updates(
     # === PLANNER ===
     elif agent_name == "planner":
         if isinstance(structured, PlannerOutput):
+            planner_tasks = [t.model_dump() for t in structured.plan_tasks]
+            # Prepend completed data extraction step if it was in the preliminary plan
+            existing = state.get("plan_tasks", [])
+            done_steps = [t for t in existing if t.get("status") == "done"]
+            final_tasks = done_steps + planner_tasks
             updates.update({
-                "plan_tasks": [t.model_dump() for t in structured.plan_tasks],
-                "plan_steps_total": structured.plan_steps_total,
-                "plan_steps_completed": 0,
+                "plan_tasks": final_tasks,
+                "plan_steps_total": len(final_tasks),
+                "plan_steps_completed": len(done_steps),
                 "analysis_objective": structured.analysis_objective,
                 "reasoning": [{"step_name": "Planner", "step_text": structured.reasoning}],
             })
-            logger.info("Planner: %d tasks, objective=%r", len(structured.plan_tasks), structured.analysis_objective[:80])
+            logger.info("Planner: %d tasks (%d done + %d new), objective=%r",
+                         len(final_tasks), len(done_steps), len(planner_tasks),
+                         structured.analysis_objective[:80])
         elif last_msg and hasattr(last_msg, "content"):
             data = _parse_json(_text(last_msg.content))
             if data.get("plan_tasks"):
+                planner_tasks = data["plan_tasks"]
+                existing = state.get("plan_tasks", [])
+                done_steps = [t for t in existing if t.get("status") == "done"]
+                final_tasks = done_steps + planner_tasks
                 updates.update({
-                    "plan_tasks": data["plan_tasks"],
-                    "plan_steps_total": data.get("plan_steps_total", len(data["plan_tasks"])),
-                    "plan_steps_completed": 0,
+                    "plan_tasks": final_tasks,
+                    "plan_steps_total": len(final_tasks),
+                    "plan_steps_completed": len(done_steps),
                 })
                 if data.get("analysis_objective"):
                     updates["analysis_objective"] = data["analysis_objective"]
 
-    # === DATA ANALYST (ReAct agent — extracts state from tool results) ===
+    # === DATA ANALYST (ReAct agent -- extracts state from tool results) ===
     elif agent_name == "data_analyst":
+        # FIRST: extract filters/themes from tool result messages
+        # (must happen BEFORE we overwrite updates["messages"] below)
+        _extract_data_analyst_state(state, updates)
+
         # Parse the last AI message for JSON summary (fallback)
         da_data = {}
         if last_msg and hasattr(last_msg, "content"):
@@ -460,10 +581,6 @@ def _apply_structured_updates(
         updates["reasoning"] = [{"step_name": "Data Analyst", "step_text": da_response}]
         if da_response:
             updates["messages"] = [AIMessage(content=da_response)]
-
-        # Extract filters_applied and themes from tool result messages
-        # (filter_data and bucket_data tools populate these)
-        _extract_data_analyst_state(state, updates)
 
         logger.info("Data Analyst: decision=%s, confidence=%s", da_decision, da_confidence)
 
@@ -519,6 +636,44 @@ def _apply_structured_updates(
             })
             logger.info("Critique (fallback): grade=%s, score=%.2f", grade, quality_score)
 
+    # === FORMATTING AGENT (ReAct agent -- extracts file paths from tool results) ===
+    elif agent_name == "formatting_agent":
+        _extract_formatting_state(state, updates)
+
+
+def _extract_formatting_state(
+    state: AnalyticsState, updates: dict[str, Any]
+) -> None:
+    """Extract report_file_path and data_file_path from formatting agent tool results.
+
+    Scans messages for tool result messages from export_to_pptx,
+    export_filtered_csv, and generate_markdown_report, then populates
+    the corresponding state fields so app.py can serve downloads.
+    """
+    messages = updates.get("messages", [])
+    for msg in messages:
+        if not hasattr(msg, "content"):
+            continue
+        content = _text(msg.content)
+        data = _parse_json(content)
+        if not data:
+            continue
+
+        # export_to_pptx returns {"pptx_path": "..."}
+        if "pptx_path" in data:
+            updates["report_file_path"] = data["pptx_path"]
+            logger.info("Formatting Agent: extracted report_file_path=%s", data["pptx_path"])
+
+        # export_filtered_csv returns {"csv_path": "..."}
+        if "csv_path" in data:
+            updates["data_file_path"] = data["csv_path"]
+            logger.info("Formatting Agent: extracted data_file_path=%s", data["csv_path"])
+
+        # generate_markdown_report returns {"report_key": "...", "markdown_path": "..."}
+        if "report_key" in data:
+            updates["report_markdown_key"] = data["report_key"]
+            logger.info("Formatting Agent: extracted report_markdown_key=%s", data["report_key"])
+
 
 def _extract_data_analyst_state(
     state: AnalyticsState, updates: dict[str, Any]
@@ -538,16 +693,10 @@ def _extract_data_analyst_state(
         if not data:
             continue
 
-        # filter_data tool typically returns applied filters
-        if "filters" in data or "product" in data or "call_theme" in data:
-            filters = data.get("filters", {})
-            if not filters:
-                filters = {}
-                if data.get("product"):
-                    filters["product"] = data["product"]
-                if data.get("call_theme"):
-                    filters["call_theme"] = data["call_theme"]
-            if filters:
+        # filter_data tool returns "filters_applied" key with the applied filters
+        if "filters_applied" in data:
+            filters = data["filters_applied"]
+            if filters and isinstance(filters, dict):
                 updates["filters_applied"] = filters
                 logger.info("Data Analyst: extracted filters_applied=%s", filters)
 
@@ -557,6 +706,11 @@ def _extract_data_analyst_state(
             logger.info("Data Analyst: extracted themes_for_analysis=%s", data["themes"])
         if "buckets" in data:
             updates["data_buckets"] = data["buckets"]
+            # Extract theme names from bucket keys for themes_for_analysis
+            bucket_names = list(data["buckets"].keys())
+            if bucket_names and "themes_for_analysis" not in updates:
+                updates["themes_for_analysis"] = bucket_names
+                logger.info("Data Analyst: extracted themes from bucket keys=%s", bucket_names)
 
     # If no tool results found, still mark that data_analyst ran
     # by setting a minimal filters_applied so the supervisor knows.
@@ -566,7 +720,7 @@ def _extract_data_analyst_state(
 
 
 def _apply_supervisor(s: SupervisorOutput, state: AnalyticsState, updates: dict) -> None:
-    """Map SupervisorOutput → state updates."""
+    """Map SupervisorOutput -> state updates."""
     updates["supervisor_decision"] = s.decision
     updates["reasoning"] = [{"step_name": "Supervisor", "step_text": s.reasoning}]
 
@@ -577,40 +731,61 @@ def _apply_supervisor(s: SupervisorOutput, state: AnalyticsState, updates: dict)
         updates["next_agent"] = agent
         updates["plan_tasks"] = plan
     elif s.decision == "extract":
-        # Loop detection: count how many consecutive supervisor→data_analyst
-        # round-trips have already happened.
-        trace = state.get("execution_trace", [])
-        consecutive = 0
-        for entry in reversed(trace):
-            agent = entry.get("agent", "") if isinstance(entry, dict) else getattr(entry, "agent", "")
-            if agent == "data_analyst":
-                consecutive += 1
-            elif agent == "supervisor":
-                continue  # skip supervisor entries between
-            else:
-                break
-
-        if consecutive >= MAX_SUPERVISOR_LOOPS:
-            logger.warning(
-                "Supervisor loop detected: %d consecutive extract→data_analyst cycles. "
-                "Forcing transition to 'analyse' (planner).",
-                consecutive,
+        # If filters are already applied with real data, skip re-extraction
+        # and force transition to analyse (planner).
+        existing_filters = state.get("filters_applied", {})
+        has_real_filters = (
+            existing_filters
+            and isinstance(existing_filters, dict)
+            and existing_filters.get("status") != "extraction_attempted"
+            and any(k != "status" for k in existing_filters)
+        )
+        if has_real_filters:
+            logger.info(
+                "Supervisor: filters already applied (%s), forcing extract -> analyse",
+                existing_filters,
             )
             updates["next_agent"] = "planner"
             updates["supervisor_decision"] = "analyse"
         else:
-            updates["next_agent"] = target_agent
+            # Loop detection: count how many consecutive supervisor->data_analyst
+            # round-trips have already happened.
+            trace = state.get("execution_trace", [])
+            consecutive = 0
+            for entry in reversed(trace):
+                agent = entry.get("agent", "") if isinstance(entry, dict) else getattr(entry, "agent", "")
+                if agent == "data_analyst":
+                    consecutive += 1
+                elif agent == "supervisor":
+                    continue  # skip supervisor entries between
+                else:
+                    break
+
+            if consecutive >= MAX_SUPERVISOR_LOOPS:
+                logger.warning(
+                    "Supervisor loop detected: %d consecutive extract->data_analyst cycles. "
+                    "Forcing transition to 'analyse' (planner).",
+                    consecutive,
+                )
+                updates["next_agent"] = "planner"
+                updates["supervisor_decision"] = "analyse"
+            else:
+                updates["next_agent"] = target_agent
+                # Create preliminary task list so UI shows progress immediately
+                if not state.get("plan_tasks"):
+                    updates["plan_tasks"] = _PRELIMINARY_PLAN_TASKS()
+                    updates["plan_steps_total"] = len(updates["plan_tasks"])
     else:
         updates["next_agent"] = target_agent
 
     if s.response:
         updates["messages"] = [AIMessage(content=s.response)]
 
-    logger.info("Supervisor (structured): %s → %s (confidence=%d)", s.decision, updates["next_agent"], s.confidence)
+    logger.info("Supervisor (structured): %s -> %s (confidence=%d)", s.decision, updates["next_agent"], s.confidence)
 
 
 def _apply_supervisor_fallback(raw: str, state: AnalyticsState, updates: dict) -> None:
-    """Map legacy JSON supervisor output → state updates."""
+    """Map legacy JSON supervisor output -> state updates."""
     data = _parse_json(raw)
     decision = data.get("decision", "")
     if decision not in _DECISION_TO_NEXT:
@@ -623,34 +798,50 @@ def _apply_supervisor_fallback(raw: str, state: AnalyticsState, updates: dict) -
         updates["next_agent"] = agent
         updates["plan_tasks"] = plan
     elif decision == "extract":
-        # Same loop detection as the structured path
-        trace = state.get("execution_trace", [])
-        consecutive = 0
-        for entry in reversed(trace):
-            agent = entry.get("agent", "") if isinstance(entry, dict) else getattr(entry, "agent", "")
-            if agent == "data_analyst":
-                consecutive += 1
-            elif agent == "supervisor":
-                continue
-            else:
-                break
-        if consecutive >= MAX_SUPERVISOR_LOOPS:
-            logger.warning(
-                "Supervisor fallback loop detected: %d consecutive extract→data_analyst cycles. "
-                "Forcing transition to 'analyse' (planner).",
-                consecutive,
+        # If filters are already applied with real data, skip re-extraction
+        existing_filters = state.get("filters_applied", {})
+        has_real_filters = (
+            existing_filters
+            and isinstance(existing_filters, dict)
+            and existing_filters.get("status") != "extraction_attempted"
+            and any(k != "status" for k in existing_filters)
+        )
+        if has_real_filters:
+            logger.info(
+                "Supervisor fallback: filters already applied (%s), forcing extract -> analyse",
+                existing_filters,
             )
             updates["next_agent"] = "planner"
             updates["supervisor_decision"] = "analyse"
         else:
-            updates["next_agent"] = _DECISION_TO_NEXT[decision]
+            # Same loop detection as the structured path
+            trace = state.get("execution_trace", [])
+            consecutive = 0
+            for entry in reversed(trace):
+                agent = entry.get("agent", "") if isinstance(entry, dict) else getattr(entry, "agent", "")
+                if agent == "data_analyst":
+                    consecutive += 1
+                elif agent == "supervisor":
+                    continue
+                else:
+                    break
+            if consecutive >= MAX_SUPERVISOR_LOOPS:
+                logger.warning(
+                    "Supervisor fallback loop detected: %d consecutive extract->data_analyst cycles. "
+                    "Forcing transition to 'analyse' (planner).",
+                    consecutive,
+                )
+                updates["next_agent"] = "planner"
+                updates["supervisor_decision"] = "analyse"
+            else:
+                updates["next_agent"] = _DECISION_TO_NEXT[decision]
     else:
         updates["next_agent"] = _DECISION_TO_NEXT[decision]
 
     if decision in ("answer", "clarify") and data.get("response"):
         updates["messages"] = [AIMessage(content=data["response"])]
 
-    logger.info("Supervisor (fallback): %s → %s (confidence=%s)", decision, updates.get("next_agent", "?"), data.get("confidence", "?"))
+    logger.info("Supervisor (fallback): %s -> %s (confidence=%s)", decision, updates.get("next_agent", "?"), data.get("confidence", "?"))
 
 
 # ------------------------------------------------------------------
@@ -675,4 +866,4 @@ def _advance_plan(agent_name: str, state: AnalyticsState, updates: dict) -> None
     if total > 0 and completed >= total:
         updates["analysis_complete"] = True
         updates["phase"] = "qa"
-        logger.info("Pipeline complete — entering Q&A mode.")
+        logger.info("Pipeline complete -- entering Q&A mode.")

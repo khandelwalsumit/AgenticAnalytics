@@ -16,5 +16,6 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "pyyaml>=6.0",
     "markdown>=3.5",
+    "matplotlib>=3.10.8",
 ]
 

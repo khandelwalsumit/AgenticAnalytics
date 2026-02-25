@@ -1,0 +1,50 @@
+{
+    "status": "Running",
+    "tasks": [
+        {
+            "title": "Data extraction & bucketing",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "Multi-dimensional friction analysis",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "  -> Digital Friction Agent  -  Digital product & UX gap analysis",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "  -> Operations Agent  -  Process & SLA breakdown analysis",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "  -> Communication Agent  -  Notification & expectation gap analysis",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "  -> Policy Agent  -  Regulatory & governance constraint analysis",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "  -> Synthesizer Agent  -  ```json\n{\n  \"decision\": \"complete\",\n  \"confidence\": 92,\n  \"reasoning\": \"All 3 available agent outputs (Digital, Operatio",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "Generate analysis report",
+            "status": "ready",
+            "forId": null
+        },
+        {
+            "title": "Deliver report and downloads",
+            "status": "ready",
+            "forId": null
+        }
+    ]
+}

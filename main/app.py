@@ -12,9 +12,6 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from dotenv import load_dotenv
-load_dotenv()
-
 import chainlit as cl
 from chainlit.input_widget import MultiSelect
 from langchain_core.messages import AIMessage, HumanMessage
@@ -39,9 +36,22 @@ logging.basicConfig(
     level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),
 )
 
+# Ensure Chainlit .files directory exists (prevents WinError 3)
+Path(".files").mkdir(parents=True, exist_ok=True)
+
 # ------------------------------------------------------------------
 # Config
 # ------------------------------------------------------------------
+
+# Nodes whose AI messages render as collapsible Steps, not chat messages.
+# The first line becomes the step title; full text is the expanded body.
+STEP_NODES = {"data_analyst", "planner", "report_analyst"}
+
+STEP_NODE_LABELS = {
+    "data_analyst": "Data Extraction",
+    "planner": "Planning",
+    "report_analyst": "Report Review",
+}
 
 FRICTION_AGENT_IDS = [
     "digital_friction_agent", "operations_agent",
@@ -69,8 +79,11 @@ if len(os.environ.get("CHAINLIT_AUTH_SECRET", "")) < 32:
 
 
 def _message_text(msg: Any) -> str:
-    """Extract display text from an AI message. Skips raw JSON blobs."""
+    """Extract display text from an AI message. Skips raw JSON blobs and tool noise."""
     if not hasattr(msg, "content") or not msg.content or getattr(msg, "type", "") != "ai":
+        return ""
+    # Skip messages that are tool calls (no text content, only tool_calls)
+    if hasattr(msg, "tool_calls") and msg.tool_calls:
         return ""
     content = msg.content
     if isinstance(content, list):
@@ -79,7 +92,25 @@ def _message_text(msg: Any) -> str:
     # Don't surface raw JSON from structured output agents (planner, supervisor)
     if text.startswith("{") or text.startswith("["):
         return ""
+    # Don't surface messages containing large JSON blocks (agent dumps)
+    if "```json" in text or (text.count("{") > 5 and text.count("}") > 5):
+        return ""
     return text
+
+
+def _build_filter_catalog(df: pd.DataFrame, max_unique: int = 50) -> dict[str, list[str]]:
+    """Build a catalog of filterable columns with their unique values.
+
+    Only includes columns with <= max_unique unique non-null values
+    (free-text columns are excluded automatically).
+    """
+    catalog: dict[str, list[str]] = {}
+    for col in df.columns:
+        nunique = df[col].dropna().nunique()
+        if 1 < nunique <= max_unique:
+            values = sorted(df[col].dropna().unique().astype(str).tolist())
+            catalog[col] = values
+    return catalog
 
 
 def _create_runtime() -> tuple[str, DataStore, Any]:
@@ -196,8 +227,10 @@ async def on_chat_start():
             "source": str(csv_path), "row_count": len(df), "columns": list(df.columns),
         })
         state["dataset_path"] = str(csv_path)
+        state["dataset_schema"] = _build_filter_catalog(df)
         cl.user_session.set("state", state)
-        log.info("Loaded CSV: %s (%d rows)", csv_path.name, len(df))
+        log.info("Loaded CSV: %s (%d rows), filter catalog built (%d columns)",
+                 csv_path.name, len(df), len(state["dataset_schema"]))
 
 
 @cl.set_starters
@@ -236,7 +269,19 @@ async def on_message(message: cl.Message):
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(el.path, dest)
                 state["dataset_path"] = str(dest)
-                log.info("File uploaded: %s", dest)
+                # Rebuild filter catalog for uploaded file
+                try:
+                    uploaded_df = pd.read_csv(str(dest))
+                    data_store: DataStore = cl.user_session.get("data_store")
+                    data_store.store_dataframe("main_dataset", uploaded_df, metadata={
+                        "source": str(dest), "row_count": len(uploaded_df),
+                        "columns": list(uploaded_df.columns),
+                    })
+                    state["dataset_schema"] = _build_filter_catalog(uploaded_df)
+                    log.info("File uploaded: %s, filter catalog built (%d columns)",
+                             dest, len(state["dataset_schema"]))
+                except Exception as e:
+                    log.warning("Could not build filter catalog for upload: %s", e)
                 break
 
     user_text = message.content or "Proceed"
@@ -246,6 +291,7 @@ async def on_message(message: cl.Message):
 
     config = {"configurable": {"thread_id": thread_id}}
     task_list: cl.TaskList | None = cl.user_session.get("task_list")
+    displayed_msg_ids: set[str] = set()  # Dedup safety net
 
     # Resume from checkpoint interrupt or start fresh
     snapshot = graph.get_state(config)
@@ -276,9 +322,15 @@ async def on_message(message: cl.Message):
                 decision = node_output.get("supervisor_decision", "")
                 next_agent = node_output.get("next_agent", "")
                 log.info(
-                    "Node [%s] → keys=%s msgs=%d decision=%s next=%s",
-                    node_name, output_keys, msg_count, decision or "-", next_agent or "-",
+                    "=== Stream [%s] -> msgs=%d decision=%s next=%s keys=%s",
+                    node_name, msg_count, decision or "-", next_agent or "-", output_keys,
                 )
+                # Log message previews for debugging
+                for i, msg in enumerate(node_output.get("messages", [])):
+                    mtype = getattr(msg, "type", "?")
+                    mid = getattr(msg, "id", "?")[:12] if getattr(msg, "id", None) else "no-id"
+                    content = str(msg.content)[:120] if hasattr(msg, "content") and msg.content else ""
+                    log.debug("  msg[%d] id=%s type=%s -> %s", i, mid, mtype, content)
 
                 # Append reasoning
                 for r in node_output.get("reasoning", []):
@@ -307,14 +359,32 @@ async def on_message(message: cl.Message):
                 else:
                     await clear_awaiting_prompt()
 
-                # Surface AI messages
+                # Surface AI messages (deduplicated)
                 for msg in node_output.get("messages", []):
+                    msg_id = getattr(msg, "id", None) or str(id(msg))
+                    if msg_id in displayed_msg_ids:
+                        continue
+                    displayed_msg_ids.add(msg_id)
                     text = _message_text(msg)
                     if text:
-                        await cl.Message(content=text).send()
+                        if node_name in STEP_NODES:
+                            # Render as collapsible step bar
+                            label = STEP_NODE_LABELS.get(node_name, node_name)
+                            first_line = text.split("\n")[0].strip()
+                            step = cl.Step(name=f"{label}: {first_line[:80]}", type="tool")
+                            step.output = text
+                            await step.send()
+                        else:
+                            await cl.Message(content=text).send()
 
-                # Merge node output into local state
-                state.update(node_output)
+                # Merge node output into local state (append lists, replace scalars)
+                for k, v in node_output.items():
+                    if k == "messages":
+                        state.setdefault("messages", []).extend(v if isinstance(v, list) else [v])
+                    elif k in ("reasoning", "execution_trace", "io_trace") and isinstance(v, list):
+                        state.setdefault(k, []).extend(v)
+                    else:
+                        state[k] = v
 
         reasoning_step.status = "success"
         await reasoning_step.update()
@@ -385,7 +455,8 @@ async def on_chat_resume(thread: dict):
             data_store: DataStore = cl.user_session.get("data_store")
             df = pd.read_csv(csv_path)
             data_store.store_dataframe("main_dataset", df, metadata={})
-            log.info("Re-loaded CSV: %s (%d rows)", csv_path, len(df))
+            state["dataset_schema"] = _build_filter_catalog(df)
+            log.info("Re-loaded CSV: %s (%d rows), filter catalog rebuilt", csv_path, len(df))
     else:
         log.warning("No saved state found for thread=%s", thread_id)
 

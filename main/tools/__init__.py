@@ -75,7 +75,7 @@ def analyze_bucket(bucket: str, questions: list[str]) -> str:
 
     store = _data_store_ref
     available = store.list_keys()
-    actual_key = bucket if bucket in available else "main_dataset"
+    actual_key = bucket if bucket in available else ("filtered_dataset" if "filtered_dataset" in available else "main_dataset")
     if actual_key != bucket:
         print(f"[analyze_bucket] Bucket '{bucket}' not found, using '{actual_key}'. Available: {available}")
     df = store.get_dataframe(actual_key)
@@ -150,7 +150,7 @@ def apply_skill(skill_name: str, bucket: str) -> str:
 
     # Fall back to main_dataset if bucket key doesn't exist
     available = _data_store_ref.list_keys()
-    actual_key = bucket if bucket in available else "main_dataset"
+    actual_key = bucket if bucket in available else ("filtered_dataset" if "filtered_dataset" in available else "main_dataset")
     if actual_key != bucket:
         print(f"[apply_skill] Bucket '{bucket}' not found, using '{actual_key}'. Available: {available}")
 

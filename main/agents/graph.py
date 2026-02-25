@@ -37,7 +37,7 @@ logger = logging.getLogger("agenticanalytics.graph")
 
 
 # -- Sub-agent catalog (drives TaskList UI) ------------------------------------
-# Each entry maps agent_id → {title, detail} for display in the Chainlit task list.
+# Each entry maps agent_id -> {title, detail} for display in the Chainlit task list.
 
 FRICTION_SUB_AGENTS = {
     "digital_friction_agent": {
@@ -238,20 +238,34 @@ def build_graph(
             policy_node(state),
         )
 
+        # Log what each agent produced
+        for agent_id, result in zip(lens_ids, results):
+            msg_count = len(result.get("messages", []))
+            field = result.get(agent_id.replace("_agent", "_analysis") if "friction" not in agent_id
+                               else "digital_analysis", {})
+            has_output = bool(result.get("digital_analysis") or result.get("operations_analysis")
+                              or result.get("communication_analysis") or result.get("policy_analysis"))
+            logger.info(
+                "  Friction [%s]: msgs=%d, has_state_field=%s",
+                agent_id, msg_count, has_output,
+            )
+
         # Merge parallel outputs into state
         merged = _merge_parallel_outputs(state, list(results))
+        logger.info(
+            "  Merged friction outputs: keys=%s, msgs=%d",
+            [k for k in merged if merged[k] and k != "messages"],
+            len(merged.get("messages", [])),
+        )
 
-        # Build sub-agent entries with results
+        # Build sub-agent entries with results (use static descriptions for clean UI)
         sub_agents = []
         for agent_id, result in zip(lens_ids, results):
             meta = FRICTION_SUB_AGENTS[agent_id]
-            output_summary = ""
-            for r in result.get("reasoning", []):
-                output_summary = r.get("step_text", "")
             sub_agents.append({
                 "id": agent_id,
                 "title": meta["title"],
-                "detail": output_summary[:120] if output_summary else meta["detail"],
+                "detail": meta["detail"],
                 "status": "done",
             })
         # Add synthesizer as in_progress
@@ -271,13 +285,32 @@ def build_graph(
         )
         await _emit_task_list_update(tasks)
 
-        # Build intermediate state for synthesizer
+        # Build intermediate state for synthesizer — keep full message context
         synth_state = dict(state)
-        synth_state.update(merged)
+        for k, v in merged.items():
+            if k == "messages":
+                continue  # handle separately
+            synth_state[k] = v
+        # Synthesizer needs original conversation + new tool messages for context
+        synth_state["messages"] = list(state["messages"]) + merged.get("messages", [])
 
         # Run synthesizer on merged outputs
-        logger.info("Friction analysis: running synthesizer")
+        logger.info(
+            "Friction analysis: running synthesizer | synth_state msgs=%d | "
+            "digital=%s ops=%s comm=%s policy=%s",
+            len(synth_state["messages"]),
+            bool(synth_state.get("digital_analysis")),
+            bool(synth_state.get("operations_analysis")),
+            bool(synth_state.get("communication_analysis")),
+            bool(synth_state.get("policy_analysis")),
+        )
         synth_result = await synthesizer_node(synth_state)
+        logger.info(
+            "Friction analysis: synthesizer done | findings=%d synthesis=%s msgs=%d",
+            len(synth_result.get("findings", [])),
+            bool(synth_result.get("synthesis_result")),
+            len(synth_result.get("messages", [])),
+        )
 
         # Update synthesizer sub-agent to done
         synth_summary = ""
@@ -293,8 +326,20 @@ def build_graph(
             task_status="done",
         )
 
-        # Merge synthesizer output into final delta
-        final = _merge_parallel_outputs(synth_state, [merged, synth_result])
+        # Build final delta: all analysis fields from sub-agents, only synth messages for UI
+        list_keys = {"reasoning", "execution_trace", "io_trace"}
+        final: dict[str, Any] = {}
+        for src in (merged, synth_result):
+            for k, v in src.items():
+                if k == "messages":
+                    continue  # handled below
+                if k in list_keys and isinstance(v, list):
+                    final.setdefault(k, [])
+                    final[k].extend(v)
+                else:
+                    final[k] = v
+        # Only synthesizer message goes to UI (friction agent messages are internal)
+        final["messages"] = synth_result.get("messages", [])
         final["plan_tasks"] = tasks
         return final
 
@@ -331,13 +376,10 @@ def build_graph(
         sub_agents = []
         for agent_id, result in zip(parallel_ids, results):
             meta = REPORTING_SUB_AGENTS[agent_id]
-            output_summary = ""
-            for r in result.get("reasoning", []):
-                output_summary = r.get("step_text", "")
             sub_agents.append({
                 "id": agent_id,
                 "title": meta["title"],
-                "detail": output_summary[:120] if output_summary else meta["detail"],
+                "detail": meta["detail"],
                 "status": "done",
             })
         # Add formatting as in_progress
@@ -358,9 +400,14 @@ def build_graph(
         )
         await _emit_task_list_update(tasks)
 
-        # Build intermediate state for formatting
+        # Build intermediate state for formatting — keep full message context
         fmt_state = dict(state)
-        fmt_state.update(merged)
+        for k, v in merged.items():
+            if k == "messages":
+                continue  # handle separately
+            fmt_state[k] = v
+        # Formatting agent needs original conversation + parallel agent context
+        fmt_state["messages"] = list(state["messages"]) + merged.get("messages", [])
 
         # Run formatting agent on merged outputs
         logger.info("Report generation: running formatting agent")
@@ -380,8 +427,20 @@ def build_graph(
             task_status="done",
         )
 
-        # Merge formatting output into final delta
-        final = _merge_parallel_outputs(fmt_state, [merged, fmt_result])
+        # Build final delta: all fields from sub-agents, only formatter messages for UI
+        list_keys = {"reasoning", "execution_trace", "io_trace"}
+        final: dict[str, Any] = {}
+        for src in (merged, fmt_result):
+            for k, v in src.items():
+                if k == "messages":
+                    continue  # handled below
+                if k in list_keys and isinstance(v, list):
+                    final.setdefault(k, [])
+                    final[k].extend(v)
+                else:
+                    final[k] = v
+        # Only formatting agent message goes to UI
+        final["messages"] = fmt_result.get("messages", [])
         final["plan_tasks"] = tasks
         return final
 
@@ -408,12 +467,12 @@ def build_graph(
         """Route based on supervisor's next_agent decision.
 
         The supervisor sets next_agent via structured JSON decisions:
-        - answer/clarify → END (response already in messages)
-        - extract → data_analyst
-        - analyse → planner
-        - execute → follows plan_tasks (may trigger subgraphs)
-        - friction_analysis → composite friction node
-        - report_generation → composite reporting node
+        - answer/clarify -> END (response already in messages)
+        - extract -> data_analyst
+        - analyse -> planner
+        - execute -> follows plan_tasks (may trigger subgraphs)
+        - friction_analysis -> composite friction node
+        - report_generation -> composite reporting node
         """
         next_agent = state.get("next_agent", "")
 
@@ -448,13 +507,13 @@ def build_graph(
     graph.add_edge("friction_analysis", "supervisor")
     graph.add_edge("report_generation", "supervisor")
 
-    # -- Direct agent → Supervisor return edges --------------------------------
+    # -- Direct agent -> Supervisor return edges --------------------------------
     graph.add_edge("data_analyst", "supervisor")
     graph.add_edge("planner", "supervisor")
     graph.add_edge("report_analyst", "supervisor")
     graph.add_edge("critique", "supervisor")
 
-    # -- User checkpoint → Supervisor (after user responds) --------------------
+    # -- User checkpoint -> Supervisor (after user responds) --------------------
     graph.add_edge("user_checkpoint", "supervisor")
 
     # -- Compile with checkpoint interrupt -------------------------------------

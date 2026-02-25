@@ -2,28 +2,13 @@
     "status": "Running",
     "tasks": [
         {
-            "title": "Filter data by product and theme",
+            "title": "Data extraction & bucketing",
             "status": "done",
-            "forId": null
-        },
-        {
-            "title": "Bucket data for analysis",
-            "status": "done",
-            "forId": null
-        },
-        {
-            "title": "Confirm data slicing with user",
-            "status": "running",
             "forId": null
         },
         {
             "title": "Multi-dimensional friction analysis",
-            "status": "ready",
-            "forId": null
-        },
-        {
-            "title": "Review synthesized findings with user",
-            "status": "ready",
+            "status": "running",
             "forId": null
         },
         {
