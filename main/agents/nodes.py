@@ -429,9 +429,27 @@ def _build_extra_context(
         )
 
     if agent_name in REPORTING_AGENTS:
-        ctx: dict[str, Any] = {
-            "synthesis": state.get("synthesis_result", {}),
-            "findings": state.get("findings", []),
+        synthesis = state.get("synthesis_result", {})
+        findings = state.get("findings", [])
+
+        if agent_name == "report_analyst":
+            # Give report_analyst rich, structured context for report generation
+            ctx: dict[str, Any] = {
+                "executive_narrative": synthesis.get("executive_narrative", ""),
+                "total_calls_analyzed": synthesis.get("total_calls_analyzed", 0),
+                "total_themes": synthesis.get("total_themes", 0),
+                "overall_preventability": synthesis.get("overall_preventability", 0),
+                "dominant_drivers": synthesis.get("dominant_drivers", {}),
+                "quick_wins_count": synthesis.get("quick_wins_count", 0),
+                "themes": synthesis.get("themes", []),
+                "findings": findings,
+                "filters_applied": state.get("filters_applied", {}),
+            }
+            return "\n\n## Analysis Context\nUse this data to populate the report sections.\n" + json.dumps(ctx, indent=2, default=str)
+
+        ctx = {
+            "synthesis": synthesis,
+            "findings": findings,
         }
         if agent_name == "formatting_agent":
             ctx["narrative"] = state.get("narrative_output", {})
@@ -600,10 +618,12 @@ def _apply_structured_updates(
     elif agent_name == "synthesizer_agent":
         if isinstance(structured, SynthesizerOutput):
             narrative = structured.summary.executive_narrative
+            # Store full synthesis: summary + themes + findings for downstream agents
             synthesis_data = structured.summary.model_dump()
-            # Include themes in synthesis_result for downstream agents
             if structured.themes:
                 synthesis_data["themes"] = [t.model_dump() for t in structured.themes]
+            if structured.findings:
+                synthesis_data["findings"] = [f.model_dump() for f in structured.findings]
             updates.update({
                 "synthesis_result": synthesis_data,
                 "findings": [f.model_dump() for f in structured.findings],
@@ -616,20 +636,28 @@ def _apply_structured_updates(
         elif last_msg and hasattr(last_msg, "content"):
             # ReAct fallback: parse JSON from last message
             data = _parse_json(_text(last_msg.content))
+            # Store full synthesis data: summary + themes + findings
+            synthesis_data: dict[str, Any] = {}
             if data.get("summary"):
-                summary_data = data["summary"]
-                # Include themes in synthesis_result for downstream agents
-                if data.get("themes"):
-                    summary_data["themes"] = data["themes"]
-                updates["synthesis_result"] = summary_data
+                synthesis_data = dict(data["summary"])
+            if data.get("themes"):
+                synthesis_data["themes"] = data["themes"]
             if data.get("findings"):
+                synthesis_data["findings"] = data["findings"]
                 updates["findings"] = data["findings"]
-            narrative = data.get("summary", {}).get("executive_narrative", _text(last_msg.content))
+            if synthesis_data:
+                updates["synthesis_result"] = synthesis_data
+            narrative = data.get("summary", {}).get("executive_narrative", "")
+            if not narrative:
+                # Fallback: use raw text if no executive_narrative found
+                raw = _text(last_msg.content)
+                narrative = raw if not raw.startswith("{") else "Synthesis complete."
             updates["reasoning"] = [{"step_name": "Synthesizer Agent", "step_text": narrative}]
             if narrative:
                 updates["messages"] = [AIMessage(content=narrative)]
-            logger.info("Synthesizer (fallback): %d findings, %d themes",
-                         len(data.get("findings", [])), len(data.get("themes", [])))
+            logger.info("Synthesizer (fallback): %d findings, %d themes, synthesis_keys=%s",
+                         len(data.get("findings", [])), len(data.get("themes", [])),
+                         list(synthesis_data.keys()))
 
     # === CRITIQUE ===
     elif agent_name == "critique":

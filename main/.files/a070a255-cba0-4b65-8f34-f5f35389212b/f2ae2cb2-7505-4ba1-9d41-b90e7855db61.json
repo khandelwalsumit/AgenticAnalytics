@@ -22,28 +22,13 @@
             "forId": null
         },
         {
-            "title": "  -> Synthesizer Agent  -  ```json\n{\n  \"decision\": \"complete\",\n  \"confidence\": 95,\n  \"reasoning\": \"Successfully merged and aggregated findings from",
+            "title": "  -> Synthesizer Agent  -  Analyzed 16 ATT customer calls related to Rewards & Loyalty, identifying 1 core theme. An estimated 90% of these calls a",
             "status": "done",
             "forId": null
         },
         {
             "title": "Generate analysis report",
-            "status": "running",
-            "forId": null
-        },
-        {
-            "title": "  -> Narrative Agent  -  Slide deck structure & story design",
-            "status": "done",
-            "forId": null
-        },
-        {
-            "title": "  -> DataViz Agent  -  Chart generation via code execution",
-            "status": "done",
-            "forId": null
-        },
-        {
-            "title": "  -> Formatting Agent  -  PPTX + Markdown + CSV assembly",
-            "status": "running",
+            "status": "ready",
             "forId": null
         },
         {
