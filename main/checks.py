@@ -335,7 +335,7 @@ try:
         "communication_analysis", "policy_analysis",
         "synthesis_result", "narrative_output", "dataviz_output",
         "formatting_output", "report_markdown_key", "report_file_path",
-        "data_file_path", "critique_feedback", "quality_score",
+        "data_file_path", "markdown_file_path", "critique_feedback", "quality_score",
         "next_agent", "supervisor_decision", "analysis_complete",
         "phase", "filters_applied", "themes_for_analysis",
         "navigation_log", "analysis_objective",

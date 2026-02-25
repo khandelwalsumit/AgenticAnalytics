@@ -17,43 +17,28 @@
             "forId": null
         },
         {
-            "title": "  -> Operations Agent  -  Process & SLA breakdown analysis",
-            "status": "done",
-            "forId": null
-        },
-        {
             "title": "  -> Communication Agent  -  Notification & expectation gap analysis",
             "status": "done",
             "forId": null
         },
         {
-            "title": "  -> Policy Agent  -  Regulatory & governance constraint analysis",
-            "status": "done",
-            "forId": null
-        },
-        {
-            "title": "  -> Synthesizer Agent  -  ```json\n{\n  \"decision\": \"complete\",\n  \"confidence\": 95,\n  \"reasoning\": \"All four agent outputs were received and success",
+            "title": "  -> Synthesizer Agent  -  ```json\n{\n  \"decision\": \"complete\",\n  \"confidence\": 95,\n  \"reasoning\": \"Successfully merged and aggregated findings from",
             "status": "done",
             "forId": null
         },
         {
             "title": "Generate analysis report",
-            "status": "done",
+            "status": "running",
             "forId": null
         },
         {
             "title": "  -> Narrative Agent  -  Slide deck structure & story design",
-            "status": "done",
+            "status": "running",
             "forId": null
         },
         {
             "title": "  -> DataViz Agent  -  Chart generation via code execution",
-            "status": "done",
-            "forId": null
-        },
-        {
-            "title": "  -> Formatting Agent  -  I have assembled the report for you!\n\nYou can find the following deliverables:\n- **PowerPoint Deck**: `D:\\Workspace\\Agen",
-            "status": "done",
+            "status": "running",
             "forId": null
         },
         {

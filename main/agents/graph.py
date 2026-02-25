@@ -20,6 +20,7 @@ from typing import Any
 
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
+from langchain_core.messages import AIMessage
 
 from agents.nodes import (
     make_agent_node,
@@ -208,15 +209,29 @@ def build_graph(
     formatting_node = make_agent_node(agent_factory, "formatting_agent")
 
     # -- Composite node: friction_analysis ------------------------------------
-    # Runs 4 friction agents in parallel via asyncio.gather, then Synthesizer.
-    async def friction_analysis_node(state: AnalyticsState) -> dict[str, Any]:
-        """Run 4 friction lens agents in parallel, then synthesize."""
-        logger.info("Friction analysis: starting 4 parallel agents")
+    # Runs friction agents in parallel via asyncio.gather, then Synthesizer.
+    # Respects selected_friction_agents from state for dimension selection.
 
-        lens_ids = [
-            "digital_friction_agent", "operations_agent",
-            "communication_agent", "policy_agent",
-        ]
+    _ALL_LENS_IDS = [
+        "digital_friction_agent", "operations_agent",
+        "communication_agent", "policy_agent",
+    ]
+    _LENS_NODE_MAP = {
+        "digital_friction_agent": digital_node,
+        "operations_agent": operations_node,
+        "communication_agent": communication_node,
+        "policy_agent": policy_node,
+    }
+
+    async def friction_analysis_node(state: AnalyticsState) -> dict[str, Any]:
+        """Run selected friction lens agents in parallel, then synthesize."""
+        # Determine which agents to run based on user preference
+        selected = state.get("selected_friction_agents", [])
+        lens_ids = [a for a in selected if a in _ALL_LENS_IDS] if selected else list(_ALL_LENS_IDS)
+        if not lens_ids:
+            lens_ids = list(_ALL_LENS_IDS)
+
+        logger.info("Friction analysis: starting %d agents: %s", len(lens_ids), lens_ids)
 
         # --- Emit "in_progress" sub-agents to UI BEFORE running ---
         sub_agents_before = _make_sub_agent_entries(
@@ -230,13 +245,9 @@ def build_graph(
         )
         await _emit_task_list_update(tasks_before)
 
-        # Run all 4 lens agents concurrently
-        results = await asyncio.gather(
-            digital_node(state),
-            operations_node(state),
-            communication_node(state),
-            policy_node(state),
-        )
+        # Run selected lens agents concurrently
+        node_fns = [_LENS_NODE_MAP[aid] for aid in lens_ids]
+        results = await asyncio.gather(*(fn(state) for fn in node_fns))
 
         # Log what each agent produced
         for agent_id, result in zip(lens_ids, results):
@@ -341,6 +352,13 @@ def build_graph(
         # Only synthesizer message goes to UI (friction agent messages are internal)
         final["messages"] = synth_result.get("messages", [])
         final["plan_tasks"] = tasks
+
+        # Advance plan_steps_completed for this composite node
+        completed = state.get("plan_steps_completed", 0) + 1
+        total = state.get("plan_steps_total", 0)
+        final["plan_steps_completed"] = completed
+        logger.info("Plan progress: %d/%d (agent=friction_analysis)", completed, total)
+
         return final
 
     # -- Composite node: report_generation ------------------------------------
@@ -413,6 +431,16 @@ def build_graph(
         logger.info("Report generation: running formatting agent")
         fmt_result = await formatting_node(fmt_state)
 
+        # Log what the formatting agent produced for debugging downloads
+        logger.info(
+            "Report generation: fmt_result keys=%s | report_file_path=%r | data_file_path=%r | markdown_file_path=%r | msgs=%d",
+            [k for k in fmt_result if fmt_result[k] and k != "messages"],
+            fmt_result.get("report_file_path", ""),
+            fmt_result.get("data_file_path", ""),
+            fmt_result.get("markdown_file_path", ""),
+            len(fmt_result.get("messages", [])),
+        )
+
         # Update formatting sub-agent to done
         fmt_summary = ""
         for r in fmt_result.get("reasoning", []):
@@ -439,9 +467,33 @@ def build_graph(
                     final[k].extend(v)
                 else:
                     final[k] = v
-        # Only formatting agent message goes to UI
-        final["messages"] = fmt_result.get("messages", [])
+
+        # Build a clean user-facing summary message (tool call/result messages
+        # are filtered by _message_text in app.py, so add an explicit summary)
+        report_path = final.get("report_file_path", "")
+        data_path = final.get("data_file_path", "")
+        summary_parts = ["Report generation complete."]
+        if report_path:
+            summary_parts.append(f"PPTX report saved.")
+        if data_path:
+            summary_parts.append(f"Filtered CSV exported.")
+        summary_msg = AIMessage(content=" ".join(summary_parts))
+        final["messages"] = [summary_msg]
+
         final["plan_tasks"] = tasks
+
+        # Advance plan_steps_completed for this composite node
+        completed = state.get("plan_steps_completed", 0) + 1
+        total = state.get("plan_steps_total", 0)
+        final["plan_steps_completed"] = completed
+        logger.info("Plan progress: %d/%d (agent=report_generation)", completed, total)
+
+        # Check pipeline completion
+        if total > 0 and completed >= total:
+            final["analysis_complete"] = True
+            final["phase"] = "qa"
+            logger.info("Pipeline complete -- entering Q&A mode.")
+
         return final
 
     # -- Build graph -----------------------------------------------------------

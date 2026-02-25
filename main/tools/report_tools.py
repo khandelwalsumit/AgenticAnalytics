@@ -35,38 +35,43 @@ def generate_markdown_report(
 ) -> str:
     """Generate a structured markdown report from provided sections.
 
+    Sections are rendered in the Narrative Agent's canonical order:
+    Executive Summary → Impact vs Ease → Recommendations → Theme Deep Dives → Appendix.
+
     Args:
         title: Report title.
-        executive_summary: Top findings and key metrics summary.
-        detailed_findings: Each finding with scores and evidence.
-        impact_ease_matrix: Findings organized by impact vs ease quadrants.
-        recommendations: Prioritized action items.
-        data_appendix: Dataset info, filters, methodology notes.
+        executive_summary: Top findings, key metrics, top 3 issues, quick wins.
+        detailed_findings: Theme deep-dive sections (one per theme with driver tables).
+        impact_ease_matrix: Prioritization table sorted by priority score.
+        recommendations: Actions grouped by dimension (digital, ops, comms, policy).
+        data_appendix: Bottom-up analysis pipeline trace for debugging
+                       (Narrative → Synthesizer → Bucket Agent outputs).
 
     Returns:
         JSON with the DataStore key for the stored report.
     """
     store = _get_store()
 
+    # Section order matches Narrative Agent's 4-section structure:
+    # 1. Executive Summary → 2. Impact vs Ease → 3. Recommendations → 4. Theme Deep Dives
+    # Appendix is bottom-up trace for debugging (Narrative → Synthesizer → Bucket agents)
     report = f"""# {title}
-
-## Executive Summary
 
 {executive_summary}
 
-## Detailed Findings
-
-{detailed_findings}
-
-## Impact vs Ease Matrix
+---
 
 {impact_ease_matrix}
 
-## Recommendations
+---
 
 {recommendations}
 
-## Data Appendix
+---
+
+{detailed_findings}
+
+---
 
 {data_appendix}
 

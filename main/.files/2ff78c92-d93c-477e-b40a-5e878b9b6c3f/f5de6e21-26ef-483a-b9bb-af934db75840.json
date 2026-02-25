@@ -8,16 +8,11 @@
         },
         {
             "title": "Multi-dimensional friction analysis",
-            "status": "running",
-            "forId": null
-        },
-        {
-            "title": "  -> Digital Friction Agent  -  Digital product & UX gap analysis",
             "status": "done",
             "forId": null
         },
         {
-            "title": "  -> Operations Agent  -  Process & SLA breakdown analysis",
+            "title": "  -> Digital Friction Agent  -  Digital product & UX gap analysis",
             "status": "done",
             "forId": null
         },
@@ -27,23 +22,33 @@
             "forId": null
         },
         {
-            "title": "  -> Policy Agent  -  Regulatory & governance constraint analysis",
+            "title": "  -> Synthesizer Agent  -  ```json\n{\n  \"decision\": \"complete\",\n  \"confidence\": 95,\n  \"reasoning\": \"Successfully merged and aggregated findings from",
             "status": "done",
             "forId": null
         },
         {
-            "title": "  -> Synthesizer Agent  -  Cross-lens root cause synthesis & ranking",
-            "status": "running",
+            "title": "Generate analysis report",
+            "status": "done",
             "forId": null
         },
         {
-            "title": "Generate analysis report",
-            "status": "ready",
+            "title": "  -> Narrative Agent  -  Slide deck structure & story design",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "  -> DataViz Agent  -  Chart generation via code execution",
+            "status": "done",
+            "forId": null
+        },
+        {
+            "title": "  -> Formatting Agent  -  PPTX + Markdown + CSV assembly",
+            "status": "done",
             "forId": null
         },
         {
             "title": "Deliver report and downloads",
-            "status": "ready",
+            "status": "done",
             "forId": null
         }
     ]

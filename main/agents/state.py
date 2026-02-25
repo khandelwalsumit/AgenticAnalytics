@@ -83,6 +83,7 @@ class AnalyticsState(TypedDict):
     report_markdown_key: str
     report_file_path: str
     data_file_path: str
+    markdown_file_path: str
 
     # Quality
     critique_feedback: dict[str, Any]

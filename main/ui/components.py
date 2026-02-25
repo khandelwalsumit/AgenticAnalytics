@@ -122,6 +122,7 @@ async def clear_awaiting_prompt() -> None:
 async def send_downloads(
     report_path: str,
     data_path: str,
+    markdown_path: str = "",
 ) -> None:
     """Render download action buttons for report and data files.
 
@@ -129,6 +130,11 @@ async def send_downloads(
     Falls back to a notification if files are missing.
     """
     elements: list[Any] = []
+
+    if markdown_path and os.path.isfile(markdown_path):
+        elements.append(
+            cl.File(name=os.path.basename(markdown_path), path=markdown_path, display="inline")
+        )
 
     if report_path and os.path.isfile(report_path):
         elements.append(

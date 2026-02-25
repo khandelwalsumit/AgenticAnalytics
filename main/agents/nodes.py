@@ -453,9 +453,21 @@ def _build_extra_context(
             parts.append("\n")
 
         parts.append("## Current State Context\n")
+        # Build data_buckets summary for insight presentation
+        raw_buckets = state.get("data_buckets", {})
+        bucket_summary = {}
+        if isinstance(raw_buckets, dict):
+            for bname, binfo in raw_buckets.items():
+                if isinstance(binfo, dict):
+                    bucket_summary[bname] = {
+                        "row_count": binfo.get("row_count", binfo.get("count", "?")),
+                    }
+                else:
+                    bucket_summary[bname] = {"row_count": "?"}
         parts.append(json.dumps({
             "filters_applied": state.get("filters_applied", {}),
             "themes_for_analysis": state.get("themes_for_analysis", []),
+            "data_buckets": bucket_summary,
             "navigation_log": state.get("navigation_log", []),
             "analysis_objective": state.get("analysis_objective", ""),
             "plan_tasks": state.get("plan_tasks", []),
@@ -588,26 +600,36 @@ def _apply_structured_updates(
     elif agent_name == "synthesizer_agent":
         if isinstance(structured, SynthesizerOutput):
             narrative = structured.summary.executive_narrative
+            synthesis_data = structured.summary.model_dump()
+            # Include themes in synthesis_result for downstream agents
+            if structured.themes:
+                synthesis_data["themes"] = [t.model_dump() for t in structured.themes]
             updates.update({
-                "synthesis_result": structured.summary.model_dump(),
+                "synthesis_result": synthesis_data,
                 "findings": [f.model_dump() for f in structured.findings],
                 "reasoning": [{"step_name": "Synthesizer Agent", "step_text": narrative}],
             })
             if narrative:
                 updates["messages"] = [AIMessage(content=narrative)]
-            logger.info("Synthesizer: %d findings, confidence=%d", len(structured.findings), structured.confidence)
+            logger.info("Synthesizer: %d findings, %d themes, confidence=%d",
+                         len(structured.findings), len(structured.themes), structured.confidence)
         elif last_msg and hasattr(last_msg, "content"):
             # ReAct fallback: parse JSON from last message
             data = _parse_json(_text(last_msg.content))
             if data.get("summary"):
-                updates["synthesis_result"] = data["summary"]
+                summary_data = data["summary"]
+                # Include themes in synthesis_result for downstream agents
+                if data.get("themes"):
+                    summary_data["themes"] = data["themes"]
+                updates["synthesis_result"] = summary_data
             if data.get("findings"):
                 updates["findings"] = data["findings"]
             narrative = data.get("summary", {}).get("executive_narrative", _text(last_msg.content))
             updates["reasoning"] = [{"step_name": "Synthesizer Agent", "step_text": narrative}]
             if narrative:
                 updates["messages"] = [AIMessage(content=narrative)]
-            logger.info("Synthesizer (fallback): %d findings", len(data.get("findings", [])))
+            logger.info("Synthesizer (fallback): %d findings, %d themes",
+                         len(data.get("findings", [])), len(data.get("themes", [])))
 
     # === CRITIQUE ===
     elif agent_name == "critique":
@@ -636,8 +658,8 @@ def _apply_structured_updates(
             })
             logger.info("Critique (fallback): grade=%s, score=%.2f", grade, quality_score)
 
-    # === FORMATTING AGENT (ReAct agent -- extracts file paths from tool results) ===
-    elif agent_name == "formatting_agent":
+    # === FORMATTING / REPORT ANALYST (ReAct agents -- extract file paths from tool results) ===
+    elif agent_name in ("formatting_agent", "report_analyst"):
         _extract_formatting_state(state, updates)
 
 
@@ -651,6 +673,9 @@ def _extract_formatting_state(
     the corresponding state fields so app.py can serve downloads.
     """
     messages = updates.get("messages", [])
+    logger.info(
+        "Formatting extraction: scanning %d messages for tool result paths", len(messages),
+    )
     for msg in messages:
         if not hasattr(msg, "content"):
             continue
@@ -658,6 +683,8 @@ def _extract_formatting_state(
         data = _parse_json(content)
         if not data:
             continue
+
+        logger.debug("Formatting extraction: parsed JSON keys=%s", list(data.keys()))
 
         # export_to_pptx returns {"pptx_path": "..."}
         if "pptx_path" in data:
@@ -673,6 +700,9 @@ def _extract_formatting_state(
         if "report_key" in data:
             updates["report_markdown_key"] = data["report_key"]
             logger.info("Formatting Agent: extracted report_markdown_key=%s", data["report_key"])
+        if "markdown_path" in data:
+            updates["markdown_file_path"] = data["markdown_path"]
+            logger.info("Formatting Agent: extracted markdown_file_path=%s", data["markdown_path"])
 
 
 def _extract_data_analyst_state(
@@ -717,6 +747,53 @@ def _extract_data_analyst_state(
     if "filters_applied" not in updates and not state.get("filters_applied"):
         updates["filters_applied"] = {"status": "extraction_attempted"}
         logger.info("Data Analyst: no filter results found in tool messages, marking extraction_attempted")
+
+
+def _parse_dimension_preferences(
+    state: AnalyticsState, updates: dict[str, Any]
+) -> None:
+    """Parse user's last message for friction dimension preferences.
+
+    If the user mentions specific dimensions (e.g., "digital and operations"),
+    update selected_friction_agents to run only those.  If the user says
+    "all" / "yes" / "proceed" or doesn't mention specifics, keep all 4.
+    """
+    dimension_keywords: dict[str, str] = {
+        "digital": "digital_friction_agent",
+        "ux": "digital_friction_agent",
+        "operations": "operations_agent",
+        "operational": "operations_agent",
+        "process": "operations_agent",
+        "sla": "operations_agent",
+        "communication": "communication_agent",
+        "notification": "communication_agent",
+        "messaging": "communication_agent",
+        "policy": "policy_agent",
+        "regulatory": "policy_agent",
+        "governance": "policy_agent",
+        "compliance": "policy_agent",
+    }
+
+    last_user_msg = ""
+    for m in reversed(state.get("messages", [])):
+        if getattr(m, "type", "") == "human":
+            last_user_msg = _text(m.content).lower()
+            break
+
+    if not last_user_msg:
+        return
+
+    # Collect unique agents mentioned by the user
+    mentioned: list[str] = []
+    seen: set[str] = set()
+    for keyword, agent_id in dimension_keywords.items():
+        if keyword in last_user_msg and agent_id not in seen:
+            mentioned.append(agent_id)
+            seen.add(agent_id)
+
+    if mentioned:
+        updates["selected_friction_agents"] = mentioned
+        logger.info("Supervisor: user selected dimensions=%s", mentioned)
 
 
 def _apply_supervisor(s: SupervisorOutput, state: AnalyticsState, updates: dict) -> None:
@@ -775,6 +852,10 @@ def _apply_supervisor(s: SupervisorOutput, state: AnalyticsState, updates: dict)
                 if not state.get("plan_tasks"):
                     updates["plan_tasks"] = _PRELIMINARY_PLAN_TASKS()
                     updates["plan_steps_total"] = len(updates["plan_tasks"])
+    elif s.decision == "analyse":
+        updates["next_agent"] = target_agent
+        # Parse user's dimension preferences from their last message
+        _parse_dimension_preferences(state, updates)
     else:
         updates["next_agent"] = target_agent
 
@@ -835,6 +916,9 @@ def _apply_supervisor_fallback(raw: str, state: AnalyticsState, updates: dict) -
                 updates["supervisor_decision"] = "analyse"
             else:
                 updates["next_agent"] = _DECISION_TO_NEXT[decision]
+    elif decision == "analyse":
+        updates["next_agent"] = _DECISION_TO_NEXT[decision]
+        _parse_dimension_preferences(state, updates)
     else:
         updates["next_agent"] = _DECISION_TO_NEXT[decision]
 

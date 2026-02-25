@@ -118,7 +118,9 @@ class DominantDrivers(BaseModel):
 class SynthesisSummary(BaseModel):
     """High-level synthesis summary stats."""
 
+    total_calls_analyzed: int = Field(default=0, description="Total call count across all themes.")
     total_findings: int
+    total_themes: int = Field(default=0, description="Number of unique themes synthesized.")
     dominant_drivers: DominantDrivers
     multi_factor_count: int = Field(description="Themes flagged by 2+ lenses.")
     overall_preventability: float = Field(
@@ -127,17 +129,20 @@ class SynthesisSummary(BaseModel):
         description="0.0 = unavoidable, 1.0 = entirely preventable.",
     )
     quick_wins_count: int
-    executive_narrative: str = Field(description="2-3 sentence overall summary.")
+    executive_narrative: str = Field(description="2-3 sentence overall summary with call counts.")
 
 
 class RankedFinding(BaseModel):
     """A single synthesized, prioritized finding."""
 
     finding: str
+    theme: str = Field(default="", description="Theme/bucket this finding belongs to.")
     category: str
-    volume: float
-    impact_score: float = Field(ge=0.0, le=1.0)
-    ease_score: float = Field(ge=0.0, le=1.0)
+    call_count: int = Field(default=0, description="Raw call count for this finding.")
+    call_percentage: float = Field(default=0.0, description="Percentage of total call volume.")
+    volume: float = Field(default=0.0, description="Legacy volume field (percentage).")
+    impact_score: float = Field(ge=0.0, le=10.0, description="1-10 impact scale.")
+    ease_score: float = Field(ge=0.0, le=10.0, description="1-10 ease of implementation scale.")
     confidence: float = Field(ge=0.0, le=1.0)
     recommended_action: str
     dominant_driver: Literal["digital", "operations", "communication", "policy"]
@@ -146,6 +151,36 @@ class RankedFinding(BaseModel):
     priority_quadrant: Literal[
         "quick_win", "strategic_investment", "low_hanging_fruit", "deprioritize"
     ]
+
+
+class ThemeDriver(BaseModel):
+    """A single driver within a theme, tagged with its source dimension."""
+
+    driver: str
+    call_count: int = Field(default=0)
+    contribution_pct: float = Field(default=0.0)
+    type: Literal["primary", "secondary"] = Field(default="secondary")
+    dimension: Literal["digital", "operations", "communication", "policy"]
+    recommended_solution: str = Field(default="")
+
+
+class ThemeSummary(BaseModel):
+    """Theme-level aggregation across all friction dimensions."""
+
+    theme: str
+    call_count: int = Field(default=0)
+    call_percentage: float = Field(default=0.0)
+    impact_score: float = Field(ge=0.0, le=10.0, default=5.0)
+    ease_score: float = Field(ge=0.0, le=10.0, default=5.0)
+    priority_score: float = Field(default=5.0, description="impact * 0.6 + ease * 0.4")
+    dominant_driver: Literal["digital", "operations", "communication", "policy"]
+    contributing_factors: list[str] = Field(default_factory=list)
+    preventability_score: float = Field(ge=0.0, le=1.0, default=0.5)
+    priority_quadrant: Literal[
+        "quick_win", "strategic_investment", "low_hanging_fruit", "deprioritize"
+    ] = Field(default="strategic_investment")
+    all_drivers: list[ThemeDriver] = Field(default_factory=list)
+    quick_wins: list[str] = Field(default_factory=list)
 
 
 class SynthesizerOutput(BaseModel):
@@ -157,8 +192,12 @@ class SynthesizerOutput(BaseModel):
     confidence: int = Field(ge=0, le=100)
     reasoning: str = Field(description="Brief explanation of synthesis quality.")
     summary: SynthesisSummary
+    themes: list[ThemeSummary] = Field(
+        default_factory=list,
+        description="Theme-level aggregations sorted by priority_score descending.",
+    )
     findings: list[RankedFinding] = Field(
-        description="Ranked findings sorted by impact × ease descending."
+        description="Individual ranked findings sorted by call_count descending.",
     )
 
 

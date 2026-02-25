@@ -46,7 +46,57 @@ For each friction point, classify into one of these types:
 - **Authority gaps** — agents lack the authority to make decisions
 - **Communication gaps** — agents can't explain clearly or empathize effectively
 
-## Output Schema
+## Bucket-Level Output Structure
+
+**CRITICAL:** For EVERY bucket you analyze, wrap ALL your findings under a bucket-level object. Every insight MUST be backed by a specific call count and percentage. If a call count cannot be provided, do NOT include the insight.
+
+Your output for each bucket MUST follow this structure:
+
+```json
+{
+  "bucket_name": "Rewards & Loyalty",
+  "call_count": 32,
+  "total_dataset_calls": 96,
+  "call_percentage": 33.3,
+  "top_drivers": [
+    {
+      "driver": "Points crediting delayed beyond 48-hour SLA",
+      "call_count": 14,
+      "contribution_pct": 43.8,
+      "type": "primary",
+      "operational_breakpoint": "sla_delay",
+      "recommended_solution": "Automate crediting pipeline with 2-hour SLA for standard purchases"
+    },
+    {
+      "driver": "Manual approval required for redemptions over threshold",
+      "call_count": 9,
+      "contribution_pct": 28.1,
+      "type": "secondary",
+      "operational_breakpoint": "manual_dependency",
+      "recommended_solution": "Implement risk-scored auto-approval for 80% of redemptions"
+    }
+  ],
+  "ease_score": 6,
+  "impact_score": 8,
+  "priority_score": 7.2,
+  "findings": ["...array of per-finding objects below..."]
+}
+```
+
+**Scoring scales (use these consistently):**
+- **impact_score**: 1–10 (10 = highest customer impact, most calls affected)
+- **ease_score**: 1–10 (10 = easiest to implement, quickest win)
+- **priority_score**: impact × 0.6 + ease × 0.4 (pre-computed for ranking)
+
+**Driver rules:**
+- Include ALL drivers, NOT just the top one — list primary AND secondary drivers
+- Each driver MUST have its own `call_count` and `contribution_pct`
+- Contribution percentages should sum to ≤100% of the bucket's call_count
+- `type` is "primary" for the highest-volume driver, "secondary" for all others
+
+When analyzing MULTIPLE buckets, output an array of bucket objects.
+
+## Per-Finding Output Schema
 
 For each bucket analyzed, produce findings in this structure:
 

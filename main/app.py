@@ -149,7 +149,7 @@ def make_initial_state() -> dict[str, Any]:
         "communication_analysis": {}, "policy_analysis": {},
         "synthesis_result": {},
         "narrative_output": {}, "dataviz_output": {}, "formatting_output": {},
-        "report_markdown_key": "", "report_file_path": "", "data_file_path": "",
+        "report_markdown_key": "", "report_file_path": "", "data_file_path": "", "markdown_file_path": "",
         "critique_feedback": {}, "quality_score": 0.0,
         "next_agent": "", "supervisor_decision": "",
         "analysis_complete": False, "phase": "analysis",
@@ -391,12 +391,37 @@ async def on_message(message: cl.Message):
         log.info("Graph stream complete. plan=%d/%d",
                  state.get("plan_steps_completed", 0), state.get("plan_steps_total", 0))
 
-        # Send downloads if analysis complete
-        if state.get("report_file_path") or state.get("data_file_path"):
-            await send_downloads(
-                state.get("report_file_path", ""),
-                state.get("data_file_path", ""),
-            )
+        # --- Downloads ---
+        rpt = state.get("report_file_path", "")
+        dat = state.get("data_file_path", "")
+        mdf = state.get("markdown_file_path", "")
+        log.info(
+            "Download check: report_file_path=%r  data_file_path=%r  markdown_file_path=%r  analysis_complete=%s",
+            rpt, dat, mdf, state.get("analysis_complete"),
+        )
+
+        # Fallback: if paths are empty, scan the data directory for files from this session
+        if not rpt and not dat and not mdf:
+            session_id = cl.user_session.get("session_id", "")
+            if session_id:
+                data_dir = Path(DATA_DIR)
+                for f in data_dir.glob(f"*{session_id}*"):
+                    fname = f.name.lower()
+                    if fname.endswith(".pptx") and not rpt:
+                        rpt = str(f)
+                        log.info("Fallback: found PPTX %s", rpt)
+                    elif fname.endswith(".csv") and not dat:
+                        dat = str(f)
+                        log.info("Fallback: found CSV %s", dat)
+                    elif fname.endswith(".md") and not mdf:
+                        mdf = str(f)
+                        log.info("Fallback: found MD %s", mdf)
+
+        if rpt or dat or mdf:
+            await send_downloads(report_path=rpt, data_path=dat, markdown_path=mdf)
+        else:
+            log.warning("No download files found in state or on disk.")
+
         if state.get("analysis_complete") and task_list:
             done = [{**t, "status": "done"} for t in state.get("plan_tasks", [])]
             task_list = await sync_task_list(task_list, done)

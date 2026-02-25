@@ -17,22 +17,12 @@
             "forId": null
         },
         {
-            "title": "  -> Operations Agent  -  Process & SLA breakdown analysis",
-            "status": "done",
-            "forId": null
-        },
-        {
             "title": "  -> Communication Agent  -  Notification & expectation gap analysis",
             "status": "done",
             "forId": null
         },
         {
-            "title": "  -> Policy Agent  -  Regulatory & governance constraint analysis",
-            "status": "done",
-            "forId": null
-        },
-        {
-            "title": "  -> Synthesizer Agent  -  ```json\n{\n  \"decision\": \"complete\",\n  \"confidence\": 95,\n  \"reasoning\": \"All four agent outputs were received and success",
+            "title": "  -> Synthesizer Agent  -  ```json\n{\n  \"decision\": \"complete\",\n  \"confidence\": 95,\n  \"reasoning\": \"Successfully merged and aggregated findings from",
             "status": "done",
             "forId": null
         },

@@ -13,21 +13,16 @@
         },
         {
             "title": "  -> Digital Friction Agent  -  Digital product & UX gap analysis",
-            "status": "running",
-            "forId": null
-        },
-        {
-            "title": "  -> Operations Agent  -  Process & SLA breakdown analysis",
-            "status": "running",
+            "status": "done",
             "forId": null
         },
         {
             "title": "  -> Communication Agent  -  Notification & expectation gap analysis",
-            "status": "running",
+            "status": "done",
             "forId": null
         },
         {
-            "title": "  -> Policy Agent  -  Regulatory & governance constraint analysis",
+            "title": "  -> Synthesizer Agent  -  Cross-lens root cause synthesis & ranking",
             "status": "running",
             "forId": null
         },

@@ -101,6 +101,7 @@ REPORTING_AGENTS = {
     "narrative_agent",
     "dataviz_agent",
     "formatting_agent",
+    "report_analyst",
 }
 ALL_DOMAIN_SKILLS = [
     "payment_transfer",
