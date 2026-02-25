@@ -139,7 +139,8 @@ def _should_surface_message(node_name: str, text: str) -> bool:
         return False
 
     # Report analyst is a delivery checkpoint; download elements already convey output.
-    if node_name == "report_analyst":
+    # Data analyst output is internal extraction confirmation.
+    if node_name in {"report_analyst", "data_analyst"}:
         return False
 
     t = text.lower()
@@ -566,6 +567,10 @@ async def on_message(message: cl.Message):
     reasoning_step.output = ""
     await reasoning_step.send()
 
+    # Blinking placeholder message
+    active_node_msg = cl.Message(content="Analyzing...", author="System")
+    await active_node_msg.send()
+
     stream = None
     try:
         stream = graph.astream(graph_input, config=config, stream_mode="updates")
@@ -573,6 +578,10 @@ async def on_message(message: cl.Message):
             for node_name, node_output in event.items():
                 if node_name == "__end__" or not isinstance(node_output, dict):
                     continue
+
+                # Update blinking placeholder with current node
+                active_node_msg.content = f"Running: **{node_name}**..."
+                await active_node_msg.update()
 
                 # Log what this node returned
                 output_keys = [k for k in node_output if node_output[k]]
@@ -598,7 +607,7 @@ async def on_message(message: cl.Message):
                     step_text = r.get("step_text", "")
                     if not _should_surface_reasoning(step_name, step_text):
                         continue
-                    reasoning_step.output += f"**{step_name}**: {step_text}\n\n"
+                    reasoning_step.output += f"- {step_text}\n\n"
                 await reasoning_step.update()
 
                 # Sync task list
@@ -652,7 +661,7 @@ async def on_message(message: cl.Message):
                         # Render as collapsible step bar
                         label = STEP_NODE_LABELS.get(node_name, node_name)
                         first_line = text.split("\n")[0].strip()
-                        step = cl.Step(name=f"{label}: {first_line[:80]}", type="tool")
+                        step = cl.Step(name=f"- {first_line}", type="tool")
                         step.output = text
                         await step.send()
                     else:
@@ -672,6 +681,16 @@ async def on_message(message: cl.Message):
         log.info("Graph stream complete. plan=%d/%d",
                  state.get("plan_steps_completed", 0), state.get("plan_steps_total", 0))
 
+        # Check if input is required after all nodes
+        final_snapshot = graph.get_state(config)
+        is_interrupted = bool(final_snapshot and final_snapshot.next)
+        
+        if state.get("requires_user_input") or is_interrupted:
+            active_node_msg.content = "Waiting for your input..."
+            await active_node_msg.update()
+        else:
+            await active_node_msg.remove()
+
         # --- Downloads ---
         sent = await _maybe_send_downloads(thread_id, state)
         if not sent:
@@ -688,6 +707,8 @@ async def on_message(message: cl.Message):
         log.error("Graph error: %s", exc, exc_info=True)
         reasoning_step.status = "failed"
         await reasoning_step.update()
+        active_node_msg.content = "Error occurred."
+        await active_node_msg.update()
         await cl.Message(content=f"System error: {exc}", author="System").send()
     finally:
         if stream is not None:
