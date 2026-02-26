@@ -62,6 +62,7 @@ _DECISION_TO_NEXT: dict[str, str] = {
     "extract": "data_analyst",
     "analyse": "planner",
     "execute": "",  # resolved from plan_tasks
+    "report_generation": "report_generation",
 }
 
 # Safety: max consecutive supervisor->data_analyst loops before forcing progress
@@ -508,6 +509,16 @@ def _build_extra_context(
 
     if agent_name in REPORTING_AGENTS:
         synthesis = state.get("synthesis_result", {})
+        if not synthesis and state.get("synthesis_output_file"):
+            import chainlit as cl
+            data_store = cl.user_session.get("data_store")
+            if data_store:
+                try:
+                    loaded = data_store.get_text(state["synthesis_output_file"])
+                    if loaded:
+                        synthesis = json.loads(loaded)
+                except Exception as e:
+                    logger.error("Failed to rehydrate synthesis_output_file: %s", e)
         findings = state.get("findings", [])
         retry_ctx = state.get("report_retry_context", {})
         def _clip(value: Any, limit: int = 240) -> str:

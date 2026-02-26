@@ -139,6 +139,12 @@ When `filters_applied` exists and user requests data outside those filters:
 - Set decision to `execute` — the system automatically routes to the next agent in the plan
 - Track progress via plan_steps_completed
 
+### RETRY REPORT (decision="report_generation")
+**When:** The user asks to "retry", "regenerate the report", "make the slides again", or similar, AND the synthesis is already complete.
+**Your Task:**
+- Set decision to `report_generation` to trigger the reporting subgraph directly using saved data.
+- Note in response that you are regenerating the report.
+
 ## Agent Routing Targets
 
 When using `execute`, the system reads `plan_tasks` and routes to the appropriate agent:
@@ -173,7 +179,7 @@ When you delegate to `report_generation`, the system automatically:
 
 ```json
 {
-  "decision": "answer" | "clarify" | "extract" | "analyse" | "execute",
+  "decision": "answer" | "clarify" | "extract" | "analyse" | "execute" | "report_generation",
   "confidence": 0-100,
   "reasoning": "concise explanation of your decision",
   "response": "content based on decision type"
@@ -188,6 +194,7 @@ When you delegate to `report_generation`, the system automatically:
 - `"extract"` - Proceed to data extraction (or re-extraction for scope change)
 - `"analyse"` - Engage planner to create analysis plan (user confirmed after insight review)
 - `"execute"` - Follow next step in existing plan
+- `"report_generation"` - Directly regenerate the report artifacts from existing synthesis data
 
 **confidence:**
 - `90-100` - Very clear decision, high certainty

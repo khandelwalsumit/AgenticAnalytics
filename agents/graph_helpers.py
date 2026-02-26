@@ -168,6 +168,17 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 def _build_deterministic_dataviz_output(state: dict[str, Any]) -> dict[str, Any]:
     """Generate required charts deterministically via Python chart scripts."""
     synthesis = state.get("synthesis_result", {})
+    if not synthesis and state.get("synthesis_output_file"):
+        import chainlit as cl
+        data_store = cl.user_session.get("data_store")
+        if data_store:
+            try:
+                loaded = data_store.get_text(state["synthesis_output_file"])
+                if loaded:
+                    synthesis = json.loads(loaded)
+            except Exception as e:
+                logger.error("Failed to rehydrate synthesis_output_file: %s", e)
+
     themes_raw = synthesis.get("themes", []) if isinstance(synthesis, dict) else []
 
     themes: list[str] = []

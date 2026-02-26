@@ -76,6 +76,7 @@ class AnalyticsState(TypedDict):
 
     # Synthesis output (written by Synthesizer Agent)
     synthesis_result: dict[str, Any]
+    synthesis_output_file: str
 
     # Reporting subgraph outputs
     narrative_output: dict[str, Any]

@@ -212,10 +212,27 @@ def build_graph(
         synth_result["missing_friction_lenses"] = list(missing_lenses)
         synth_result["expected_friction_lenses"] = list(expected_lenses)
 
+        # Offload synthesis_result to DataStore to prevent state bloat
+        # and support deterministic report retries.
+        import chainlit as cl
+        data_store = cl.user_session.get("data_store")
+        if data_store and synth_result.get("synthesis_result"):
+            try:
+                content = json.dumps(synth_result["synthesis_result"])
+                key = data_store.store_text(
+                    "synthesis_output",
+                    content,
+                    {"agent": "synthesizer_agent", "type": "synthesis_output"}
+                )
+                synth_result["synthesis_output_file"] = key
+                logger.info("Friction analysis: stored synthesis_result in DataStore as %s", key)
+            except Exception as e:
+                logger.error("Friction analysis: failed to store synthesis_result: %s", e)
+
         logger.info(
             "Friction analysis: synthesizer done | findings=%d synthesis=%s msgs=%d",
             len(synth_result.get("findings", [])),
-            bool(synth_result.get("synthesis_result")),
+            bool(synth_result.get("synthesis_output_file")),
             len(synth_result.get("messages", [])),
         )
 

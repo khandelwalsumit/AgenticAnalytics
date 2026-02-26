@@ -424,6 +424,21 @@ def _rehydrate_friction_outputs(state: dict[str, Any]) -> None:
         state["friction_output_files"] = rebuilt
         log.info("Rehydrated friction outputs into DataStore: %s", list(rebuilt.keys()))
 
+    # Also rehydrate the synthesis output file
+    synthesis_payload = state.get("synthesis_result", {})
+    if synthesis_payload and isinstance(synthesis_payload, dict):
+        try:
+            content = json.dumps(synthesis_payload)
+            key = data_store.store_text(
+                "synthesis_output",
+                content,
+                {"agent": "synthesizer_agent", "type": "synthesis_output"}
+            )
+            state["synthesis_output_file"] = key
+            log.info("Rehydrated synthesis output into DataStore as %s", key)
+        except Exception as e:
+            log.warning("Could not rehydrate synthesis_output: %s", e)
+
 
 def _apply_agent_selection(state: dict[str, Any], selected: list[str]) -> None:
     state["selected_agents"] = list(selected)
