@@ -10,7 +10,7 @@ from langchain_core.tools import tool
 
 from pathlib import Path
 
-from config import DATA_TMP_DIR, TOP_N_DEFAULT
+from config import DATA_CACHE_DIR, TOP_N_DEFAULT
 from core.data_store import DataStore
 from core.skill_loader import SkillLoader
 from tools.data_tools import (
@@ -320,7 +320,7 @@ def execute_chart_code(code: str, output_filename: str) -> str:
 
     safe_thread_id = "".join(ch if (ch.isalnum() or ch in ("-", "_")) else "_" for ch in thread_id)[:80]
     filename = Path(str(output_filename or "chart.png")).name
-    output_path = Path(DATA_TMP_DIR) / safe_thread_id / filename
+    output_path = Path(DATA_CACHE_DIR) / safe_thread_id / filename
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     exec_globals = {

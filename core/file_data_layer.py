@@ -27,10 +27,10 @@ from chainlit.types import (
 )
 from chainlit.user import PersistedUser, User
 
-from config import CACHE_DIR
+from config import DATA_CACHE_DIR
 
 # Storage root
-_STORAGE_DIR = CACHE_DIR / "data_layer"
+_STORAGE_DIR = DATA_CACHE_DIR / "data_layer"
 _THREADS_DIR = _STORAGE_DIR / "threads"
 _USERS_DIR = _STORAGE_DIR / "users"
 

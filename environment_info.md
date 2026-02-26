@@ -19,4 +19,5 @@
 - vertexai version is very specific, dosent let me use "field name for additnal properties"
 - `always use create_agent  from langchain.agents` not create_react_agent
 - I dont have fan out from langchain, implement any parallelism you need using multithreading
+- **critical** vertexai requires al schemas to be fully expanded , with no $ref fields
 

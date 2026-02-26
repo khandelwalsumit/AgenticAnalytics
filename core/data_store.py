@@ -13,15 +13,15 @@ from pathlib import Path
 
 import pandas as pd
 
-from config import CACHE_DIR
+from config import DATA_CACHE_DIR
 
 
 class DataStore:
     """Session-scoped file-backed cache for large data payloads."""
 
-    def __init__(self, session_id: str, cache_dir: str | Path = CACHE_DIR):
+    def __init__(self, session_id: str, DATA_CACHE_DIR: str | Path = DATA_CACHE_DIR):
         self.session_id = session_id
-        self.base_dir = Path(cache_dir) / session_id
+        self.base_dir = Path(DATA_CACHE_DIR) / session_id
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self._registry: dict[str, dict] = {}
         self._load_registry()

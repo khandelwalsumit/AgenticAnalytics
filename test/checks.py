@@ -107,7 +107,7 @@ section("2. Config Constants & Paths")
 from config import (
     AGENTS_DIR,
     ALL_DOMAIN_SKILLS,
-    CACHE_DIR,
+    DATA_CACHE_DIR,
     DATA_DIR,
     DEFAULT_CSV_PATH,
     DEFAULT_MAX_TOKENS,
@@ -141,7 +141,7 @@ for name, val, expected_type in [
     ("AGENTS_DIR", AGENTS_DIR, Path),
     ("SKILLS_DIR", SKILLS_DIR, Path),
     ("DATA_DIR", DATA_DIR, Path),
-    ("CACHE_DIR", CACHE_DIR, Path),
+    ("DATA_CACHE_DIR", DATA_CACHE_DIR, Path),
     ("DEFAULT_MODEL", DEFAULT_MODEL, str),
     ("DEFAULT_TEMPERATURE", DEFAULT_TEMPERATURE, float),
     ("DEFAULT_TOP_P", DEFAULT_TOP_P, float),
@@ -387,7 +387,7 @@ section("9. DataStore CRUD")
 from core.data_store import DataStore
 
 try:
-    store = DataStore(session_id="__check__", cache_dir=str(CACHE_DIR))
+    store = DataStore(session_id="__check__", DATA_CACHE_DIR=str(DATA_CACHE_DIR))
 
     # Store DataFrame
     test_df = pd.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]})
@@ -686,7 +686,7 @@ section("15. filter_data Error Reporting")
 from tools.data_tools import filter_data, set_data_store as set_dt_store
 
 try:
-    store = DataStore(session_id="__check_filter__", cache_dir=str(CACHE_DIR))
+    store = DataStore(session_id="__check_filter__", DATA_CACHE_DIR=str(DATA_CACHE_DIR))
     test_df = pd.DataFrame({
         "product": ["A", "B", "A", "C"],
         "region": ["US", "EU", "US", "EU"],

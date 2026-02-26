@@ -18,12 +18,12 @@ load_dotenv()
 ROOT_DIR = Path(__file__).resolve().parent
 AGENTS_DIR = ROOT_DIR / "agents" / "definitions"
 SKILLS_DIR = ROOT_DIR / "skills"
+
 DATA_DIR = ROOT_DIR / "data"
 DATA_INPUT_DIR = DATA_DIR / "input"
-DATA_TMP_DIR = DATA_DIR / "tmp"
 DATA_OUTPUT_DIR = DATA_DIR / "output"
-CACHE_DIR = ROOT_DIR / ".cache"
-THREAD_STATES_DIR = CACHE_DIR / "thread_states"
+DATA_CACHE_DIR = DATA_DIR / ".cache"
+THREAD_STATES_DIR = DATA_CACHE_DIR / "states"
 
 # Hardcoded default CSV path — user sets this to their dataset location.
 # Override via DEFAULT_CSV_PATH env var or change this line directly.

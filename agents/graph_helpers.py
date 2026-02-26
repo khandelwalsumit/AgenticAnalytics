@@ -12,7 +12,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from agents.nodes import AGENT_STATE_FIELDS
 from agents.state import AnalyticsState
-from config import DATA_DIR, DATA_OUTPUT_DIR, DATA_TMP_DIR
+from config import DATA_DIR, DATA_OUTPUT_DIR, DATA_CACHE_DIR
 from tools import TOOL_REGISTRY
 
 import chainlit as cl
@@ -93,7 +93,7 @@ def _thread_tmp_dir() -> Path:
             thread_id = str(raw_thread_id)
     except Exception:
         thread_id = "unknown_thread"
-    return Path(DATA_TMP_DIR) / _safe_thread_id(thread_id)
+    return Path(DATA_CACHE_DIR) / _safe_thread_id(thread_id)
 
 
 def _thread_output_dir() -> Path:

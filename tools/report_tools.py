@@ -43,10 +43,10 @@ def _get_thread_id(store: DataStore) -> str:
 
 
 def _get_artifact_dirs(store: DataStore) -> tuple[Path, Path, str]:
-    from config import DATA_OUTPUT_DIR, DATA_TMP_DIR
+    from config import DATA_OUTPUT_DIR, DATA_CACHE_DIR
 
     thread_id = _get_thread_id(store)
-    tmp_dir = Path(DATA_TMP_DIR) / thread_id
+    tmp_dir = Path(DATA_CACHE_DIR) / thread_id
     out_dir = Path(DATA_OUTPUT_DIR) / thread_id
     tmp_dir.mkdir(parents=True, exist_ok=True)
     out_dir.mkdir(parents=True, exist_ok=True)

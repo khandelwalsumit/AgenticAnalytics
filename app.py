@@ -20,7 +20,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from agents.graph import build_graph
 from config import (
     AGENTS_DIR,
-    CACHE_DIR,
+    DATA_CACHE_DIR,
     DATA_INPUT_DIR,
     DATA_OUTPUT_DIR,
     DEFAULT_CSV_PATH,
@@ -343,7 +343,7 @@ def _create_runtime() -> tuple[str, DataStore, Any]:
     """Build per-session runtime: DataStore, tools, graph."""
     session_id = str(uuid.uuid4())[:12]
     log.info("Creating runtime session=%s", session_id)
-    data_store = DataStore(session_id=session_id, cache_dir=str(CACHE_DIR))
+    data_store = DataStore(session_id=session_id, DATA_CACHE_DIR=str(DATA_CACHE_DIR))
     set_data_tools_store(data_store)
     set_report_tools_store(data_store)
     skill_loader = SkillLoader()
