@@ -1,6 +1,6 @@
 ---
 name: narrative_agent
-model: gemini-2.5-pro
+model: gemini-2.5-flash
 temperature: 0.65
 top_p: 0.95
 max_tokens: 8192

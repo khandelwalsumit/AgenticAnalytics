@@ -605,7 +605,7 @@ async def on_message(message: cl.Message):
     # Collapsible reasoning step
     reasoning_step = cl.Step(name="Reasoning", type="run")
     reasoning_step.output = ""
-    await reasoning_step.send()
+    # await reasoning_step.send()
 
     # Blinking placeholder message
     active_node_msg = cl.Message(content="Analyzing...", author="System")
@@ -643,11 +643,13 @@ async def on_message(message: cl.Message):
                 for r in node_output.get("reasoning", []):
                     if r.get("verbose") and not VERBOSE:
                         continue
+                    if not reasoning_step.output:
+                        await reasoning_step.send()
                     step_name = r.get("step_name", node_name)
                     step_text = r.get("step_text", "")
                     if not _should_surface_reasoning(step_name, step_text):
                         continue
-                    reasoning_step.output += f"- {step_text}\n\n"
+                    reasoning_step.output += f"**{step_name}** - {step_text}\n\n"
                 await reasoning_step.update()
 
                 # Sync task list
@@ -711,8 +713,12 @@ async def on_message(message: cl.Message):
                 for k, v in node_output.items():
                     if k == "messages":
                         state.setdefault("messages", []).extend(v if isinstance(v, list) else [v])
-                    elif k in ("reasoning", "execution_trace", "io_trace") and isinstance(v, list):
+                    elif k == "reasoning" and isinstance(v, list):
                         state.setdefault(k, []).extend(v)
+                    elif k in ("execution_trace", "io_trace") and isinstance(v, list):
+                        # Nodes already return cumulative traces (state + new entry).
+                        # Replacing avoids duplicate growth on every streamed update.
+                        state[k] = v
                     else:
                         state[k] = v
 

@@ -3,7 +3,7 @@ name: formatting_agent
 model: gemini-2.5-flash
 temperature: 0.1
 top_p: 0.95
-max_tokens: 8192
+max_tokens: 20000
 description: "Creates a structured slide blueprint from the narrative report using chart placeholders for deterministic artifact generation"
 ---
 

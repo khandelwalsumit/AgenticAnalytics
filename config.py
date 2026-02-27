@@ -54,8 +54,8 @@ GROUP_BY_COLUMNS: list[str] = [
 ]
 
 # Bucket size controls
-MIN_BUCKET_SIZE = 10     # Buckets smaller than this get merged into "Other"
-MAX_BUCKET_SIZE = 2000   # Buckets larger than this get sub-bucketed by next column
+MIN_BUCKET_SIZE = 5     # Buckets smaller than this get merged into "Other"
+MAX_BUCKET_SIZE = 200   # Buckets larger than this get sub-bucketed by next column
 
 # Tail-end collection: merge all small buckets into a single "Other" bucket
 TAIL_BUCKET_ENABLED = True
