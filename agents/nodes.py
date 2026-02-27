@@ -594,10 +594,32 @@ def _build_extra_context(
 ) -> str:
     """Build agent-specific context to append to the system prompt."""
     if agent_name in FRICTION_AGENTS and skill_loader:
+        # Collect skills assigned at bucketing time from each bucket's metadata.
+        # CALL_REASONS_TO_SKILLS already encoded the right skill set per call_reason —
+        # no LLM selection needed; just union the assigned lists across active buckets.
+        raw_buckets = state.get("data_buckets", {})
+        skills_to_load: list[str] = []
+        if isinstance(raw_buckets, dict):
+            for binfo in raw_buckets.values():
+                if isinstance(binfo, dict):
+                    for s in binfo.get("assigned_skills", []):
+                        if s not in skills_to_load:
+                            skills_to_load.append(s)
+
+        # Fall back to full catalog only if bucketing ran without skill assignment
+        if not skills_to_load:
+            skills_to_load = list(ALL_DOMAIN_SKILLS)
+
+        # Load: single skill → direct load (no list iteration); multiple → batch load
+        if len(skills_to_load) == 1:
+            loaded_skills = skill_loader.load_skill(skills_to_load[0])
+        else:
+            loaded_skills = skill_loader.load_skills(skills_to_load)
+
         return (
             "\n\n## Loaded Domain Skills\n"
             "Apply these domain skills through your specific analytical lens:\n\n"
-            + skill_loader.load_skills(ALL_DOMAIN_SKILLS)
+            + loaded_skills
         )
 
     if agent_name == "synthesizer_agent":

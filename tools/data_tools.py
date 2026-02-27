@@ -14,6 +14,7 @@ import pandas as pd
 from langchain_core.tools import tool
 
 from config import (
+    CALL_REASONS_TO_SKILLS,
     GROUP_BY_COLUMNS,
     LLM_ANALYSIS_COLUMNS,
     MAX_BUCKET_SIZE,
@@ -242,11 +243,21 @@ def bucket_data(group_by: str = "", focus: str = "") -> str:
             top = MetricsEngine.top_n(bucket_df, col, n=5)
             llm_summary[col] = top
 
+        # Resolve skills for this bucket from the CALL_REASONS_TO_SKILLS mapping.
+        # For sub-buckets ("Parent > Sub"), use only the parent part for lookup.
+        parent_reason = bucket_name.split(" > ")[0].strip()
+        assigned_skills: list[str] = (
+            CALL_REASONS_TO_SKILLS.get(parent_reason)
+            or CALL_REASONS_TO_SKILLS.get(bucket_name)
+            or []
+        )
+
         meta: dict[str, Any] = {
             "bucket_name": bucket_name,
             "row_count": len(bucket_df),
             "group_by": group_by,
             "llm_field_summary": llm_summary,
+            "assigned_skills": assigned_skills,
         }
 
         if len(bucket_df) < MIN_BUCKET_SIZE:
