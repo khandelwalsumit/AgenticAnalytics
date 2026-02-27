@@ -147,7 +147,7 @@ def build_graph(
         sys_prompt = agent_factory.parse_agent_md("supervisor").system_prompt + ctx
 
         base, structured, last_msg = await _run_structured_node(
-            "supervisor", supervisor_chain, SupervisorOutput, sys_prompt, state
+            "supervisor", supervisor_chain, SupervisorOutput, sys_prompt, state, extra_context=ctx
         )
 
         if isinstance(structured, SupervisorOutput):
@@ -184,7 +184,7 @@ def build_graph(
         sys_prompt = agent_factory.parse_agent_md("planner").system_prompt + ctx
 
         base, structured, last_msg = await _run_structured_node(
-            "planner", planner_chain, PlannerOutput, sys_prompt, state
+            "planner", planner_chain, PlannerOutput, sys_prompt, state, extra_context=ctx
         )
 
         if isinstance(structured, PlannerOutput):
@@ -384,7 +384,7 @@ def build_graph(
         sys_prompt = agent_factory.parse_agent_md("synthesizer_agent").system_prompt + ctx
 
         base, structured, last_msg = await _run_structured_node(
-            "synthesizer_agent", synthesizer_chain, SynthesizerOutput, sys_prompt, state
+            "synthesizer_agent", synthesizer_chain, SynthesizerOutput, sys_prompt, state, extra_context=ctx
         )
 
         if isinstance(structured, SynthesizerOutput):
@@ -525,7 +525,7 @@ def build_graph(
         sys_prompt = agent_factory.parse_agent_md("formatting_agent").system_prompt + ctx
 
         base, structured, last_msg = await _run_structured_node(
-            "formatting_agent", formatting_chain, FormattingDeckOutput, sys_prompt, state
+            "formatting_agent", formatting_chain, FormattingDeckOutput, sys_prompt, state, extra_context=ctx
         )
 
         if isinstance(structured, FormattingDeckOutput):

@@ -71,6 +71,103 @@ _DECISION_TO_NEXT: dict[str, str] = {
 MAX_SUPERVISOR_LOOPS = 2
 
 
+LLM_INPUT_FIELDS: dict[str, list[str]] = {
+    "supervisor": [
+        "messages", "dataset_schema", "filters_applied", "data_buckets",
+        "themes_for_analysis", "plan_tasks", "analysis_objective",
+        "selected_friction_agents", "expected_friction_lenses",
+    ],
+    "planner": [
+        "messages", "filters_applied", "themes_for_analysis",
+        "navigation_log", "analysis_objective", "plan_tasks",
+    ],
+    "data_analyst": [
+        "messages", "dataset_path", "dataset_schema", "analysis_objective",
+    ],
+    "digital_friction_agent": [
+        "messages", "data_buckets", "_focus_bucket", "filters_applied", "analysis_objective",
+    ],
+    "operations_agent": [
+        "messages", "data_buckets", "_focus_bucket", "filters_applied", "analysis_objective",
+    ],
+    "communication_agent": [
+        "messages", "data_buckets", "_focus_bucket", "filters_applied", "analysis_objective",
+    ],
+    "policy_agent": [
+        "messages", "data_buckets", "_focus_bucket", "filters_applied", "analysis_objective",
+    ],
+    "synthesizer_agent": [
+        "messages", "friction_md_paths", "lens_synthesis_paths",
+        "expected_friction_lenses", "selected_friction_agents",
+    ],
+    "narrative_agent": [
+        "messages", "synthesis_result", "synthesis_output_file", "findings", "filters_applied",
+    ],
+    "formatting_agent": [
+        "messages", "narrative_output", "synthesis_result", "findings", "filters_applied",
+    ],
+    "report_analyst": [
+        "messages", "report_file_path", "data_file_path", "markdown_file_path",
+        "narrative_output", "formatting_output",
+    ],
+    "critique": [
+        "messages", "narrative_output", "formatting_output", "synthesis_result", "findings",
+    ],
+}
+
+
+def _present_field_names(state: AnalyticsState, fields: list[str]) -> list[str]:
+    present: list[str] = []
+    for field in fields:
+        value = state.get(field)  # type: ignore[arg-type]
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        if isinstance(value, (list, dict, tuple, set)) and len(value) == 0:
+            continue
+        present.append(field)
+    return present
+
+
+def _skills_for_agent(agent_name: str, state: AnalyticsState) -> list[str]:
+    if agent_name not in FRICTION_AGENTS:
+        return []
+    raw_buckets = state.get("data_buckets", {})
+    focus_bucket = str(state.get("_focus_bucket", "") or "")
+    skills: list[str] = []
+    if isinstance(raw_buckets, dict) and focus_bucket and isinstance(raw_buckets.get(focus_bucket), dict):
+        skills = list(raw_buckets[focus_bucket].get("assigned_skills", []) or [])
+    elif isinstance(raw_buckets, dict):
+        for binfo in raw_buckets.values():
+            if not isinstance(binfo, dict):
+                continue
+            for skill in binfo.get("assigned_skills", []) or []:
+                if isinstance(skill, str) and skill and skill not in skills:
+                    skills.append(skill)
+    return [s for s in skills if isinstance(s, str) and s]
+
+
+def _log_llm_input_signature(
+    agent_name: str,
+    state: AnalyticsState,
+    *,
+    prompt_chars: int,
+    context_chars: int,
+) -> None:
+    configured = LLM_INPUT_FIELDS.get(agent_name, ["messages"])
+    fields = _present_field_names(state, configured)
+    skills = _skills_for_agent(agent_name, state)
+    skills_text = ", ".join(skills) if skills else "none"
+    fields_text = ", ".join(fields) if fields else "messages"
+
+    logger.info("[LLM][%s] input = agent_prompt + skills[%s] + <%s>", agent_name, skills_text, fields_text)
+    logger.info(
+        "[LLM][%s] size  = prompt_chars=%d extra_context_chars=%d messages=%d",
+        agent_name, prompt_chars, context_chars, len(state.get("messages", [])),
+    )
+
+
 def _PRELIMINARY_PLAN_TASKS() -> list[dict[str, str]]:
     """Return a preliminary task list shown as soon as extraction starts."""
     return [
@@ -239,6 +336,8 @@ async def _run_structured_node(
     output_schema: type,
     system_prompt: str,
     state: AnalyticsState,
+    *,
+    extra_context: str = "",
 ) -> tuple[dict[str, Any], Any, Any]:
     """Invoke a structured-output LLM chain and return mechanical base updates.
 
@@ -258,9 +357,15 @@ async def _run_structured_node(
     start_ms = int(time.time() * 1000)
     step_id = str(uuid.uuid4())[:8]
     logger.info(
-        "---- Node [%s] START step=%s | msgs_in=%d | plan=%d/%d",
+        "[NODE][START] %s step=%s msgs_in=%d plan=%d/%d",
         agent_name, step_id, len(state["messages"]),
         state.get("plan_steps_completed", 0), state.get("plan_steps_total", 0),
+    )
+    _log_llm_input_signature(
+        agent_name,
+        state,
+        prompt_chars=len(system_prompt),
+        context_chars=len(extra_context),
     )
 
     agent = StructuredOutputAgent(
@@ -296,8 +401,14 @@ async def _run_structured_node(
         {"messages_count": len(state["messages"]), "plan_steps_completed": state.get("plan_steps_completed", 0)},
         {"output_summary": summary, "tools_used": tools_used, "elapsed_ms": elapsed},
     ))
-    logger.info("---- Node [%s] DONE %dms | structured=%s", agent_name, elapsed,
-                type(structured).__name__ if structured else "None")
+    logger.info(
+        "[NODE][DONE ] %s elapsed_ms=%d structured=%s tools=%s new_msgs=%d",
+        agent_name,
+        elapsed,
+        type(structured).__name__ if structured else "None",
+        ", ".join(tools_used) or "none",
+        len(new_msgs),
+    )
     return base, structured, last_msg
 
 
@@ -319,9 +430,20 @@ async def _run_react_node(
     start_ms = int(time.time() * 1000)
     step_id = str(uuid.uuid4())[:8]
     logger.info(
-        "---- Node [%s] START step=%s | msgs_in=%d | plan=%d/%d",
+        "[NODE][START] %s step=%s msgs_in=%d plan=%d/%d",
         agent_name, step_id, len(state["messages"]),
         state.get("plan_steps_completed", 0), state.get("plan_steps_total", 0),
+    )
+    base_prompt_chars = 0
+    try:
+        base_prompt_chars = len(agent_factory.parse_agent_md(agent_name).system_prompt)
+    except Exception:
+        base_prompt_chars = 0
+    _log_llm_input_signature(
+        agent_name,
+        state,
+        prompt_chars=base_prompt_chars,
+        context_chars=len(extra_context or ""),
     )
 
     agent = agent_factory.make_agent(agent_name, extra_context=extra_context)
@@ -351,7 +473,13 @@ async def _run_react_node(
         {"messages_count": len(state["messages"]), "plan_steps_completed": state.get("plan_steps_completed", 0)},
         {"output_summary": summary, "tools_used": tools_used, "elapsed_ms": elapsed},
     ))
-    logger.info("---- Node [%s] DONE %dms | tools=%s", agent_name, elapsed, ", ".join(tools_used) or "none")
+    logger.info(
+        "[NODE][DONE ] %s elapsed_ms=%d tools=%s new_msgs=%d",
+        agent_name,
+        elapsed,
+        ", ".join(tools_used) or "none",
+        len(new_msgs),
+    )
     return base, last_msg
 
 
@@ -1175,22 +1303,31 @@ def _extract_data_analyst_state(
         if not data:
             continue
 
+        if "filtered_rows" in data:
+            logger.info(
+                "[DATA][filter_data] rows original=%s filtered=%s reduction_pct=%s filters=%s",
+                data.get("original_rows", "?"),
+                data.get("filtered_rows", "?"),
+                data.get("reduction_pct", "?"),
+                list((data.get("filters_applied") or {}).keys()),
+            )
+
         # filter_data tool returns "filters_applied" key with the applied filters
         if "filters_applied" in data:
             filters = data["filters_applied"]
             if filters and isinstance(filters, dict):
                 updates["filters_applied"] = filters
-                logger.info("Data Analyst: extracted filters_applied=%s", filters)
+                logger.info("[DATA][filter_data] filters_applied=%s", filters)
 
         # filter_data returns filtered_parquet_path — completion flag for data_analyst step
         if "filtered_parquet_path" in data:
             updates["filtered_parquet_path"] = data["filtered_parquet_path"]
-            logger.info("Data Analyst: extracted filtered_parquet_path=%s", data["filtered_parquet_path"])
+            logger.info("[DATA][filter_data] filtered_parquet_path=%s", data["filtered_parquet_path"])
 
         # bucket_data returns themes and bucket paths
         if "themes" in data:
             updates["themes_for_analysis"] = data["themes"]
-            logger.info("Data Analyst: extracted themes_for_analysis=%s", data["themes"])
+            logger.info("[DATA][bucket_data] themes_for_analysis=%s", data["themes"])
         if "buckets" in data:
             updates["data_buckets"] = data["buckets"]
             # Top-level theme names for supervisor quick-answers
@@ -1202,16 +1339,33 @@ def _extract_data_analyst_state(
             if bucket_names and "themes_for_analysis" not in updates:
                 updates["themes_for_analysis"] = bucket_names
             updates["top_themes"] = bucket_names
-            logger.info("Data Analyst: extracted %d themes + top_themes", len(bucket_names))
+            bucket_rows: list[tuple[str, int]] = []
+            for key, info in data["buckets"].items():
+                if not isinstance(info, dict):
+                    continue
+                name = str(info.get("bucket_name", key))
+                count_raw = info.get("row_count", info.get("count", 0))
+                try:
+                    count = int(count_raw)
+                except (TypeError, ValueError):
+                    count = 0
+                bucket_rows.append((name, count))
+            bucket_rows.sort(key=lambda x: x[1], reverse=True)
+            calls_by_theme = ", ".join([f"{name}:{count}" for name, count in bucket_rows]) or "none"
+            logger.info(
+                "[DATA][bucket_data] themes=%d calls_by_theme=%s",
+                len(bucket_rows),
+                calls_by_theme,
+            )
         if "bucket_paths" in data:
             updates["bucket_paths"] = data["bucket_paths"]
-            logger.info("Data Analyst: extracted bucket_paths keys=%s", list(data["bucket_paths"].keys()))
+            logger.info("[DATA][bucket_data] bucket_paths=%s", list(data["bucket_paths"].keys()))
 
     # If no tool results found, still mark that data_analyst ran
     # by setting a minimal filters_applied so the supervisor knows.
     if "filters_applied" not in updates and not state.get("filters_applied"):
         updates["filters_applied"] = {"status": "extraction_attempted"}
-        logger.info("Data Analyst: no filter results found in tool messages, marking extraction_attempted")
+        logger.info("[DATA][filter_data] no filter results found, marking extraction_attempted")
 
 
 def _parse_dimension_preferences(
