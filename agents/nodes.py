@@ -227,7 +227,148 @@ async def user_checkpoint_node(state: AnalyticsState) -> dict[str, Any]:
 
 
 # ------------------------------------------------------------------
-# Agent node factory
+# Thin invocation helpers (replace make_agent_node factory)
+# ------------------------------------------------------------------
+
+
+async def _run_structured_node(
+    agent_name: str,
+    chain: Any,
+    output_schema: type,
+    system_prompt: str,
+    state: AnalyticsState,
+) -> tuple[dict[str, Any], Any, Any]:
+    """Invoke a structured-output LLM chain and return mechanical base updates.
+
+    Returns ``(base_updates, structured_output, last_new_msg)``.
+
+    ``base_updates`` contains the boilerplate every node needs:
+      - ``messages``         – new messages only (input messages filtered out)
+      - ``execution_trace``  – appended ExecutionTrace entry
+      - ``io_trace`` / ``node_io`` / ``last_completed_node``
+      - checkpoint field resets
+
+    The CALLER writes: reasoning, next_agent, plan_tasks, and all other
+    agent-specific state fields.
+    """
+    from core.agent_factory import StructuredOutputAgent
+
+    start_ms = int(time.time() * 1000)
+    step_id = str(uuid.uuid4())[:8]
+    logger.info(
+        "---- Node [%s] START step=%s | msgs_in=%d | plan=%d/%d",
+        agent_name, step_id, len(state["messages"]),
+        state.get("plan_steps_completed", 0), state.get("plan_steps_total", 0),
+    )
+
+    agent = StructuredOutputAgent(
+        name=agent_name,
+        system_prompt=system_prompt,
+        chain=chain,
+        output_schema=output_schema,
+    )
+    result = await agent.ainvoke({"messages": state["messages"]})
+    structured = result.get("structured_output")
+    elapsed = int(time.time() * 1000) - start_ms
+
+    input_ids = {m.id for m in state["messages"] if hasattr(m, "id") and m.id}
+    new_msgs = [
+        m for m in result["messages"]
+        if not (hasattr(m, "id") and m.id and m.id in input_ids)
+    ]
+    last_msg = new_msgs[-1] if new_msgs else None
+    summary = _trunc(_text(last_msg.content), 200) if last_msg and hasattr(last_msg, "content") else ""
+    tools_used = [tc.get("name", "?") for m in new_msgs if hasattr(m, "tool_calls") for tc in m.tool_calls]
+    input_summary = _text(state["messages"][-1].content)[:200] if state["messages"] else ""
+
+    base: dict[str, Any] = {
+        "messages": new_msgs,
+        "execution_trace": state.get("execution_trace", []) + [ExecutionTrace(
+            step_id=step_id, agent=agent_name, input_summary=input_summary,
+            output_summary=summary, tools_used=tools_used, latency_ms=elapsed, success=True,
+        )],
+        **_clear_checkpoint_fields(),
+    }
+    base.update(_trace_io(
+        state, agent_name,
+        {"messages_count": len(state["messages"]), "plan_steps_completed": state.get("plan_steps_completed", 0)},
+        {"output_summary": summary, "tools_used": tools_used, "elapsed_ms": elapsed},
+    ))
+    logger.info("---- Node [%s] DONE %dms | structured=%s", agent_name, elapsed,
+                type(structured).__name__ if structured else "None")
+    return base, structured, last_msg
+
+
+async def _run_react_node(
+    agent_name: str,
+    agent_factory: AgentFactory,
+    extra_context: str,
+    state: AnalyticsState,
+) -> tuple[dict[str, Any], Any]:
+    """Invoke a ReAct (tool-calling) agent and return mechanical base updates.
+
+    Returns ``(base_updates, last_new_msg)``.
+
+    ``base_updates`` contains: messages (all new), execution_trace, io_trace,
+    last_completed_node, and checkpoint field resets.
+
+    The CALLER writes: reasoning and all agent-specific state field updates.
+    """
+    start_ms = int(time.time() * 1000)
+    step_id = str(uuid.uuid4())[:8]
+    logger.info(
+        "---- Node [%s] START step=%s | msgs_in=%d | plan=%d/%d",
+        agent_name, step_id, len(state["messages"]),
+        state.get("plan_steps_completed", 0), state.get("plan_steps_total", 0),
+    )
+
+    agent = agent_factory.make_agent(agent_name, extra_context=extra_context)
+    result = await agent.ainvoke({"messages": state["messages"]})
+    elapsed = int(time.time() * 1000) - start_ms
+
+    input_ids = {m.id for m in state["messages"] if hasattr(m, "id") and m.id}
+    new_msgs = [
+        m for m in result["messages"]
+        if not (hasattr(m, "id") and m.id and m.id in input_ids)
+    ]
+    last_msg = new_msgs[-1] if new_msgs else None
+    summary = _trunc(_text(last_msg.content), 200) if last_msg and hasattr(last_msg, "content") else ""
+    tools_used = [tc.get("name", "?") for m in new_msgs if hasattr(m, "tool_calls") for tc in m.tool_calls]
+    input_summary = _text(state["messages"][-1].content)[:200] if state["messages"] else ""
+
+    base: dict[str, Any] = {
+        "messages": new_msgs,
+        "execution_trace": state.get("execution_trace", []) + [ExecutionTrace(
+            step_id=step_id, agent=agent_name, input_summary=input_summary,
+            output_summary=summary, tools_used=tools_used, latency_ms=elapsed, success=True,
+        )],
+        **_clear_checkpoint_fields(),
+    }
+    base.update(_trace_io(
+        state, agent_name,
+        {"messages_count": len(state["messages"]), "plan_steps_completed": state.get("plan_steps_completed", 0)},
+        {"output_summary": summary, "tools_used": tools_used, "elapsed_ms": elapsed},
+    ))
+    logger.info("---- Node [%s] DONE %dms | tools=%s", agent_name, elapsed, ", ".join(tools_used) or "none")
+    return base, last_msg
+
+
+def _agent_output_field(agent_name: str, new_msgs: list, summary: str) -> dict[str, str]:
+    """Build the standard state-field dict stored for friction / reporting agents.
+
+    Shape: ``{"output": <summary>, "full_response": <all AI text>, "agent": <name>}``
+    Used by ``digital_analysis``, ``operations_analysis``, ``narrative_output``, etc.
+    """
+    full_response = "\n\n".join(
+        _text(m.content)
+        for m in new_msgs
+        if getattr(m, "type", "") == "ai" and _text(m.content)
+    )
+    return {"output": summary, "full_response": full_response, "agent": agent_name}
+
+
+# ------------------------------------------------------------------
+# DEAD CODE — kept temporarily; will be removed after graph.py migration
 # ------------------------------------------------------------------
 
 
