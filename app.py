@@ -369,7 +369,8 @@ def make_initial_state() -> dict[str, Any]:
         "digital_analysis": {}, "operations_analysis": {},
         "communication_analysis": {}, "policy_analysis": {},
         "friction_output_files": {}, "friction_md_paths": {},
-        "synthesis_result": {}, "synthesis_path": "",
+        "lens_synthesis_paths": {},
+        "synthesis_result": {}, "synthesis_output_file": "", "synthesis_path": "",
         "narrative_output": {}, "narrative_path": "",
         "dataviz_output": {}, "formatting_output": {},
         "report_markdown_key": "", "report_file_path": "", "data_file_path": "", "markdown_file_path": "",
@@ -410,14 +411,34 @@ def _rehydrate_friction_outputs(state: dict[str, Any]) -> None:
 
     # Restore friction markdown paths from disk — files are already there.
     md_paths = state.get("friction_md_paths", {})
-    rebuilt_md: dict[str, str] = {}
+    rebuilt_md: dict[str, Any] = {}
     rebuilt_ds: dict[str, str] = {}
-    for agent_id, md_path in md_paths.items():
-        if md_path and Path(md_path).exists():
-            rebuilt_md[agent_id] = md_path
+    for agent_id, md_value in md_paths.items():
+        # New shape: {agent_id: {bucket_key: md_path}}
+        if isinstance(md_value, dict):
+            kept_bucket_paths: dict[str, str] = {}
+            combined_parts: list[str] = []
+            for bucket_key, bucket_path in md_value.items():
+                if isinstance(bucket_path, str) and bucket_path and Path(bucket_path).exists():
+                    kept_bucket_paths[str(bucket_key)] = bucket_path
+                    combined_parts.append(Path(bucket_path).read_text(encoding="utf-8"))
+            if kept_bucket_paths:
+                rebuilt_md[agent_id] = kept_bucket_paths
+                key = f"{agent_id}_output"
+                data_store.store_text(
+                    key,
+                    "\n\n".join(combined_parts),
+                    {"agent": agent_id, "type": "friction_output"},
+                )
+                rebuilt_ds[agent_id] = key
+            continue
+
+        # Legacy flat shape: {agent_id: md_path}
+        if isinstance(md_value, str) and md_value and Path(md_value).exists():
+            rebuilt_md[agent_id] = md_value
             # Also register in DataStore so legacy code using friction_output_files works.
             key = f"{agent_id}_output"
-            content = Path(md_path).read_text(encoding="utf-8")
+            content = Path(md_value).read_text(encoding="utf-8")
             data_store.store_text(key, content, {"agent": agent_id, "type": "friction_output"})
             rebuilt_ds[agent_id] = key
 

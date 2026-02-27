@@ -202,7 +202,7 @@ def export_filtered_csv(output_dir: str = "") -> str:
     _tmp_dir, default_out_dir, _thread_id = _get_artifact_dirs(store)
 
     # filter_data is always present — written by filter_data before this runs.
-    source = "filtered_dataset"
+    source = "filter_data"
     df = store.get_dataframe(source)
 
     out_dir = Path(output_dir) if output_dir else default_out_dir

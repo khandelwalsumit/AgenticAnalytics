@@ -263,21 +263,17 @@ def build_graph(
     # FRICTION LENS AGENTS  (4 agents, run in parallel inside friction_analysis)
     # ══════════════════════════════════════════════════════════════════════════
 
+    def _lens_md_base(agent_id: str, state: dict) -> str:
+        """Return versioned-md base name: '{agent_id}_{bucket}' or just '{agent_id}'."""
+        fb = state.get("_focus_bucket", "")
+        return f"{agent_id}_{fb}" if fb else agent_id
+
     async def digital_friction_node(state: AnalyticsState) -> dict[str, Any]:
         """Identifies digital/UX friction: app failures, self-service gaps, web issues.
 
-        Reads:
-            messages               – conversation context
-            data_buckets           – per-bucket row data to analyse
-            themes_for_analysis    – bucket names in scope
-            skill_loader           – domain skill catalog (injected from closure)
-
-        Writes:
-            digital_analysis       – {output, full_response, agent}
-                                     Bucket-level findings with call counts,
-                                     ease/impact scores (1-10), primary/secondary drivers.
-
-        Tools: analyze_bucket, score_friction_driver
+        Reads:  messages, data_buckets, _focus_bucket (optional), skill_loader
+        Writes: digital_analysis, friction_md_paths
+        Tools:  analyze_bucket, score_friction_driver
         """
         ctx = _build_extra_context("digital_friction_agent", state, skill_loader)
         base, last_msg = await _run_react_node("digital_friction_agent", agent_factory, ctx, state)
@@ -286,26 +282,20 @@ def build_graph(
         base["digital_analysis"] = output_field
         base["reasoning"] = [{"step_name": "Digital Friction Agent", "step_text": summary}]
         md_path = _write_versioned_md(
-            "digital_friction_agent",
+            _lens_md_base("digital_friction_agent", state),
             output_field.get("full_response", "") or summary,
-            {"agent": "digital_friction_agent"},
+            {"agent": "digital_friction_agent", "bucket": state.get("_focus_bucket", "all")},
         )
         if md_path:
             base["friction_md_paths"] = {"digital_friction_agent": md_path}
-            base["friction_output_files"] = {"digital_friction_agent": md_path}
         return base
 
     async def operations_node(state: AnalyticsState) -> dict[str, Any]:
         """Identifies operational friction: process breakdowns, SLA breaches, handoff failures.
 
-        Reads:
-            messages, data_buckets, themes_for_analysis, skill_loader
-
-        Writes:
-            operations_analysis    – {output, full_response, agent}
-                                     Bucket-level findings with call counts and scores.
-
-        Tools: analyze_bucket, score_friction_driver
+        Reads:  messages, data_buckets, _focus_bucket (optional), skill_loader
+        Writes: operations_analysis, friction_md_paths
+        Tools:  analyze_bucket, score_friction_driver
         """
         ctx = _build_extra_context("operations_agent", state, skill_loader)
         base, last_msg = await _run_react_node("operations_agent", agent_factory, ctx, state)
@@ -314,25 +304,20 @@ def build_graph(
         base["operations_analysis"] = output_field
         base["reasoning"] = [{"step_name": "Operations Agent", "step_text": summary}]
         md_path = _write_versioned_md(
-            "operations_agent",
+            _lens_md_base("operations_agent", state),
             output_field.get("full_response", "") or summary,
-            {"agent": "operations_agent"},
+            {"agent": "operations_agent", "bucket": state.get("_focus_bucket", "all")},
         )
         if md_path:
             base["friction_md_paths"] = {"operations_agent": md_path}
-            base["friction_output_files"] = {"operations_agent": md_path}
         return base
 
     async def communication_node(state: AnalyticsState) -> dict[str, Any]:
         """Identifies communication friction: notification gaps, expectation mismatches.
 
-        Reads:
-            messages, data_buckets, themes_for_analysis, skill_loader
-
-        Writes:
-            communication_analysis – {output, full_response, agent}
-
-        Tools: analyze_bucket, score_friction_driver
+        Reads:  messages, data_buckets, _focus_bucket (optional), skill_loader
+        Writes: communication_analysis, friction_md_paths
+        Tools:  analyze_bucket, score_friction_driver
         """
         ctx = _build_extra_context("communication_agent", state, skill_loader)
         base, last_msg = await _run_react_node("communication_agent", agent_factory, ctx, state)
@@ -341,25 +326,20 @@ def build_graph(
         base["communication_analysis"] = output_field
         base["reasoning"] = [{"step_name": "Communication Agent", "step_text": summary}]
         md_path = _write_versioned_md(
-            "communication_agent",
+            _lens_md_base("communication_agent", state),
             output_field.get("full_response", "") or summary,
-            {"agent": "communication_agent"},
+            {"agent": "communication_agent", "bucket": state.get("_focus_bucket", "all")},
         )
         if md_path:
             base["friction_md_paths"] = {"communication_agent": md_path}
-            base["friction_output_files"] = {"communication_agent": md_path}
         return base
 
     async def policy_node(state: AnalyticsState) -> dict[str, Any]:
         """Identifies policy friction: regulatory constraints, fee disputes, compliance issues.
 
-        Reads:
-            messages, data_buckets, themes_for_analysis, skill_loader
-
-        Writes:
-            policy_analysis        – {output, full_response, agent}
-
-        Tools: analyze_bucket, score_friction_driver
+        Reads:  messages, data_buckets, _focus_bucket (optional), skill_loader
+        Writes: policy_analysis, friction_md_paths
+        Tools:  analyze_bucket, score_friction_driver
         """
         ctx = _build_extra_context("policy_agent", state, skill_loader)
         base, last_msg = await _run_react_node("policy_agent", agent_factory, ctx, state)
@@ -368,13 +348,12 @@ def build_graph(
         base["policy_analysis"] = output_field
         base["reasoning"] = [{"step_name": "Policy Agent", "step_text": summary}]
         md_path = _write_versioned_md(
-            "policy_agent",
+            _lens_md_base("policy_agent", state),
             output_field.get("full_response", "") or summary,
-            {"agent": "policy_agent"},
+            {"agent": "policy_agent", "bucket": state.get("_focus_bucket", "all")},
         )
         if md_path:
             base["friction_md_paths"] = {"policy_agent": md_path}
-            base["friction_output_files"] = {"policy_agent": md_path}
         return base
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -658,108 +637,198 @@ def build_graph(
     }
 
     async def friction_analysis_node(state: AnalyticsState) -> dict[str, Any]:
-        """Run selected friction lens agents in parallel, then synthesize.
+        """Run each lens agent once per bucket in parallel, then two-pass synthesis.
 
-        Reads:  selected_friction_agents (which lenses to run; all 4 if empty)
-        Writes: digital_analysis, operations_analysis, communication_analysis,
-                policy_analysis, synthesis_result, findings, friction_output_files,
-                expected_friction_lenses, missing_friction_lenses,
-                synthesis_output_file (DataStore key), plan_steps_completed
+        Phase 0: Run (lens × bucket) combinations in parallel via asyncio.gather.
+                 e.g. 4 lenses × 6 buckets = 24 parallel ReAct runs.
+                 UI shows live ``(completed/total)`` per lens.
+        Phase 1: Per-lens aggregation — concatenate all bucket outputs per lens
+                 into ``lens_synthesis_{lens_id}.md`` (no LLM, structural merge).
+                 Synthesizer row shows ``Per-lens aggregation (n/4)``.
+        Phase 2: Final synthesis — synthesizer reads 4 per-lens markdowns and
+                 produces the executive synthesis, themes, and ranked findings.
+                 Synthesizer row shows ``Final cross-lens synthesis``.
+
+        Reads:  selected_friction_agents, data_buckets
+        Writes: friction_md_paths (nested), lens_synthesis_paths,
+                synthesis_result, findings, expected/missing_friction_lenses,
+                plan_steps_completed
         """
+        from pathlib import Path as _Path
+
         selected = state.get("selected_friction_agents", [])
         lens_ids = [a for a in selected if a in _ALL_LENS_IDS] if selected else list(_ALL_LENS_IDS)
         if not lens_ids:
             lens_ids = list(_ALL_LENS_IDS)
         lens_ids = list(dict.fromkeys(lens_ids))
 
-        logger.info("Friction analysis: starting %d agents: %s", len(lens_ids), lens_ids)
+        # Bucket keys from data_analyst output
+        raw_buckets = state.get("data_buckets", {})
+        bucket_keys = list(raw_buckets.keys()) if raw_buckets else ["all"]
+        total_buckets = len(bucket_keys)
 
-        sub_agents_before = _make_sub_agent_entries(FRICTION_SUB_AGENTS, lens_ids, status="in_progress")
-        _ = await _set_task_sub_agents_and_emit(
-            state.get("plan_tasks", []), agent_name="friction_analysis",
-            sub_agents=sub_agents_before, task_status="in_progress",
-        )
+        total_runs = len(lens_ids) * total_buckets
+        logger.info("Friction analysis: %d lenses × %d buckets = %d runs",
+                    len(lens_ids), total_buckets, total_runs)
 
-        node_fns = [_LENS_NODE_MAP[aid] for aid in lens_ids]
-        results  = await asyncio.gather(*(fn(state) for fn in node_fns))
-
-        for agent_id, result in zip(lens_ids, results):
-            has_output = any(result.get(f) for f in (
-                "digital_analysis", "operations_analysis", "communication_analysis", "policy_analysis"
-            ))
-            logger.info("  Friction [%s]: msgs=%d, has_state_field=%s",
-                        agent_id, len(result.get("messages", [])), has_output)
-
-        merged = _merge_parallel_outputs(list(results))
-        logger.info("  Merged friction outputs: keys=%s, msgs=%d",
-                    [k for k in merged if merged[k] and k != "messages"],
-                    len(merged.get("messages", [])))
-
-        friction_output_files = _persist_friction_outputs(lens_ids, list(results))
-        merged["friction_output_files"]    = friction_output_files
-        merged["expected_friction_lenses"] = lens_ids
-        merged["missing_friction_lenses"]  = [aid for aid in lens_ids if aid not in friction_output_files]
-
-        sub_agents = [_make_sub_agent_entry(FRICTION_SUB_AGENTS, aid, status="done") for aid in lens_ids]
-        sub_agents.append(_make_sub_agent_entry(FRICTION_SUB_AGENTS, "synthesizer_agent", status="in_progress"))
+        # Build sub_agents with (0/N) progress counters
+        sub_agents: list[dict[str, Any]] = []
+        for lid in lens_ids:
+            meta = FRICTION_SUB_AGENTS[lid]
+            sub_agents.append({
+                "id": lid,
+                "title": meta["title"],
+                "detail": f"{meta['detail']} (0/{total_buckets})",
+                "status": "in_progress",
+            })
         tasks = await _set_task_sub_agents_and_emit(
             state.get("plan_tasks", []), agent_name="friction_analysis",
             sub_agents=sub_agents, task_status="in_progress",
         )
 
-        # Build synthesizer input state: original conversation + all friction messages + merged fields
+        # ── Phase 0: run (lens × bucket) in parallel with live progress ──
+        completed_per_lens: dict[str, int] = {lid: 0 for lid in lens_ids}
+
+        async def _tracked_run(lens_id: str, bucket_key: str, coro):
+            """Wrap a lens coroutine to update UI progress on completion."""
+            result = await coro
+            completed_per_lens[lens_id] += 1
+            done = completed_per_lens[lens_id]
+            base_detail = FRICTION_SUB_AGENTS[lens_id]["detail"]
+            new_status = "done" if done == total_buckets else "in_progress"
+            _set_sub_agent_status(
+                sub_agents, lens_id, status=new_status,
+                detail=f"{base_detail} ({done}/{total_buckets})",
+            )
+            nonlocal tasks
+            tasks = await _set_task_sub_agents_and_emit(
+                tasks, agent_name="friction_analysis",
+                sub_agents=sub_agents, task_status="in_progress",
+            )
+            return result
+
+        run_tasks = []
+        run_combos: list[tuple[str, str]] = []
+        for lens_id in lens_ids:
+            for bucket_key in bucket_keys:
+                focused_state = dict(state)
+                focused_state["_focus_bucket"] = bucket_key
+                coro = _LENS_NODE_MAP[lens_id](focused_state)
+                run_tasks.append(_tracked_run(lens_id, bucket_key, coro))
+                run_combos.append((lens_id, bucket_key))
+
+        results = await asyncio.gather(*run_tasks)
+
+        # Assemble nested friction_md_paths: {agent_id: {bucket_key: md_path}}
+        nested_md_paths: dict[str, dict[str, str]] = {lid: {} for lid in lens_ids}
+        for (lens_id, bucket_key), result in zip(run_combos, results):
+            flat_paths = result.get("friction_md_paths", {})
+            nested_md_paths[lens_id][bucket_key] = flat_paths.get(lens_id, "")
+
+        merged = _merge_parallel_outputs(list(results))
+        merged["friction_md_paths"]        = nested_md_paths
+        merged["expected_friction_lenses"] = lens_ids
+
+        logger.info("  Merged %d friction outputs: lenses=%s, buckets=%s",
+                    total_runs, lens_ids, bucket_keys)
+
+        # ── Phase 1: per-lens aggregation (no LLM) with synthesizer progress ──
+        sub_agents.append({
+            "id": "synthesizer_agent",
+            "title": FRICTION_SUB_AGENTS["synthesizer_agent"]["title"],
+            "detail": f"Per-lens aggregation (0/{len(lens_ids)})",
+            "status": "in_progress",
+        })
+        tasks = await _set_task_sub_agents_and_emit(
+            tasks, agent_name="friction_analysis",
+            sub_agents=sub_agents, task_status="in_progress",
+        )
+
+        lens_synthesis_paths: dict[str, str] = {}
+        for i, lid in enumerate(lens_ids):
+            bucket_path_dict = nested_md_paths[lid]
+            parts = [f"# {lid} — Per-Bucket Analysis\n"]
+            for bk in sorted(bucket_path_dict.keys()):
+                bpath = bucket_path_dict[bk]
+                if bpath and _Path(bpath).exists():
+                    content = _Path(bpath).read_text(encoding="utf-8")
+                    bucket_name = raw_buckets.get(bk, {}).get("bucket_name", bk) if isinstance(raw_buckets.get(bk), dict) else bk
+                    parts.append(f"\n## Bucket: {bucket_name}\n{content}")
+                else:
+                    parts.append(f"\n## Bucket: {bk}\n(No output)\n")
+            lens_md = "\n".join(parts)
+            lens_path = _write_versioned_md(
+                f"lens_synthesis_{lid}", lens_md,
+                {"lens": lid, "bucket_count": len(bucket_path_dict)},
+            )
+            if lens_path:
+                lens_synthesis_paths[lid] = lens_path
+
+            _set_sub_agent_status(
+                sub_agents, "synthesizer_agent", status="in_progress",
+                detail=f"Per-lens aggregation ({i + 1}/{len(lens_ids)})",
+            )
+            tasks = await _set_task_sub_agents_and_emit(
+                tasks, agent_name="friction_analysis",
+                sub_agents=sub_agents, task_status="in_progress",
+            )
+
+        merged["lens_synthesis_paths"] = lens_synthesis_paths
+        logger.info("  Phase 1 done: %d per-lens synthesis files written", len(lens_synthesis_paths))
+
+        # ── Phase 2: final synthesis (single LLM call) ──
+        _set_sub_agent_status(
+            sub_agents, "synthesizer_agent", status="in_progress",
+            detail="Final cross-lens synthesis",
+        )
+        tasks = await _set_task_sub_agents_and_emit(
+            tasks, agent_name="friction_analysis",
+            sub_agents=sub_agents, task_status="in_progress",
+        )
+
         synth_state = dict(state)
         for k, v in merged.items():
             if k != "messages":
                 synth_state[k] = v
-        synth_state["messages"]             = list(state["messages"]) + merged.get("messages", [])
-        synth_state["friction_output_files"] = friction_output_files
+        synth_state["messages"]              = list(state["messages"]) + merged.get("messages", [])
+        synth_state["lens_synthesis_paths"]  = lens_synthesis_paths
+        synth_state["friction_md_paths"]     = nested_md_paths
 
-        logger.info(
-            "Friction analysis: running synthesizer | msgs=%d | digital=%s ops=%s comm=%s policy=%s",
-            len(synth_state["messages"]),
-            bool(synth_state.get("digital_analysis")),  bool(synth_state.get("operations_analysis")),
-            bool(synth_state.get("communication_analysis")), bool(synth_state.get("policy_analysis")),
-        )
+        logger.info("Friction analysis: running synthesizer (Phase 2) | %d lens files",
+                    len(lens_synthesis_paths))
         synth_result = await synthesizer_node(synth_state)
 
         # Tag synthesis with completeness decision
-        expected_lenses = merged.get("expected_friction_lenses", lens_ids)
-        missing_lenses  = merged.get("missing_friction_lenses", [])
+        missing_lenses = [lid for lid in lens_ids if lid not in lens_synthesis_paths]
         synthesis_payload = synth_result.get("synthesis_result", {})
         if isinstance(synthesis_payload, dict):
             synthesis_payload = dict(synthesis_payload)
             synthesis_payload["decision"] = "complete" if not missing_lenses else "incomplete"
-            if missing_lenses:
-                reason = str(synthesis_payload.get("reasoning", "")).strip()
-                extra  = f" Missing expected lens outputs: {', '.join(missing_lenses)}."
-                synthesis_payload["reasoning"] = (reason + extra).strip() if reason else extra.strip()
             synth_result["synthesis_result"] = synthesis_payload
         synth_result["missing_friction_lenses"]  = list(missing_lenses)
-        synth_result["expected_friction_lenses"] = list(expected_lenses)
+        synth_result["expected_friction_lenses"] = list(lens_ids)
 
         # Offload synthesis_result to DataStore to avoid state bloat
         import chainlit as cl
         data_store = cl.user_session.get("data_store")
         if data_store and synth_result.get("synthesis_result"):
-            try:
-                content = json.dumps(synth_result["synthesis_result"])
-                key = data_store.store_text(
-                    "synthesis_output", content,
-                    {"agent": "synthesizer_agent", "type": "synthesis_output"},
-                )
-                synth_result["synthesis_output_file"] = key
-                logger.info("Friction analysis: stored synthesis_result in DataStore as %s", key)
-            except Exception as e:
-                logger.error("Friction analysis: failed to store synthesis_result: %s", e)
+            content = json.dumps(synth_result["synthesis_result"])
+            key = data_store.store_text(
+                "synthesis_output", content,
+                {"agent": "synthesizer_agent", "type": "synthesis_output"},
+            )
+            synth_result["synthesis_output_file"] = key
+            logger.info("Friction analysis: stored synthesis_result in DataStore as %s", key)
 
-        logger.info("Friction analysis: synthesizer done | findings=%d synthesis=%s msgs=%d",
+        logger.info("Friction analysis: synthesizer done | findings=%d msgs=%d",
                     len(synth_result.get("findings", [])),
-                    bool(synth_result.get("synthesis_output_file")),
                     len(synth_result.get("messages", [])))
 
-        _set_sub_agent_status(sub_agents, "synthesizer_agent", status="done",
-                              detail="Consolidating cross-lens signals into an executive synthesis.")
+        # Final UI: mark synthesizer done
+        _set_sub_agent_status(
+            sub_agents, "synthesizer_agent", status="done",
+            detail="Cross-lens synthesis complete",
+        )
         tasks = await _set_task_sub_agents_and_emit(
             tasks, agent_name="friction_analysis", sub_agents=sub_agents, task_status="done",
         )
@@ -804,8 +873,11 @@ def build_graph(
         logger.info("Report generation: starting narrative -> formatting blueprint -> artifact writer")
         expected = state.get("expected_friction_lenses", []) or state.get("selected_friction_agents", [])
         expected = list(dict.fromkeys([a for a in expected if a]))
-        available = list((state.get("friction_output_files", {}) or {}).keys())
-        missing = state.get("missing_friction_lenses", []) or [a for a in expected if a not in available]
+        # Check completeness via lens_synthesis_paths (per-bucket) or friction_output_files (legacy)
+        available_lenses = list((state.get("lens_synthesis_paths", {}) or {}).keys())
+        if not available_lenses:
+            available_lenses = list((state.get("friction_output_files", {}) or {}).keys())
+        missing = state.get("missing_friction_lenses", []) or [a for a in expected if a not in available_lenses]
         missing = list(dict.fromkeys([a for a in missing if a]))
         if missing:
             raise RuntimeError(

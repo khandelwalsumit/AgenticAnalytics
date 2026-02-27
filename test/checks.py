@@ -117,8 +117,9 @@ from config import (
     FRICTION_AGENTS,
     GOOGLE_API_KEY,
     GROUP_BY_COLUMNS,
-    LLM_ANALYSIS_COLUMNS,
+    DATA_FILTER_COLUMNS,
     LLM_ANALYSIS_CONTEXT,
+    LLM_ANALYSIS_FOCUS,
     LOG_DATE_FORMAT,
     LOG_FORMAT,
     LOG_LEVEL,
@@ -154,7 +155,8 @@ for name, val, expected_type in [
     ("VERBOSE", VERBOSE, bool),
     ("LOG_LEVEL", LOG_LEVEL, str),
     ("GROUP_BY_COLUMNS", GROUP_BY_COLUMNS, list),
-    ("LLM_ANALYSIS_COLUMNS", LLM_ANALYSIS_COLUMNS, list),
+    ("DATA_FILTER_COLUMNS", DATA_FILTER_COLUMNS, list),
+    ("LLM_ANALYSIS_FOCUS", LLM_ANALYSIS_FOCUS, list),
     ("LLM_ANALYSIS_CONTEXT", LLM_ANALYSIS_CONTEXT, dict),
     ("FRICTION_AGENTS", FRICTION_AGENTS, set),
     ("REPORTING_AGENTS", REPORTING_AGENTS, set),
@@ -370,11 +372,17 @@ if LLM_ANALYSIS_CONTEXT:
 else:
     fail("LLM_ANALYSIS_CONTEXT", "empty — no filter dimensions configured")
 
-# Verify LLM_ANALYSIS_COLUMNS is derived correctly
-if set(LLM_ANALYSIS_COLUMNS) == set(LLM_ANALYSIS_CONTEXT.keys()):
-    ok(f"LLM_ANALYSIS_COLUMNS matches LLM_ANALYSIS_CONTEXT keys ({len(LLM_ANALYSIS_COLUMNS)} columns)")
+# Verify DATA_FILTER_COLUMNS is derived correctly from LLM_ANALYSIS_CONTEXT
+if set(DATA_FILTER_COLUMNS) == set(LLM_ANALYSIS_CONTEXT.keys()):
+    ok(f"DATA_FILTER_COLUMNS matches LLM_ANALYSIS_CONTEXT keys ({len(DATA_FILTER_COLUMNS)} columns)")
 else:
-    fail("LLM_ANALYSIS_COLUMNS", "does not match LLM_ANALYSIS_CONTEXT keys")
+    fail("DATA_FILTER_COLUMNS", "does not match LLM_ANALYSIS_CONTEXT keys")
+
+# Verify LLM_ANALYSIS_FOCUS is non-empty
+if LLM_ANALYSIS_FOCUS:
+    ok(f"LLM_ANALYSIS_FOCUS: {len(LLM_ANALYSIS_FOCUS)} focus columns: {LLM_ANALYSIS_FOCUS}")
+else:
+    fail("LLM_ANALYSIS_FOCUS", "empty — no focus columns configured for agents")
 
 
 # ---------------------------------------------------------------------------

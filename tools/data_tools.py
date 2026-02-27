@@ -22,8 +22,9 @@ from langchain_core.tools import tool
 
 from config import (
     CALL_REASONS_TO_SKILLS,
+    DATA_FILTER_COLUMNS,
     GROUP_BY_COLUMNS,
-    LLM_ANALYSIS_COLUMNS,
+    LLM_ANALYSIS_FOCUS,
     MAX_BUCKET_SIZE,
     MAX_SAMPLE_SIZE,
     MIN_BUCKET_SIZE,
@@ -82,7 +83,8 @@ def load_dataset(path: str = "") -> str:
         non_null = df[col].dropna()
         samples[col] = [str(v) for v in non_null.head(3).tolist()] if len(non_null) > 0 else []
     stats["sample_values"] = samples
-    stats["llm_analysis_columns"] = [c for c in LLM_ANALYSIS_COLUMNS if c in df.columns]
+    stats["data_filter_columns"] = [c for c in DATA_FILTER_COLUMNS if c in df.columns]
+    stats["llm_analysis_focus"] = [c for c in LLM_ANALYSIS_FOCUS if c in df.columns]
     stats["group_by_columns"] = [c for c in GROUP_BY_COLUMNS if c in df.columns]
     stats["input_parquet_path"] = str(DEFAULT_PARQUET_PATH)
 
@@ -155,8 +157,7 @@ def filter_data(filters: dict[str, Any]) -> str:
             "Check the 'skipped_filters' field for suggestions."
         )
 
-    filtered_path = store.base_dir / "filtered_dataset.parquet"
-    store.store_dataframe("filtered_dataset", filtered, metadata=metadata)
+    store.store_dataframe("filter_data", filtered, metadata=metadata)
 
     return json.dumps(metadata, indent=2)
 
@@ -182,8 +183,7 @@ def bucket_data(group_by: str = "", focus: str = "") -> str:
     """
     store = _get_store()
 
-    # Use filtered dataset if available, else main
-    df = store.get_dataframe("filtered_dataset")
+    df = store.get_dataframe("filter_data")
 
     # Determine which column to group by
     if not group_by:
@@ -245,13 +245,14 @@ def bucket_data(group_by: str = "", focus: str = "") -> str:
         other_df = pd.concat(tail_rows, ignore_index=True)
         regular_buckets["Other"] = other_df
 
-    # --- Store buckets and build response ---
+    # --- Build per-bucket metadata and combine into one parquet ---
     buckets_info: dict[str, Any] = {}
+    frames: list[pd.DataFrame] = []
     for bucket_name, bucket_df in regular_buckets.items():
         bucket_key = f"bucket_{_safe_key(bucket_name)}"
 
-        # Build LLM-relevant summary (only LLM_ANALYSIS_COLUMNS)
-        llm_cols = [c for c in LLM_ANALYSIS_COLUMNS if c in bucket_df.columns]
+        # Build LLM-relevant summary (only LLM_ANALYSIS_FOCUS)
+        llm_cols = [c for c in LLM_ANALYSIS_FOCUS if c in bucket_df.columns]
         llm_summary: dict[str, Any] = {}
         for col in llm_cols:
             top = MetricsEngine.top_n(bucket_df, col, n=5)
@@ -280,8 +281,14 @@ def bucket_data(group_by: str = "", focus: str = "") -> str:
         if focus and focus in bucket_df.columns:
             meta["top_values"] = MetricsEngine.top_n(bucket_df, focus, n=5)
 
-        store.store_dataframe(bucket_key, bucket_df, metadata=meta)
+        tagged = bucket_df.copy()
+        tagged["_bucket_key"] = bucket_key
+        frames.append(tagged)
         buckets_info[bucket_key] = meta
+
+    # Store all buckets in one combined parquet
+    combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    store.store_dataframe("bucketed_data", combined, metadata={"buckets": buckets_info})
 
     return json.dumps(
         {
@@ -293,7 +300,7 @@ def bucket_data(group_by: str = "", focus: str = "") -> str:
                 "max_bucket_size": MAX_BUCKET_SIZE,
                 "tail_enabled": TAIL_BUCKET_ENABLED,
                 "group_by_columns": GROUP_BY_COLUMNS,
-                "llm_analysis_columns": LLM_ANALYSIS_COLUMNS,
+                "llm_analysis_focus": LLM_ANALYSIS_FOCUS,
             },
             "buckets": buckets_info,
         },
@@ -318,16 +325,15 @@ def sample_data(bucket: str, n: int = 5) -> str:
     store = _get_store()
     n = min(n, MAX_SAMPLE_SIZE)
 
-    available_keys = store.list_keys()
-    actual_key = bucket if bucket in available_keys else "main_dataset"
-    df = store.get_dataframe(actual_key)
+    df_all = store.get_dataframe("bucketed_data")
+    df = df_all[df_all["_bucket_key"] == bucket] if bucket else df_all
 
-    # Only include LLM-relevant columns + grouping columns for context
+    # Only include LLM_ANALYSIS_FOCUS columns + grouping columns for context
     relevant_cols = list(dict.fromkeys(
-        LLM_ANALYSIS_COLUMNS + GROUP_BY_COLUMNS + ["exact_problem_statement"]
+        LLM_ANALYSIS_FOCUS + GROUP_BY_COLUMNS
     ))
     available_cols = [c for c in relevant_cols if c in df.columns]
-    df_slim = df[available_cols] if available_cols else df
+    df_slim = df[available_cols] if available_cols else df.drop(columns=["_bucket_key"], errors="ignore")
 
     sample = df_slim.sample(n=min(n, len(df_slim)), random_state=42)
 
@@ -361,14 +367,10 @@ def get_distribution(column: str, bucket: str = "") -> str:
     store = _get_store()
 
     if bucket:
-        available_keys = store.list_keys()
-        actual_key = bucket if bucket in available_keys else "main_dataset"
-        df = store.get_dataframe(actual_key)
+        df_all = store.get_dataframe("bucketed_data")
+        df = df_all[df_all["_bucket_key"] == bucket]
     else:
-        try:
-            df = store.get_dataframe("filtered_dataset")
-        except KeyError:
-            df = store.get_dataframe("main_dataset")
+        df = store.get_dataframe("filter_data")
 
     result = MetricsEngine.get_distribution(df, column)
     return json.dumps(result, indent=2)

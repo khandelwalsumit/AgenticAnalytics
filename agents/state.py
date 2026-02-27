@@ -79,8 +79,10 @@ class AnalyticsState(TypedDict):
 
     # Friction agent output file references (agent_id → DataStore key, legacy)
     friction_output_files: dict[str, str]
-    # Friction agent markdown paths (agent_id → absolute .md path) — primary
-    friction_md_paths: dict[str, str]
+    # Friction agent markdown paths — nested: {agent_id: {bucket_key: .md path}}
+    friction_md_paths: dict[str, Any]
+    # Per-lens synthesis paths — {agent_id: absolute .md path} from Phase 1
+    lens_synthesis_paths: dict[str, str]
 
     # Synthesis output (written by Synthesizer Agent)
     synthesis_result: dict[str, Any]

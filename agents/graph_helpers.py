@@ -1246,8 +1246,11 @@ def _record_plan_progress(
     mark_analysis_complete: bool = False,
 ) -> None:
     """Increment and persist plan progress in result delta."""
-    completed = state.get("plan_steps_completed", 0) + 1
-    total = state.get("plan_steps_total", 0)
+    tasks = result.get("plan_tasks", state.get("plan_tasks", []))
+    total = max(state.get("plan_steps_total", 0), len(tasks) if isinstance(tasks, list) else 0)
+    done_count = len([t for t in tasks if isinstance(t, dict) and t.get("status") == "done"]) if isinstance(tasks, list) else 0
+    completed = max(state.get("plan_steps_completed", 0), done_count)
+    result["plan_steps_total"] = total
     result["plan_steps_completed"] = completed
     logger.info("Plan progress: %d/%d (agent=%s)", completed, total, agent_name)
 

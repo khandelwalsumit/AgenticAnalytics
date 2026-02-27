@@ -60,11 +60,11 @@ def add_finding(finding: dict) -> None:
 def analyze_bucket(bucket: str, questions: list[str]) -> str:
     """Analyze a data bucket against specific questions.
 
-    Only LLM_ANALYSIS_COLUMNS are included in distributions and samples
+    Only LLM_ANALYSIS_FOCUS columns are included in distributions and samples
     to keep context small for downstream LLM agents.
 
     Args:
-        bucket: DataStore key for the bucket.
+        bucket: Bucket key (e.g. 'bucket_payments_transfers').
         questions: List of analysis questions to investigate.
 
     Returns:
@@ -74,12 +74,12 @@ def analyze_bucket(bucket: str, questions: list[str]) -> str:
         return json.dumps({"error": "DataStore not initialized"})
 
     store = _data_store_ref
-    available = store.list_keys()
-    actual_key = bucket if bucket in available else ("filtered_dataset" if "filtered_dataset" in available else "main_dataset")
-    if actual_key != bucket:
-        print(f"[analyze_bucket] Bucket '{bucket}' not found, using '{actual_key}'. Available: {available}")
-    df = store.get_dataframe(actual_key)
-    meta = store.get_metadata(actual_key)
+    from config import LLM_ANALYSIS_FOCUS, GROUP_BY_COLUMNS
+
+    df_all = store.get_dataframe("bucketed_data")
+    df = df_all[df_all["_bucket_key"] == bucket]
+    bucket_meta = store.get_metadata("bucketed_data").get("buckets", {})
+    meta = bucket_meta.get(bucket, {})
 
     analysis_context: dict[str, Any] = {
         "bucket": bucket,
@@ -88,10 +88,8 @@ def analyze_bucket(bucket: str, questions: list[str]) -> str:
         "row_count": len(df),
     }
 
-    # Distributions for LLM analysis columns only
-    from config import LLM_ANALYSIS_COLUMNS, GROUP_BY_COLUMNS
-
-    llm_cols = [c for c in LLM_ANALYSIS_COLUMNS if c in df.columns]
+    # Distributions for LLM_ANALYSIS_FOCUS columns only
+    llm_cols = [c for c in LLM_ANALYSIS_FOCUS if c in df.columns]
     distributions = {}
     for col in llm_cols:
         dist = MetricsEngine.get_distribution(df, col)
@@ -109,12 +107,10 @@ def analyze_bucket(bucket: str, questions: list[str]) -> str:
 
     analysis_context["distributions"] = distributions
 
-    # Sample rows — only LLM-relevant columns
-    relevant_cols = list(dict.fromkeys(
-        LLM_ANALYSIS_COLUMNS + GROUP_BY_COLUMNS + ["exact_problem_statement"]
-    ))
+    # Sample rows — only LLM_ANALYSIS_FOCUS + grouping columns
+    relevant_cols = list(dict.fromkeys(LLM_ANALYSIS_FOCUS + GROUP_BY_COLUMNS))
     available_cols = [c for c in relevant_cols if c in df.columns]
-    df_slim = df[available_cols] if available_cols else df
+    df_slim = df[available_cols] if available_cols else df.drop(columns=["_bucket_key"], errors="ignore")
 
     sample = df_slim.sample(n=min(10, len(df_slim)), random_state=42)
     rows = []
@@ -136,7 +132,7 @@ def apply_skill(skill_name: str, bucket: str) -> str:
 
     Args:
         skill_name: Name of the skill (e.g., 'payment_transfer').
-        bucket: DataStore key for the data bucket to analyze.
+        bucket: Bucket key (e.g. 'bucket_payments_transfers').
 
     Returns:
         JSON with skill content and bucket context for LLM analysis.
@@ -147,19 +143,17 @@ def apply_skill(skill_name: str, bucket: str) -> str:
         return json.dumps({"error": "DataStore not initialized"})
 
     skill_content = _skill_loader_ref.load_skill(skill_name)
+    from config import LLM_ANALYSIS_FOCUS
 
-    # Fall back to main_dataset if bucket key doesn't exist
-    available = _data_store_ref.list_keys()
-    actual_key = bucket if bucket in available else ("filtered_dataset" if "filtered_dataset" in available else "main_dataset")
-    if actual_key != bucket:
-        print(f"[apply_skill] Bucket '{bucket}' not found, using '{actual_key}'. Available: {available}")
+    df_all = _data_store_ref.get_dataframe("bucketed_data")
+    df = df_all[df_all["_bucket_key"] == bucket]
+    bucket_meta = _data_store_ref.get_metadata("bucketed_data").get("buckets", {})
+    meta = bucket_meta.get(bucket, {})
 
-    meta = _data_store_ref.get_metadata(actual_key)
-    df = _data_store_ref.get_dataframe(actual_key)
-
+    focus_col = LLM_ANALYSIS_FOCUS[0] if LLM_ANALYSIS_FOCUS else ""
     top_problems = (
-        MetricsEngine.top_n(df, "exact_problem_statement", n=10)
-        if "exact_problem_statement" in df.columns
+        MetricsEngine.top_n(df, focus_col, n=10)
+        if focus_col and focus_col in df.columns
         else []
     )
 
@@ -167,11 +161,10 @@ def apply_skill(skill_name: str, bucket: str) -> str:
         {
             "skill": skill_name,
             "skill_content": skill_content,
-            "bucket": actual_key,
+            "bucket": bucket,
             "bucket_metadata": meta,
             "row_count": len(df),
             "top_problems": top_problems,
-            "available_buckets": available,
         },
         indent=2,
     )

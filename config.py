@@ -77,9 +77,15 @@ LLM_ANALYSIS_CONTEXT: dict[str, list[str]] = {
     ],
 }
 
-# Column names available for analysis — derived from LLM_ANALYSIS_CONTEXT so
-# adding a new dimension to the dict above automatically includes it here too.
-LLM_ANALYSIS_COLUMNS: list[str] = list(LLM_ANALYSIS_CONTEXT.keys())
+# Filterable column names — derived from LLM_ANALYSIS_CONTEXT so adding a new
+# dimension there automatically extends this list. Used by data_analyst to know
+# which columns can be filtered before bucketing.
+DATA_FILTER_COLUMNS: list[str] = list(LLM_ANALYSIS_CONTEXT.keys())
+
+# Columns sent to friction lens agents for root-cause analysis.
+# ONLY these columns appear in the sample rows passed to the LLM.
+# Add more columns here to give agents richer textual evidence.
+LLM_ANALYSIS_FOCUS: list[str] = ["exact_actionable_problem"]
 
 # -- PPTX Template -----------------------------------------------------------
 # Path to an external .pptx template file with pre-designed slide layouts.
@@ -124,7 +130,7 @@ ALL_DOMAIN_SKILLS = [
     "profile_settings",
     "fraud_dispute",
     "rewards",
-    "promotion_offers",
+    "promotions_offers",
     "general_inquiry",
 ]
 CALL_REASONS_TO_SKILLS = {'Payments & Transfers': ['payment_transfer','fraud_dispute'], 
@@ -133,5 +139,5 @@ CALL_REASONS_TO_SKILLS = {'Payments & Transfers': ['payment_transfer','fraud_dis
  'Rewards & Loyalty': ['rewards'], 
  'Profile & Settings': ['profile_settings','authentication'], 
  'Transactions & Statements': ['transaction_statement'],
- 'Promotion & Offers': ['promotion_offers'],
+ 'Promotion & Offers': ['promotions_offers'],
  'Other': ['general_inquiry']}

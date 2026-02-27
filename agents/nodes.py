@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import uuid
+from difflib import get_close_matches
 from typing import Any
 
 from langchain_core.messages import AIMessage
@@ -613,17 +615,31 @@ def _build_extra_context(
 ) -> str:
     """Build agent-specific context to append to the system prompt."""
     if agent_name in FRICTION_AGENTS and skill_loader:
-        # Collect skills assigned at bucketing time from each bucket's metadata.
-        # CALL_REASONS_TO_SKILLS already encoded the right skill set per call_reason —
-        # no LLM selection needed; just union the assigned lists across active buckets.
+        focus_bucket = state.get("_focus_bucket", "")
         raw_buckets = state.get("data_buckets", {})
-        skills_to_load: list[str] = []
-        if isinstance(raw_buckets, dict):
-            for binfo in raw_buckets.values():
-                if isinstance(binfo, dict):
-                    for s in binfo.get("assigned_skills", []):
-                        if s not in skills_to_load:
-                            skills_to_load.append(s)
+        bucket_context = ""
+
+        if focus_bucket and isinstance(raw_buckets, dict) and focus_bucket in raw_buckets:
+            # Single-bucket mode: load only this bucket's assigned skills
+            binfo = raw_buckets[focus_bucket]
+            skills_to_load: list[str] = binfo.get("assigned_skills", []) if isinstance(binfo, dict) else []
+            bucket_name = binfo.get("bucket_name", focus_bucket) if isinstance(binfo, dict) else focus_bucket
+            row_count = binfo.get("row_count", 0) if isinstance(binfo, dict) else 0
+            bucket_context = (
+                f"\n\n## Active Bucket\n"
+                f"You are analyzing bucket: **{bucket_name}** ({row_count} rows). "
+                f"Key: `{focus_bucket}`\n"
+                f"Use `analyze_bucket(bucket='{focus_bucket}')` for this bucket's data.\n"
+            )
+        else:
+            # All-buckets mode: union of all assigned skills across active buckets
+            skills_to_load = []
+            if isinstance(raw_buckets, dict):
+                for binfo in raw_buckets.values():
+                    if isinstance(binfo, dict):
+                        for s in binfo.get("assigned_skills", []):
+                            if s not in skills_to_load:
+                                skills_to_load.append(s)
 
         # Fall back to full catalog only if bucketing ran without skill assignment
         if not skills_to_load:
@@ -636,22 +652,20 @@ def _build_extra_context(
             loaded_skills = skill_loader.load_skills(skills_to_load)
 
         return (
-            "\n\n## Loaded Domain Skills\n"
+            bucket_context
+            + "\n\n## Loaded Domain Skills\n"
             "Apply these domain skills through your specific analytical lens:\n\n"
             + loaded_skills
         )
 
     if agent_name == "synthesizer_agent":
-        # Read friction agent markdown files written to cache by each lens node.
-        # friction_md_paths (file paths) takes priority over friction_output_files (DataStore keys).
-        import chainlit as cl
         from pathlib import Path as _Path
 
         expected = state.get("expected_friction_lenses", []) or state.get("selected_friction_agents", [])
         expected = list(dict.fromkeys([a for a in expected if a]))
         parts = [
             "\n\n## Friction Agent Outputs\n",
-            "Synthesize the following independent analyses into 10-12 top themes:\n",
+            "Synthesize the following lens analyses into 10-12 top themes:\n",
         ]
         if expected:
             parts.append(
@@ -660,36 +674,46 @@ def _build_extra_context(
                 + ". Set decision='complete' when all expected lenses have outputs.\n"
             )
 
-        friction_md = state.get("friction_md_paths", {})
-        friction_files = state.get("friction_output_files", {})
-        data_store = cl.user_session.get("data_store")
-
         dimension_labels = {
             "digital_friction_agent": "Digital Friction",
             "operations_agent": "Operations",
             "communication_agent": "Communication",
             "policy_agent": "Policy",
         }
+
+        # Phase 2 path: read per-lens synthesis files (one aggregated file per lens)
+        lens_synthesis_paths = state.get("lens_synthesis_paths", {})
+        if lens_synthesis_paths:
+            for agent_id, label in dimension_labels.items():
+                path = lens_synthesis_paths.get(agent_id, "")
+                if path and _Path(path).exists():
+                    content = _Path(path).read_text(encoding="utf-8")
+                    logger.info("Synthesizer context (Phase 2): read %s (%d chars)", agent_id, len(content))
+                    parts.append(f"\n### {label} Analysis\n{content}\n")
+                else:
+                    parts.append(f"\n### {label} Analysis\n(No output available)\n")
+            return "\n".join(parts)
+
+        # Nested friction_md_paths: {agent_id: {bucket_key: path}} or flat {agent_id: path}
+        friction_md = state.get("friction_md_paths", {})
         for agent_id, label in dimension_labels.items():
             content = ""
-            # Primary: read from versioned .md file written to cache
-            md_path = friction_md.get(agent_id, "")
-            if md_path and _Path(md_path).exists():
-                content = _Path(md_path).read_text(encoding="utf-8")
+            md_val = friction_md.get(agent_id, "")
+
+            if isinstance(md_val, dict):
+                # Nested: {bucket_key: md_path} — concatenate all bucket outputs
+                bucket_parts = []
+                for bk in sorted(md_val.keys()):
+                    bpath = md_val[bk]
+                    if bpath and _Path(bpath).exists():
+                        bucket_parts.append(_Path(bpath).read_text(encoding="utf-8"))
+                content = "\n\n".join(bucket_parts)
+                logger.info("Synthesizer context: read %s from %d bucket files (%d chars)",
+                            agent_id, len(bucket_parts), len(content))
+            elif isinstance(md_val, str) and md_val and _Path(md_val).exists():
+                # Flat legacy: single path string
+                content = _Path(md_val).read_text(encoding="utf-8")
                 logger.info("Synthesizer context: read %s from file (%d chars)", agent_id, len(content))
-            elif friction_files.get(agent_id) and data_store:
-                # Legacy fallback: read from DataStore text entry
-                try:
-                    content = data_store.get_text(friction_files[agent_id])
-                    logger.info("Synthesizer context: read %s from DataStore (%d chars)", agent_id, len(content))
-                except KeyError:
-                    pass
-            if not content:
-                field = AGENT_STATE_FIELDS.get(agent_id, "")
-                state_data = state.get(field, {}) if field else {}
-                content = state_data.get("full_response", "") if isinstance(state_data, dict) else str(state_data)
-                if content:
-                    logger.info("Synthesizer context: state fallback for %s (%d chars)", agent_id, len(content))
 
             parts.append(f"\n### {label} Agent Output\n{content}\n" if content
                          else f"\n### {label} Agent Output\n(No output available)\n")
@@ -1199,21 +1223,34 @@ def _parse_dimension_preferences(
     update selected_friction_agents to run only those.  If the user says
     "all" / "yes" / "proceed" or doesn't mention specifics, keep all 4.
     """
-    dimension_keywords: dict[str, str] = {
-        "digital": "digital_friction_agent",
-        "ux": "digital_friction_agent",
-        "operations": "operations_agent",
-        "operational": "operations_agent",
-        "process": "operations_agent",
-        "sla": "operations_agent",
-        "communication": "communication_agent",
-        "notification": "communication_agent",
-        "messaging": "communication_agent",
-        "policy": "policy_agent",
-        "regulatory": "policy_agent",
-        "governance": "policy_agent",
-        "compliance": "policy_agent",
+    lens_order = [
+        "digital_friction_agent",
+        "operations_agent",
+        "communication_agent",
+        "policy_agent",
+    ]
+    dimension_aliases: dict[str, set[str]] = {
+        "digital_friction_agent": {
+            "digital", "degital", "digtal", "digitel", "ux", "ui", "app", "web", "website",
+        },
+        "operations_agent": {
+            "operations", "operation", "operational", "process", "workflow", "handoff", "sla",
+        },
+        "communication_agent": {
+            "communication", "communications", "comms", "messaging", "notification",
+            "communcation", "cmmunication", "comunication", "communicaton", "communiction",
+        },
+        "policy_agent": {
+            "policy", "policies", "governance", "regulatory", "compliance", "rule", "rules",
+        },
     }
+    all_markers = (
+        "all",
+        "all dimensions",
+        "all lenses",
+        "run all",
+        "everything",
+    )
 
     last_user_msg = ""
     for m in reversed(state.get("messages", [])):
@@ -1224,13 +1261,39 @@ def _parse_dimension_preferences(
     if not last_user_msg:
         return
 
-    # Collect unique agents mentioned by the user
-    mentioned: list[str] = []
-    seen: set[str] = set()
-    for keyword, agent_id in dimension_keywords.items():
-        if keyword in last_user_msg and agent_id not in seen:
-            mentioned.append(agent_id)
-            seen.add(agent_id)
+    normalized = re.sub(r"[^a-z0-9\s]", " ", last_user_msg)
+    tokens = set(re.findall(r"[a-z]+", normalized))
+
+    if any(marker in normalized for marker in all_markers):
+        updates["selected_friction_agents"] = list(lens_order)
+        updates["expected_friction_lenses"] = list(lens_order)
+        logger.info("Supervisor: user selected dimensions=all (%s)", lens_order)
+        return
+
+    def _matches_aliases(aliases: set[str]) -> bool:
+        # Direct phrase match for multi-word aliases.
+        for alias in aliases:
+            if " " in alias and alias in normalized:
+                return True
+
+        single_word_aliases = [a for a in aliases if " " not in a]
+        if tokens.intersection(single_word_aliases):
+            return True
+
+        # Tolerate common misspellings: e.g., "cmmunication", "degital".
+        fuzzy_aliases = [a for a in single_word_aliases if len(a) >= 5]
+        for token in tokens:
+            if len(token) < 5:
+                continue
+            if get_close_matches(token, fuzzy_aliases, n=1, cutoff=0.82):
+                return True
+        return False
+
+    mentioned = [
+        agent_id
+        for agent_id in lens_order
+        if _matches_aliases(dimension_aliases.get(agent_id, set()))
+    ]
 
     if mentioned:
         selected_unique = list(dict.fromkeys(mentioned))
@@ -1253,8 +1316,18 @@ def _enforce_synthesis_completeness_guard(
 
     expected = state.get("expected_friction_lenses", []) or state.get("selected_friction_agents", [])
     expected = list(dict.fromkeys([a for a in expected if a]))
-    available = list((state.get("friction_output_files", {}) or {}).keys())
-    missing = state.get("missing_friction_lenses", []) or [a for a in expected if a not in available]
+
+    # Primary source: per-lens synthesis files produced by friction_analysis phase 1.
+    available = list((state.get("lens_synthesis_paths", {}) or {}).keys())
+    if not available:
+        # Legacy fallback for older sessions.
+        available = list((state.get("friction_output_files", {}) or {}).keys())
+
+    if expected:
+        missing = [a for a in expected if a not in available]
+    else:
+        # If expected lenses are unknown, fall back to explicit synthesizer output.
+        missing = state.get("missing_friction_lenses", []) or []
     missing = list(dict.fromkeys([a for a in missing if a]))
 
     synthesis = state.get("synthesis_result", {})
@@ -1448,16 +1521,24 @@ def _apply_supervisor_fallback(raw: str, state: AnalyticsState, updates: dict) -
 def _advance_plan(agent_name: str, state: AnalyticsState, updates: dict) -> None:
     """Mark the agent's task done and check pipeline completion."""
     tasks = [dict(t) for t in updates.get("plan_tasks", state.get("plan_tasks", []))]
+    status_changed = False
     for t in tasks:
         if t.get("agent") == agent_name and t.get("status") != "done":
             t["status"] = "done"
+            status_changed = True
             break
     updates["plan_tasks"] = tasks
 
-    completed = state.get("plan_steps_completed", 0) + 1
-    total = state.get("plan_steps_total", 0)
+    total = max(state.get("plan_steps_total", 0), len(tasks))
+    done_count = len([t for t in tasks if t.get("status") == "done"])
+    completed = max(state.get("plan_steps_completed", 0), done_count)
+
+    updates["plan_steps_total"] = total
     updates["plan_steps_completed"] = completed
-    logger.info("Plan progress: %d/%d (agent=%s)", completed, total, agent_name)
+    logger.info(
+        "Plan progress: %d/%d (agent=%s%s)",
+        completed, total, agent_name, "" if status_changed else ", no status change",
+    )
 
     if total > 0 and completed >= total:
         updates["analysis_complete"] = True
