@@ -39,6 +39,8 @@ from agents.nodes import (
     _text,
     _trunc,
     _parse_json,
+    # file writing
+    _write_versioned_md,
     # checkpoint node
     user_checkpoint_node,
     # constants
@@ -280,8 +282,17 @@ def build_graph(
         ctx = _build_extra_context("digital_friction_agent", state, skill_loader)
         base, last_msg = await _run_react_node("digital_friction_agent", agent_factory, ctx, state)
         summary = _trunc(_text(last_msg.content), 200) if last_msg else ""
-        base["digital_analysis"] = _agent_output_field("digital_friction_agent", base["messages"], summary)
+        output_field = _agent_output_field("digital_friction_agent", base["messages"], summary)
+        base["digital_analysis"] = output_field
         base["reasoning"] = [{"step_name": "Digital Friction Agent", "step_text": summary}]
+        md_path = _write_versioned_md(
+            "digital_friction_agent",
+            output_field.get("full_response", "") or summary,
+            {"agent": "digital_friction_agent"},
+        )
+        if md_path:
+            base["friction_md_paths"] = {"digital_friction_agent": md_path}
+            base["friction_output_files"] = {"digital_friction_agent": md_path}
         return base
 
     async def operations_node(state: AnalyticsState) -> dict[str, Any]:
@@ -299,8 +310,17 @@ def build_graph(
         ctx = _build_extra_context("operations_agent", state, skill_loader)
         base, last_msg = await _run_react_node("operations_agent", agent_factory, ctx, state)
         summary = _trunc(_text(last_msg.content), 200) if last_msg else ""
-        base["operations_analysis"] = _agent_output_field("operations_agent", base["messages"], summary)
+        output_field = _agent_output_field("operations_agent", base["messages"], summary)
+        base["operations_analysis"] = output_field
         base["reasoning"] = [{"step_name": "Operations Agent", "step_text": summary}]
+        md_path = _write_versioned_md(
+            "operations_agent",
+            output_field.get("full_response", "") or summary,
+            {"agent": "operations_agent"},
+        )
+        if md_path:
+            base["friction_md_paths"] = {"operations_agent": md_path}
+            base["friction_output_files"] = {"operations_agent": md_path}
         return base
 
     async def communication_node(state: AnalyticsState) -> dict[str, Any]:
@@ -317,8 +337,17 @@ def build_graph(
         ctx = _build_extra_context("communication_agent", state, skill_loader)
         base, last_msg = await _run_react_node("communication_agent", agent_factory, ctx, state)
         summary = _trunc(_text(last_msg.content), 200) if last_msg else ""
-        base["communication_analysis"] = _agent_output_field("communication_agent", base["messages"], summary)
+        output_field = _agent_output_field("communication_agent", base["messages"], summary)
+        base["communication_analysis"] = output_field
         base["reasoning"] = [{"step_name": "Communication Agent", "step_text": summary}]
+        md_path = _write_versioned_md(
+            "communication_agent",
+            output_field.get("full_response", "") or summary,
+            {"agent": "communication_agent"},
+        )
+        if md_path:
+            base["friction_md_paths"] = {"communication_agent": md_path}
+            base["friction_output_files"] = {"communication_agent": md_path}
         return base
 
     async def policy_node(state: AnalyticsState) -> dict[str, Any]:
@@ -335,8 +364,17 @@ def build_graph(
         ctx = _build_extra_context("policy_agent", state, skill_loader)
         base, last_msg = await _run_react_node("policy_agent", agent_factory, ctx, state)
         summary = _trunc(_text(last_msg.content), 200) if last_msg else ""
-        base["policy_analysis"] = _agent_output_field("policy_agent", base["messages"], summary)
+        output_field = _agent_output_field("policy_agent", base["messages"], summary)
+        base["policy_analysis"] = output_field
         base["reasoning"] = [{"step_name": "Policy Agent", "step_text": summary}]
+        md_path = _write_versioned_md(
+            "policy_agent",
+            output_field.get("full_response", "") or summary,
+            {"agent": "policy_agent"},
+        )
+        if md_path:
+            base["friction_md_paths"] = {"policy_agent": md_path}
+            base["friction_output_files"] = {"policy_agent": md_path}
         return base
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -383,15 +421,40 @@ def build_graph(
             if structured.findings:
                 synthesis_data["findings"] = [f.model_dump() for f in structured.findings]
 
+            # Compact insights kept in state so supervisor can answer questions
+            # about analysis results without re-running the pipeline.
+            top_theme_names = [t.theme for t in structured.themes[:5]] if structured.themes else []
+            analytics_insights = {
+                "executive_narrative":    narrative,
+                "top_themes":             top_theme_names,
+                "total_calls_analyzed":   structured.summary.total_calls_analyzed,
+                "total_findings":         structured.summary.total_findings,
+                "quick_wins_count":       structured.summary.quick_wins_count,
+                "overall_preventability": structured.summary.overall_preventability,
+                "confidence":             structured.confidence,
+            }
+
             base.update({
-                "synthesis_result": synthesis_data,
-                "findings":         [f.model_dump() for f in structured.findings],
+                "synthesis_result":  synthesis_data,
+                "findings":          [f.model_dump() for f in structured.findings],
+                "analytics_insights": analytics_insights,
+                "top_themes":        top_theme_names,
             })
             base["reasoning"] = [{"step_name": "Synthesizer Agent", "step_text": narrative}]
             if narrative:
                 base["messages"] = [AIMessage(content=narrative)]
-            logger.info("Synthesizer: %d findings, %d themes, confidence=%d",
-                        len(structured.findings), len(structured.themes), structured.confidence)
+
+            # Write versioned synthesis markdown to cache — path is completion flag.
+            synthesis_md = json.dumps(synthesis_data, indent=2, default=str)
+            synthesis_path = _write_versioned_md(
+                "synthesis", synthesis_md, {"agent": "synthesizer_agent"}
+            )
+            if synthesis_path:
+                base["synthesis_path"] = synthesis_path
+
+            logger.info("Synthesizer: %d findings, %d themes, confidence=%d, synthesis_path=%s",
+                        len(structured.findings), len(structured.themes), structured.confidence,
+                        synthesis_path or "not written")
 
         elif last_msg:
             # Fallback: parse JSON directly from last AI message
@@ -445,8 +508,19 @@ def build_graph(
         ctx = _build_extra_context("narrative_agent", state, None)
         base, last_msg = await _run_react_node("narrative_agent", agent_factory, ctx, state)
         summary = _trunc(_text(last_msg.content), 200) if last_msg else ""
-        base["narrative_output"] = _agent_output_field("narrative_agent", base["messages"], summary)
+        output_field = _agent_output_field("narrative_agent", base["messages"], summary)
+        base["narrative_output"] = output_field
         base["reasoning"] = [{"step_name": "Narrative Agent", "step_text": summary}]
+
+        # Write versioned narrative markdown to cache — path is completion flag.
+        # Critique creates narrative_v2.md by re-running with revision instructions.
+        full_narrative = output_field.get("full_response", "") or summary
+        narrative_path = _write_versioned_md(
+            "narrative", full_narrative, {"agent": "narrative_agent"}
+        )
+        if narrative_path:
+            base["narrative_path"] = narrative_path
+        logger.info("Narrative: written to %s", narrative_path or "not written")
         return base
 
     # ══════════════════════════════════════════════════════════════════════════

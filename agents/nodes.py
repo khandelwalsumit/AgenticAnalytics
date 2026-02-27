@@ -587,6 +587,25 @@ def _build_formatting_context(summary_ctx: dict[str, Any], state: AnalyticsState
     }
 
 
+def _write_versioned_md(base_name: str, content: str, metadata: dict) -> str:
+    """Write content to a versioned markdown file in the session cache.
+
+    Uses the session DataStore (which is keyed to the thread_id) so the file
+    lands in data/.cache/<thread_id>/<base_name>_v<n>.md.
+
+    Returns the absolute file path (use as completion flag — if it exists, step is done).
+    """
+    try:
+        import chainlit as cl
+        data_store = cl.user_session.get("data_store")
+        if data_store:
+            _key, path = data_store.store_versioned_md(base_name, content, metadata)
+            return path
+    except Exception as e:
+        logger.warning("_write_versioned_md failed for %s: %s", base_name, e)
+    return ""
+
+
 def _build_extra_context(
     agent_name: str,
     state: AnalyticsState,
@@ -623,9 +642,11 @@ def _build_extra_context(
         )
 
     if agent_name == "synthesizer_agent":
-        # Read full friction agent outputs from DataStore files (written by friction_analysis_node)
-        from core.data_store import DataStore
+        # Read friction agent markdown files written to cache by each lens node.
+        # friction_md_paths (file paths) takes priority over friction_output_files (DataStore keys).
         import chainlit as cl
+        from pathlib import Path as _Path
+
         expected = state.get("expected_friction_lenses", []) or state.get("selected_friction_agents", [])
         expected = list(dict.fromkeys([a for a in expected if a]))
         parts = [
@@ -638,8 +659,10 @@ def _build_extra_context(
                 + ", ".join(expected)
                 + ". Set decision='complete' when all expected lenses have outputs.\n"
             )
+
+        friction_md = state.get("friction_md_paths", {})
         friction_files = state.get("friction_output_files", {})
-        data_store: DataStore | None = cl.user_session.get("data_store") if friction_files else None
+        data_store = cl.user_session.get("data_store")
 
         dimension_labels = {
             "digital_friction_agent": "Digital Friction",
@@ -648,25 +671,28 @@ def _build_extra_context(
             "policy_agent": "Policy",
         }
         for agent_id, label in dimension_labels.items():
-            key = friction_files.get(agent_id, "")
             content = ""
-            if key and data_store:
+            # Primary: read from versioned .md file written to cache
+            md_path = friction_md.get(agent_id, "")
+            if md_path and _Path(md_path).exists():
+                content = _Path(md_path).read_text(encoding="utf-8")
+                logger.info("Synthesizer context: read %s from file (%d chars)", agent_id, len(content))
+            elif friction_files.get(agent_id) and data_store:
+                # Legacy fallback: read from DataStore text entry
                 try:
-                    content = data_store.get_text(key)
-                    logger.info("Synthesizer context: loaded %s from DataStore (%d chars)", agent_id, len(content))
+                    content = data_store.get_text(friction_files[agent_id])
+                    logger.info("Synthesizer context: read %s from DataStore (%d chars)", agent_id, len(content))
                 except KeyError:
                     pass
             if not content:
-                # Fallback to state dict
                 field = AGENT_STATE_FIELDS.get(agent_id, "")
                 state_data = state.get(field, {}) if field else {}
                 content = state_data.get("full_response", "") if isinstance(state_data, dict) else str(state_data)
                 if content:
-                    logger.info("Synthesizer context: using state fallback for %s (%d chars)", agent_id, len(content))
-            if content:
-                parts.append(f"\n### {label} Agent Output\n{content}\n")
-            else:
-                parts.append(f"\n### {label} Agent Output\n(No output available)\n")
+                    logger.info("Synthesizer context: state fallback for %s (%d chars)", agent_id, len(content))
+
+            parts.append(f"\n### {label} Agent Output\n{content}\n" if content
+                         else f"\n### {label} Agent Output\n(No output available)\n")
 
         return "\n".join(parts)
 
@@ -826,16 +852,25 @@ def _build_extra_context(
                     }
                 else:
                     bucket_summary[bname] = {"row_count": "?"}
-        parts.append(json.dumps({
+        state_ctx: dict[str, Any] = {
             "filters_applied": state.get("filters_applied", {}),
             "themes_for_analysis": state.get("themes_for_analysis", []),
+            "top_themes": state.get("top_themes", []),
             "data_buckets": bucket_summary,
             "navigation_log": state.get("navigation_log", []),
             "analysis_objective": state.get("analysis_objective", ""),
             "plan_tasks": state.get("plan_tasks", []),
             "plan_steps_completed": state.get("plan_steps_completed", 0),
             "plan_steps_total": state.get("plan_steps_total", 0),
-        }, indent=2, default=str))
+        }
+        # Inject compact analytics insights when synthesizer has run — allows
+        # supervisor to answer questions like "what are the top issues?" without
+        # re-running the full pipeline.
+        insights = state.get("analytics_insights", {})
+        if insights:
+            state_ctx["analytics_insights"] = insights
+            parts.insert(0, "## Analysis Insights Available\nYou can answer factual questions about the analysis results using `analytics_insights` below.\n\n")
+        parts.append(json.dumps(state_ctx, indent=2, default=str))
         return "\n\n" + "\n".join(parts)
 
     if agent_name == "planner":
@@ -1123,17 +1158,30 @@ def _extract_data_analyst_state(
                 updates["filters_applied"] = filters
                 logger.info("Data Analyst: extracted filters_applied=%s", filters)
 
-        # bucket_data or distribution results may contain themes
+        # filter_data returns filtered_parquet_path — completion flag for data_analyst step
+        if "filtered_parquet_path" in data:
+            updates["filtered_parquet_path"] = data["filtered_parquet_path"]
+            logger.info("Data Analyst: extracted filtered_parquet_path=%s", data["filtered_parquet_path"])
+
+        # bucket_data returns themes and bucket paths
         if "themes" in data:
             updates["themes_for_analysis"] = data["themes"]
             logger.info("Data Analyst: extracted themes_for_analysis=%s", data["themes"])
         if "buckets" in data:
             updates["data_buckets"] = data["buckets"]
-            # Extract theme names from bucket keys for themes_for_analysis
-            bucket_names = list(data["buckets"].keys())
+            # Top-level theme names for supervisor quick-answers
+            bucket_names = [
+                info.get("bucket_name", key)
+                for key, info in data["buckets"].items()
+                if isinstance(info, dict)
+            ]
             if bucket_names and "themes_for_analysis" not in updates:
                 updates["themes_for_analysis"] = bucket_names
-                logger.info("Data Analyst: extracted themes from bucket keys=%s", bucket_names)
+            updates["top_themes"] = bucket_names
+            logger.info("Data Analyst: extracted %d themes + top_themes", len(bucket_names))
+        if "bucket_paths" in data:
+            updates["bucket_paths"] = data["bucket_paths"]
+            logger.info("Data Analyst: extracted bucket_paths keys=%s", list(data["bucket_paths"].keys()))
 
     # If no tool results found, still mark that data_analyst ran
     # by setting a minimal filters_applied so the supervisor knows.

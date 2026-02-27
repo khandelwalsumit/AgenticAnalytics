@@ -1,13 +1,20 @@
 """Data tools for the Data Analyst agent.
 
-Each tool is a LangChain tool function that operates on DataFrames
-stored in the session DataStore.
+Pipeline:
+  load_dataset  → reads input parquet in-place (no copy)
+  filter_data   → writes data/.cache/<thread_id>/filtered.parquet
+  bucket_data   → writes data/.cache/<thread_id>/bucket_*.parquet
+  analyze_bucket → reads bucket parquets for LLM analysis
+
+File paths returned in every tool response double as completion flags:
+if the path exists on disk, that step is done.
 """
 
 from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -21,18 +28,23 @@ from config import (
     MAX_SAMPLE_SIZE,
     MIN_BUCKET_SIZE,
     TAIL_BUCKET_ENABLED,
+    DEFAULT_PARQUET_PATH,
 )
 from core.data_store import DataStore
 from tools.metrics import MetricsEngine
 
-# Module-level DataStore reference — set by the graph at session init
+# Module-level references — set by the graph at session init
 _data_store: DataStore | None = None
+# Path to the input parquet file — set by load_dataset; never written, only read.
+_input_parquet_path: Path | None = None
 
 
 def set_data_store(store: DataStore) -> None:
     """Bind the session DataStore for tool access."""
-    global _data_store
+    global _data_store, _input_parquet_path
     _data_store = store
+    _input_parquet_path = None  # reset on new session
+
 
 
 def _get_store() -> DataStore:
@@ -47,50 +59,52 @@ def _safe_key(name: str) -> str:
 
 
 @tool
-def load_dataset(path: str) -> str:
-    """Load a CSV dataset, store it, and return schema + basic stats.
+def load_dataset(path: str = "") -> str:
+    """Read the input parquet file and return schema + basic stats.
+
+    The file is read in-place — no copy is created in the cache.
+    The path is registered so filter_data can read the raw data.
 
     Args:
-        path: Path to the CSV file to load.
+        path: Optional path to the input .parquet file. If empty,
+              DEFAULT_PARQUET_PATH is used.
 
     Returns:
-        JSON string with schema info, row count, column types, and sample values.
+        JSON string with schema info, row count, column types, sample values,
+        and the registered parquet path.
     """
-    store = _get_store()
-    df = pd.read_csv(path)
+
+    df = pd.read_parquet(DEFAULT_PARQUET_PATH)
 
     stats = MetricsEngine.summary_stats(df)
-    # Add sample values for each column
-    samples = {}
+    samples: dict[str, list[str]] = {}
     for col in df.columns:
         non_null = df[col].dropna()
-        if len(non_null) > 0:
-            samples[col] = [str(v) for v in non_null.head(3).tolist()]
-        else:
-            samples[col] = []
+        samples[col] = [str(v) for v in non_null.head(3).tolist()] if len(non_null) > 0 else []
     stats["sample_values"] = samples
-
-    # Flag which columns the LLM will analyze vs which are for grouping only
     stats["llm_analysis_columns"] = [c for c in LLM_ANALYSIS_COLUMNS if c in df.columns]
     stats["group_by_columns"] = [c for c in GROUP_BY_COLUMNS if c in df.columns]
+    stats["input_parquet_path"] = str(DEFAULT_PARQUET_PATH)
 
-    store.store_dataframe("main_dataset", df, metadata=stats)
     return json.dumps(stats, indent=2)
 
 
 @tool
 def filter_data(filters: dict[str, Any]) -> str:
-    """Apply column-value filters to the dataset and store the filtered result.
+    """Apply column-value filters to the input dataset and cache the result.
+
+    Reads the input parquet registered by load_dataset (no copy of the source).
+    Writes the filtered result to data/.cache/<thread_id>/filtered.parquet.
 
     Args:
         filters: Dictionary of {column_name: value_or_list} to filter on.
                  Use a list for multiple values (OR logic within column).
 
     Returns:
-        JSON string with filtered row count and filter summary.
+        JSON string with filtered row count, filter summary, and filtered_parquet_path.
     """
     store = _get_store()
-    df = store.get_dataframe("main_dataset")
+    df = pd.read_parquet(DEFAULT_PARQUET_PATH)
 
     mask = pd.Series(True, index=df.index)
     applied = {}
@@ -124,7 +138,8 @@ def filter_data(filters: dict[str, Any]) -> str:
             applied[col] = val
 
     filtered = df[mask]
-    metadata = {
+
+    metadata: dict[str, Any] = {
         "original_rows": len(df),
         "filtered_rows": len(filtered),
         "filters_applied": applied,
@@ -140,7 +155,9 @@ def filter_data(filters: dict[str, Any]) -> str:
             "Check the 'skipped_filters' field for suggestions."
         )
 
+    filtered_path = store.base_dir / "filtered_dataset.parquet"
     store.store_dataframe("filtered_dataset", filtered, metadata=metadata)
+
     return json.dumps(metadata, indent=2)
 
 
@@ -166,10 +183,7 @@ def bucket_data(group_by: str = "", focus: str = "") -> str:
     store = _get_store()
 
     # Use filtered dataset if available, else main
-    try:
-        df = store.get_dataframe("filtered_dataset")
-    except KeyError:
-        df = store.get_dataframe("main_dataset")
+    df = store.get_dataframe("filtered_dataset")
 
     # Determine which column to group by
     if not group_by:

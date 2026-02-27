@@ -201,16 +201,9 @@ def export_filtered_csv(output_dir: str = "") -> str:
     store = _get_store()
     _tmp_dir, default_out_dir, _thread_id = _get_artifact_dirs(store)
 
-    # Try filtered dataset first, fall back to main
-    try:
-        df = store.get_dataframe("filtered_dataset")
-        source = "filtered_dataset"
-    except KeyError:
-        try:
-            df = store.get_dataframe("main_dataset")
-            source = "main_dataset"
-        except KeyError:
-            return json.dumps({"error": "No dataset available for export"})
+    # filter_data is always present — written by filter_data before this runs.
+    source = "filtered_dataset"
+    df = store.get_dataframe(source)
 
     out_dir = Path(output_dir) if output_dir else default_out_dir
     out_dir.mkdir(parents=True, exist_ok=True)

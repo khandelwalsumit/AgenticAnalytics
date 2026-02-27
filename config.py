@@ -25,9 +25,9 @@ DATA_OUTPUT_DIR = DATA_DIR / "output"
 DATA_CACHE_DIR = DATA_DIR / ".cache"
 THREAD_STATES_DIR = DATA_CACHE_DIR / "states"
 
-# Hardcoded default CSV path — user sets this to their dataset location.
-# Override via DEFAULT_CSV_PATH env var or change this line directly.
-DEFAULT_CSV_PATH = os.getenv("DEFAULT_CSV_PATH", str(DATA_INPUT_DIR / "input.csv"))
+# Input dataset — must be a Parquet file. Never copied; read in-place every run.
+# Override via DEFAULT_PARQUET_PATH env var or change this line directly.
+DEFAULT_PARQUET_PATH = DATA_INPUT_DIR / "dummy_data.parquet"
 
 # -- Google AI Studio / Gemini -------------------------------------------------------
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
@@ -60,14 +60,26 @@ MAX_BUCKET_SIZE = 2000   # Buckets larger than this get sub-bucketed by next col
 # Tail-end collection: merge all small buckets into a single "Other" bucket
 TAIL_BUCKET_ENABLED = True
 
-# -- LLM Analysis Fields ----------------------------------------------------
-# ONLY these columns are passed to friction lens agents for LLM analysis.
-# All other columns are used for grouping/filtering but NOT sent to the LLM.
-# This keeps context small even with 10-12K records.
-LLM_ANALYSIS_COLUMNS: list[str] = [
-    "digital_friction",   # LLM-processed friction analysis per call
-    "key_solution",       # LLM-processed solution summary per call
-]
+# -- LLM Analysis Context (Filter Dimensions) --------------------------------
+# Filterable dimensions for user queries — keys are exact dataset column names,
+# values are the valid filter options the LLM may pass to filter_data.
+# Adding a new key here (e.g. "customer_type": ["premium", "regular"])
+# automatically makes it available for filtering without any other code changes.
+LLM_ANALYSIS_CONTEXT: dict[str, list[str]] = {
+    "product": ["ATT", "Rewards", "AAdvantage", "Cash", "Costco"],
+    "call_reason": [
+        "Payments & Transfers",
+        "Fraud & Disputes",
+        "Authentication & Access",
+        "Rewards & Loyalty",
+        "Profile & Settings",
+        "Transactions & Statements",
+    ],
+}
+
+# Column names available for analysis — derived from LLM_ANALYSIS_CONTEXT so
+# adding a new dimension to the dict above automatically includes it here too.
+LLM_ANALYSIS_COLUMNS: list[str] = list(LLM_ANALYSIS_CONTEXT.keys())
 
 # -- PPTX Template -----------------------------------------------------------
 # Path to an external .pptx template file with pre-designed slide layouts.

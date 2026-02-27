@@ -54,11 +54,17 @@ class AnalyticsState(TypedDict):
     io_trace: list[dict[str, Any]]
     last_completed_node: str
 
-    # Data — METADATA ONLY (raw data lives in DataStore)
-    dataset_path: str
+    # Data — METADATA ONLY (raw data lives in cache files)
+    dataset_path: str                   # path to input parquet (never copied)
     dataset_schema: dict[str, Any]
     active_filters: dict[str, Any]
     data_buckets: dict[str, dict[str, Any]]
+    filtered_parquet_path: str          # data/.cache/<thread_id>/filtered.parquet
+    bucket_paths: dict[str, str]        # {bucket_key → parquet_path}
+
+    # Compact supervisor-answerable summaries (kept in state, always small)
+    top_themes: list[str]               # theme names from data_analyst bucketing
+    analytics_insights: dict[str, Any]  # exec_narrative, top_themes, quick_wins_count, etc.
 
     # Analysis — scored findings (dicts matching RankedFinding schema)
     findings: list[dict[str, Any]]
@@ -71,15 +77,19 @@ class AnalyticsState(TypedDict):
     communication_analysis: dict[str, Any]
     policy_analysis: dict[str, Any]
 
-    # Friction agent output file references (agent_id → DataStore key)
+    # Friction agent output file references (agent_id → DataStore key, legacy)
     friction_output_files: dict[str, str]
+    # Friction agent markdown paths (agent_id → absolute .md path) — primary
+    friction_md_paths: dict[str, str]
 
     # Synthesis output (written by Synthesizer Agent)
     synthesis_result: dict[str, Any]
-    synthesis_output_file: str
+    synthesis_output_file: str   # DataStore key (legacy)
+    synthesis_path: str          # absolute path to synthesis_vN.md (primary)
 
     # Reporting subgraph outputs
     narrative_output: dict[str, Any]
+    narrative_path: str          # absolute path to narrative_vN.md (primary)
     dataviz_output: dict[str, Any]
     formatting_output: dict[str, Any]
 

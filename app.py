@@ -4,6 +4,7 @@ Run with: uv run chainlit run main/app.py
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -23,7 +24,8 @@ from config import (
     DATA_CACHE_DIR,
     DATA_INPUT_DIR,
     DATA_OUTPUT_DIR,
-    DEFAULT_CSV_PATH,
+    DEFAULT_PARQUET_PATH,
+    LLM_ANALYSIS_CONTEXT,
     LOG_LEVEL,
     LOG_FORMAT,
     LOG_DATE_FORMAT,
@@ -190,34 +192,19 @@ def _should_surface_reasoning(step_name: str, text: str) -> bool:
     return True
 
 
-def _build_filter_catalog(df: pd.DataFrame, max_unique: int = 50) -> dict[str, list[str]]:
-    """Build a catalog of filterable columns with their unique values.
-
-    Only includes columns with <= max_unique unique non-null values
-    (free-text columns are excluded automatically).
-    """
-    catalog: dict[str, list[str]] = {}
-    for col in df.columns:
-        nunique = df[col].dropna().nunique()
-        if 1 < nunique <= max_unique:
-            values = sorted(df[col].dropna().unique().astype(str).tolist())
-            catalog[col] = values
-    return catalog
-
 
 def _safe_thread_id(raw: str) -> str:
     value = str(raw or "").strip() or "unknown_thread"
     return re.sub(r"[^a-zA-Z0-9_-]", "_", value)[:80]
 
 
-def _find_input_csv() -> Path | None:
-    """Resolve input CSV from explicit path or data/input/*.csv."""
-    explicit = Path(DEFAULT_CSV_PATH)
+def _find_input_parquet() -> Path | None:
+    """Resolve input parquet from configured path or data/input/*.parquet."""
+    explicit = Path(DEFAULT_PARQUET_PATH)
     if explicit.exists() and explicit.is_file():
         return explicit
-
     candidates = sorted(
-        [p for p in Path(DATA_INPUT_DIR).glob("*.csv") if p.is_file()],
+        [p for p in Path(DATA_INPUT_DIR).glob("*.parquet") if p.is_file()],
         key=lambda p: p.name.lower(),
     )
     return candidates[0] if candidates else None
@@ -339,18 +326,22 @@ def _is_new_analysis_plan(tasks: list[dict[str, Any]]) -> bool:
     return has_actionable and not all_done
 
 
-def _create_runtime() -> tuple[str, DataStore, Any]:
-    """Build per-session runtime: DataStore, tools, graph."""
-    session_id = str(uuid.uuid4())[:12]
-    log.info("Creating runtime session=%s", session_id)
-    data_store = DataStore(session_id=session_id, DATA_CACHE_DIR=str(DATA_CACHE_DIR))
+def _create_runtime(thread_id: str) -> tuple[str, DataStore, Any]:
+    """Build per-session runtime: DataStore, tools, graph.
+
+    Uses thread_id as the DataStore session key so all cache files land in
+    data/.cache/<thread_id>/ — stable across resumes of the same conversation.
+    """
+    safe_tid = _safe_thread_id(thread_id)
+    log.info("Creating runtime thread=%s", safe_tid)
+    data_store = DataStore(session_id=safe_tid, DATA_CACHE_DIR=str(DATA_CACHE_DIR))
     set_data_tools_store(data_store)
     set_report_tools_store(data_store)
     skill_loader = SkillLoader()
     set_analysis_deps(data_store, skill_loader)
     agent_factory = AgentFactory(definitions_dir=AGENTS_DIR, tool_registry=TOOL_REGISTRY)
     graph = build_graph(agent_factory=agent_factory, skill_loader=skill_loader)
-    return session_id, data_store, graph
+    return safe_tid, data_store, graph
 
 
 def make_initial_state() -> dict[str, Any]:
@@ -371,13 +362,16 @@ def make_initial_state() -> dict[str, Any]:
         "node_io": {}, "io_trace": [], "last_completed_node": "",
         "dataset_path": "", "dataset_schema": {},
         "active_filters": {}, "data_buckets": {},
+        "filtered_parquet_path": "", "bucket_paths": {},
+        "top_themes": [], "analytics_insights": {},
         "findings": [],
         "domain_analysis": {}, "operational_analysis": {},
         "digital_analysis": {}, "operations_analysis": {},
         "communication_analysis": {}, "policy_analysis": {},
-        "friction_output_files": {},
-        "synthesis_result": {},
-        "narrative_output": {}, "dataviz_output": {}, "formatting_output": {},
+        "friction_output_files": {}, "friction_md_paths": {},
+        "synthesis_result": {}, "synthesis_path": "",
+        "narrative_output": {}, "narrative_path": "",
+        "dataviz_output": {}, "formatting_output": {},
         "report_markdown_key": "", "report_file_path": "", "data_file_path": "", "markdown_file_path": "",
         "critique_feedback": {}, "quality_score": 0.0,
         "next_agent": "", "supervisor_decision": "",
@@ -392,7 +386,7 @@ def make_initial_state() -> dict[str, Any]:
 
 def _setup_session(thread_id: str, state: dict[str, Any]) -> None:
     """Store runtime objects in Chainlit user session."""
-    session_id, data_store, graph = _create_runtime()
+    session_id, data_store, graph = _create_runtime(thread_id)
     cl.user_session.set("graph", graph)
     cl.user_session.set("data_store", data_store)
     cl.user_session.set("session_id", session_id)
@@ -403,41 +397,61 @@ def _setup_session(thread_id: str, state: dict[str, Any]) -> None:
 
 
 def _rehydrate_friction_outputs(state: dict[str, Any]) -> None:
-    """Recreate friction output files in the current session DataStore from saved state."""
+    """Re-register friction/synthesis markdown files into the DataStore on resume.
+
+    On resume the DataStore is a fresh instance but the .md files already exist
+    in data/.cache/<thread_id>/ (because DataStore uses thread_id as session key).
+    We just need to update friction_md_paths / synthesis_path in state if the
+    files are on disk — the DataStore registry will be rebuilt from the files.
+    """
     data_store: DataStore | None = cl.user_session.get("data_store")
     if not data_store:
         return
 
-    rebuilt: dict[str, str] = {}
-    for agent_id, field in FRICTION_STATE_FIELDS.items():
-        payload = state.get(field, {})
-        if not isinstance(payload, dict):
-            continue
-        full_response = str(payload.get("full_response", "")).strip()
-        if not full_response:
-            continue
-        key = f"{agent_id}_output"
-        data_store.store_text(key, full_response, {"agent": agent_id, "type": "friction_output"})
-        rebuilt[agent_id] = key
+    # Restore friction markdown paths from disk — files are already there.
+    md_paths = state.get("friction_md_paths", {})
+    rebuilt_md: dict[str, str] = {}
+    rebuilt_ds: dict[str, str] = {}
+    for agent_id, md_path in md_paths.items():
+        if md_path and Path(md_path).exists():
+            rebuilt_md[agent_id] = md_path
+            # Also register in DataStore so legacy code using friction_output_files works.
+            key = f"{agent_id}_output"
+            content = Path(md_path).read_text(encoding="utf-8")
+            data_store.store_text(key, content, {"agent": agent_id, "type": "friction_output"})
+            rebuilt_ds[agent_id] = key
 
-    if rebuilt:
-        state["friction_output_files"] = rebuilt
-        log.info("Rehydrated friction outputs into DataStore: %s", list(rebuilt.keys()))
-
-    # Also rehydrate the synthesis output file
-    synthesis_payload = state.get("synthesis_result", {})
-    if synthesis_payload and isinstance(synthesis_payload, dict):
-        try:
-            content = json.dumps(synthesis_payload)
-            key = data_store.store_text(
-                "synthesis_output",
-                content,
-                {"agent": "synthesizer_agent", "type": "synthesis_output"}
+    if not rebuilt_md:
+        # Legacy path: rebuild from state dict full_response fields
+        for agent_id, field in FRICTION_STATE_FIELDS.items():
+            payload = state.get(field, {})
+            if not isinstance(payload, dict):
+                continue
+            full_response = str(payload.get("full_response", "")).strip()
+            if not full_response:
+                continue
+            _key, path = data_store.store_versioned_md(
+                agent_id, full_response, {"agent": agent_id, "type": "friction_output"}
             )
-            state["synthesis_output_file"] = key
-            log.info("Rehydrated synthesis output into DataStore as %s", key)
-        except Exception as e:
-            log.warning("Could not rehydrate synthesis_output: %s", e)
+            rebuilt_md[agent_id] = path
+            rebuilt_ds[agent_id] = _key
+
+    if rebuilt_md:
+        state["friction_md_paths"] = rebuilt_md
+        state["friction_output_files"] = rebuilt_ds
+        log.info("Rehydrated friction md_paths: %s", list(rebuilt_md.keys()))
+
+    # Restore synthesis path / DataStore entry
+    synthesis_path = state.get("synthesis_path", "")
+    if synthesis_path and Path(synthesis_path).exists():
+        content = Path(synthesis_path).read_text(encoding="utf-8")
+        key = data_store.store_text("synthesis_output", content, {"agent": "synthesizer_agent", "type": "synthesis_output"})
+        state["synthesis_output_file"] = key
+        log.info("Rehydrated synthesis from %s", synthesis_path)
+    elif state.get("synthesis_result"):
+        content = json.dumps(state["synthesis_result"])
+        key = data_store.store_text("synthesis_output", content, {"agent": "synthesizer_agent", "type": "synthesis_output"})
+        state["synthesis_output_file"] = key
 
 
 def _apply_agent_selection(state: dict[str, Any], selected: list[str]) -> None:
@@ -487,19 +501,13 @@ async def on_chat_start():
     _apply_agent_selection(state, DEFAULT_SELECTED_AGENTS)
     await _send_agent_settings(DEFAULT_SELECTED_AGENTS)
 
-    # Auto-load CSV from configured path or data/input.
-    csv_path = _find_input_csv()
-    if csv_path:
-        data_store: DataStore = cl.user_session.get("data_store")
-        df = pd.read_csv(str(csv_path))
-        data_store.store_dataframe("main_dataset", df, metadata={
-            "source": str(csv_path), "row_count": len(df), "columns": list(df.columns),
-        })
-        state["dataset_path"] = str(csv_path)
-        state["dataset_schema"] = _build_filter_catalog(df)
+    # Auto-load parquet path from configured location — read in-place by load_dataset tool.
+    parquet_path = _find_input_parquet()
+    if parquet_path:
+        state["dataset_path"] = str(parquet_path)
+        state["dataset_schema"] = LLM_ANALYSIS_CONTEXT
         cl.user_session.set("state", state)
-        log.info("Loaded CSV: %s (%d rows), filter catalog built (%d columns)",
-                 csv_path.name, len(df), len(state["dataset_schema"]))
+        log.info("Auto-loaded parquet path: %s", parquet_path.name)
 
 
 @cl.set_starters
@@ -530,27 +538,23 @@ async def on_message(message: cl.Message):
     thread_id = cl.user_session.get("thread_id") or getattr(cl.context.session, "thread_id", "") or str(uuid.uuid4())
     cl.user_session.set("thread_id", thread_id)
 
-    # Handle file uploads
+    # Handle file uploads — parquet preferred; CSV uploads are converted automatically.
     if message.elements:
         for el in message.elements:
             if hasattr(el, "path") and el.path:
-                dest = _unique_input_destination(Path(el.path).name)
+                src = Path(el.path)
+                # Normalise destination to .parquet
+                dest_name = src.stem + ".parquet"
+                dest = _unique_input_destination(dest_name)
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(el.path, dest)
+                if src.suffix.lower() == ".parquet":
+                    shutil.copy2(src, dest)
+                else:
+                    # Convert CSV → parquet on upload so the rest of the pipeline is uniform
+                    pd.read_csv(str(src)).to_parquet(str(dest), index=False)
                 state["dataset_path"] = str(dest)
-                # Rebuild filter catalog for uploaded file
-                try:
-                    uploaded_df = pd.read_csv(str(dest))
-                    data_store: DataStore = cl.user_session.get("data_store")
-                    data_store.store_dataframe("main_dataset", uploaded_df, metadata={
-                        "source": str(dest), "row_count": len(uploaded_df),
-                        "columns": list(uploaded_df.columns),
-                    })
-                    state["dataset_schema"] = _build_filter_catalog(uploaded_df)
-                    log.info("File uploaded: %s, filter catalog built (%d columns)",
-                             dest, len(state["dataset_schema"]))
-                except Exception as e:
-                    log.warning("Could not build filter catalog for upload: %s", e)
+                state["dataset_schema"] = LLM_ANALYSIS_CONTEXT
+                log.info("File uploaded and saved as parquet: %s", dest)
                 break
 
     user_text = message.content or "Proceed"
@@ -772,14 +776,10 @@ async def on_chat_resume(thread: dict):
                 HumanMessage(content=content) if role == "human" else AIMessage(content=content)
             )
         log.info("Restored %d messages from saved state", len(state["messages"]))
-        # Re-load CSV into DataStore if path is saved
-        csv_path = state.get("dataset_path", "")
-        if csv_path and Path(csv_path).exists():
-            data_store: DataStore = cl.user_session.get("data_store")
-            df = pd.read_csv(csv_path)
-            data_store.store_dataframe("main_dataset", df, metadata={})
-            state["dataset_schema"] = _build_filter_catalog(df)
-            log.info("Re-loaded CSV: %s (%d rows), filter catalog rebuilt", csv_path, len(df))
+        # Restore dataset_schema from config — always current, no file read needed.
+        if state.get("dataset_path"):
+            state["dataset_schema"] = LLM_ANALYSIS_CONTEXT
+            log.info("Resume: dataset_schema restored from config")
 
         # Rehydrate friction outputs so synthesizer/reporting can continue without re-running prior agents.
         _rehydrate_friction_outputs(state)

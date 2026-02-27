@@ -61,7 +61,7 @@ class DataStore:
         return pd.read_parquet(entry["path"])
 
     def store_text(self, key: str, content: str, metadata: dict) -> str:
-        """Store large text (report markdown, etc.) to file."""
+        """Store large text to file (.txt extension, legacy)."""
         path = self.base_dir / f"{key}.txt"
         path.write_text(content, encoding="utf-8")
         self._registry[key] = {
@@ -75,9 +75,65 @@ class DataStore:
     def get_text(self, key: str) -> str:
         """Retrieve text content by key."""
         entry = self._registry.get(key)
-        if not entry or entry["type"] != "text":
+        if not entry or entry["type"] not in ("text", "markdown"):
             raise KeyError(f"Text '{key}' not found in DataStore")
         return Path(entry["path"]).read_text(encoding="utf-8")
+
+    def next_version(self, base_name: str) -> int:
+        """Return the next version number for a versioned markdown file.
+
+        Scans base_dir for ``{base_name}_v*.md`` and returns max_existing + 1.
+        Returns 1 if no versions exist yet.
+        """
+        existing = sorted(self.base_dir.glob(f"{base_name}_v*.md"))
+        if not existing:
+            return 1
+        versions: list[int] = []
+        for p in existing:
+            stem = p.stem  # e.g. "synthesis_v2"
+            try:
+                versions.append(int(stem.split("_v")[-1]))
+            except (ValueError, IndexError):
+                pass
+        return (max(versions) + 1) if versions else 1
+
+    def store_versioned_md(
+        self,
+        base_name: str,
+        content: str,
+        metadata: dict,
+        version: int | None = None,
+    ) -> tuple[str, str]:
+        """Write content to ``{base_name}_v{n}.md`` and register it.
+
+        Args:
+            base_name: Logical name (e.g. ``"synthesis"``, ``"digital_friction_agent"``).
+            content:   Markdown text to write.
+            metadata:  Arbitrary metadata dict stored in registry.
+            version:   Explicit version number. Auto-increments from existing files if None.
+
+        Returns:
+            ``(registry_key, absolute_path_str)`` — use the path as the completion flag.
+        """
+        v = version if version is not None else self.next_version(base_name)
+        key = f"{base_name}_v{v}"
+        path = self.base_dir / f"{key}.md"
+        path.write_text(content, encoding="utf-8")
+        self._registry[key] = {
+            "type": "markdown",
+            "path": str(path),
+            "version": v,
+            "metadata": metadata,
+        }
+        self._save_registry()
+        return key, str(path)
+
+    def get_path(self, key: str) -> str:
+        """Return the absolute file path for any registered key."""
+        entry = self._registry.get(key)
+        if not entry:
+            raise KeyError(f"Key '{key}' not found in DataStore")
+        return entry["path"]
 
     def get_metadata(self, key: str) -> dict:
         """Return metadata only (for state storage)."""

@@ -109,7 +109,7 @@ from config import (
     ALL_DOMAIN_SKILLS,
     DATA_CACHE_DIR,
     DATA_DIR,
-    DEFAULT_CSV_PATH,
+    DEFAULT_PARQUET_PATH,
     DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,
     DEFAULT_TEMPERATURE,
@@ -118,6 +118,7 @@ from config import (
     GOOGLE_API_KEY,
     GROUP_BY_COLUMNS,
     LLM_ANALYSIS_COLUMNS,
+    LLM_ANALYSIS_CONTEXT,
     LOG_DATE_FORMAT,
     LOG_FORMAT,
     LOG_LEVEL,
@@ -154,6 +155,7 @@ for name, val, expected_type in [
     ("LOG_LEVEL", LOG_LEVEL, str),
     ("GROUP_BY_COLUMNS", GROUP_BY_COLUMNS, list),
     ("LLM_ANALYSIS_COLUMNS", LLM_ANALYSIS_COLUMNS, list),
+    ("LLM_ANALYSIS_CONTEXT", LLM_ANALYSIS_CONTEXT, dict),
     ("FRICTION_AGENTS", FRICTION_AGENTS, set),
     ("REPORTING_AGENTS", REPORTING_AGENTS, set),
     ("ALL_DOMAIN_SKILLS", ALL_DOMAIN_SKILLS, list),
@@ -354,28 +356,25 @@ except Exception as exc:
 # 8. Filter catalog generation
 # ---------------------------------------------------------------------------
 
-section("8. Filter Catalog")
+section("8. Filter Context (Config-Driven)")
 
 import pandas as pd
-from app import _build_filter_catalog
 
-csv_path = Path(DEFAULT_CSV_PATH)
-if csv_path.exists():
-    df = pd.read_csv(str(csv_path))
-    catalog = _build_filter_catalog(df)
-    if catalog:
-        ok(f"filter catalog: {len(catalog)} columns from {csv_path.name}")
-        # Verify all GROUP_BY_COLUMNS are in catalog (if they exist in data)
-        for col in GROUP_BY_COLUMNS:
-            if col in df.columns:
-                if col in catalog:
-                    ok(f"  GROUP_BY '{col}' in catalog ({len(catalog[col])} values)")
-                else:
-                    fail(f"  GROUP_BY '{col}' in catalog", "missing")
-    else:
-        fail("filter catalog", "empty catalog")
+if LLM_ANALYSIS_CONTEXT:
+    ok(f"LLM_ANALYSIS_CONTEXT: {len(LLM_ANALYSIS_CONTEXT)} filter dimensions")
+    for col, values in LLM_ANALYSIS_CONTEXT.items():
+        if isinstance(values, list) and values:
+            ok(f"  '{col}': {len(values)} valid values")
+        else:
+            fail(f"  '{col}'", "expected non-empty list of values")
 else:
-    ok(f"filter catalog skipped: CSV not found ({csv_path})")
+    fail("LLM_ANALYSIS_CONTEXT", "empty — no filter dimensions configured")
+
+# Verify LLM_ANALYSIS_COLUMNS is derived correctly
+if set(LLM_ANALYSIS_COLUMNS) == set(LLM_ANALYSIS_CONTEXT.keys()):
+    ok(f"LLM_ANALYSIS_COLUMNS matches LLM_ANALYSIS_CONTEXT keys ({len(LLM_ANALYSIS_COLUMNS)} columns)")
+else:
+    fail("LLM_ANALYSIS_COLUMNS", "does not match LLM_ANALYSIS_CONTEXT keys")
 
 
 # ---------------------------------------------------------------------------
@@ -608,9 +607,9 @@ from agents.nodes import _build_extra_context, make_agent_node
 # Verify extra context for each agent type
 test_state: dict[str, Any] = {
     "messages": [],
-    "dataset_schema": catalog if csv_path.exists() else {},
+    "dataset_schema": LLM_ANALYSIS_CONTEXT,
     "filters_applied": {},
-    "dataset_path": str(csv_path),
+    "dataset_path": DEFAULT_PARQUET_PATH,
     "analysis_objective": "Test",
     "digital_analysis": {"output": "test"},
     "operations_analysis": {"output": "test"},
