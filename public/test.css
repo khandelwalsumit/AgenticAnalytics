@@ -1,50 +1,6 @@
 /* AgenticAnalytics custom styles */
 /* Blinking pulse dot for "Awaiting Input" messages */
-.awaiting-input {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 14px 18px;
-  border-radius: 12px;
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.08), rgba(168, 85, 247, 0.08));
-  border: 1px solid rgba(99, 102, 241, 0.2);
-  font-weight: 500;
-  font-size: 0.95rem;
-  line-height: 1.5;
-  animation: glow-border 2s ease-in-out infinite;
-}
 
-.pulse-dot {
-  width: 12px;
-  height: 12px;
-  min-width: 12px;
-  border-radius: 50%;
-  background: #6366f1;
-  animation: pulse 1.4s ease-in-out infinite;
-  box-shadow: 0 0 6px rgba(99, 102, 241, 0.6);
-}
-
-@keyframes pulse {
-  0%,
-  100% {
-    opacity: 1;
-    transform: scale(1);
-  }
-  50% {
-    opacity: 0.3;
-    transform: scale(0.75);
-  }
-}
-
-@keyframes glow-border {
-  0%,
-  100% {
-    border-color: rgba(99, 102, 241, 0.2);
-  }
-  50% {
-    border-color: rgba(99, 102, 241, 0.5);
-  }
-}
 
 /* Improve readability of user messages */
 [data-message-author="user"] .message-content,
@@ -57,8 +13,8 @@
 
 /* Step header style hook */
 button[id^="step-"] {
-  color: #9e9de0 !important;
-  font-size: 12px !important;
+  color: #808080 !important;
+  font-size: 1em !important;
 }
 
 /* Step container style hook (run steps only) */
@@ -74,8 +30,8 @@ button[id^="step-"] {
 .step[data-step-type="run"] .markdown-body,
 .step[data-setp-type="run"] .markdown-body {
   color: #888888 !important;
-  font-size: 0.6em !important;
-  line-height: 1.35;
+  font-size: 0.75em !important;
+  line-height: 1.15;
 }
 
 /* Prevent horizontal scrollbar from appearing in message content */

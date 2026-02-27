@@ -15,7 +15,7 @@ from typing import Any
 
 import pandas as pd
 import chainlit as cl
-from chainlit.input_widget import MultiSelect
+from chainlit.input_widget import MultiSelect,Switch
 from langchain_core.messages import AIMessage, HumanMessage
 
 from agents.graph import build_graph
@@ -483,14 +483,11 @@ def _apply_agent_selection(state: dict[str, Any], selected: list[str]) -> None:
 
 
 async def _send_agent_settings(selected: list[str]) -> None:
-    await cl.ChatSettings([
-        MultiSelect(
-            id="selected_agents", label="Session Agents",
-            initial=list(selected),
-            items={v: k for k, v in AGENT_ID_TO_LABEL.items()},
-            description="Select agents for friction analysis.",
-        )
-    ]).send()
+    settings = await cl.ChatSettings(
+        [
+            Switch(id="critique_enabled", label="Enable Deep Analysis", initial=False),
+        ]
+    ).send()
 
 
 # ------------------------------------------------------------------
