@@ -154,8 +154,10 @@ def build_graph(
             _apply_supervisor(structured, state, base)
         elif last_msg:
             _apply_supervisor_fallback(_text(last_msg.content), state, base)
+            data = _parse_json(_text(last_msg.content))
+            reasoning = data.get("reasoning", base.get("supervisor_decision", "?"))
+            base["reasoning"] = [{"step_name": "Supervisor", "step_text": reasoning}]
 
-        base["reasoning"] = [{"step_name": "Supervisor", "step_text": base.get("supervisor_decision", "?")}]
         return base
 
     # ══════════════════════════════════════════════════════════════════════════
