@@ -234,7 +234,7 @@ class SectionSlide(BaseModel):
     """One slide in a section blueprint."""
 
     slide_number: int = Field(default=1, ge=1)
-    slide_role: str = Field(default="content", description="Slide role from section contract: hook, situation_and_pain_points, quick_wins, impact_matrix, biggest_bet, recommendations, theme_card")
+    slide_role: str = Field(default="content", description="Slide role from section contract: hook_and_quick_wins, pain_points, impact_matrix, recommendations, theme_card")
     layout_index: int = Field(default=1, ge=0, description="Template layout index from template_spec")
     title: str = Field(default="")
     subtitle: Optional[str] = Field(default=None)

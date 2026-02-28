@@ -1341,7 +1341,7 @@ def _validate_section_blueprint(result: dict[str, Any]) -> list[str]:
         return ["Section formatting output must include at least 1 slide."]
 
     section_key = data.get("section_key", "")
-    expected_counts = {"exec_summary": 3, "impact": 3}
+    expected_counts = {"exec_summary": 2, "impact": 2}
     expected = expected_counts.get(section_key)
     if expected and len(slides) != expected:
         return [f"Section '{section_key}' expected {expected} slides but got {len(slides)}."]
@@ -1369,72 +1369,78 @@ def _build_fallback_section_blueprint(
     result_slides: list[dict[str, Any]] = []
 
     if section_key == "exec_summary":
-        # Merge into 3 slides: hook, situation+pain points, quick wins
+        # 2 slides: hook+quick wins (lead with value), then pain points
         hook_blocks = [b for b in slide_blocks if "executive" in b.get("section_type", "").lower()]
         pain_blocks = [b for b in slide_blocks if "pain" in b.get("section_type", "").lower()]
         wins_blocks = [b for b in slide_blocks if "quick" in b.get("section_type", "").lower()]
 
-        # Slide 1: Hook
-        hook_text = hook_blocks[0]["body"] if hook_blocks else "Analysis report"
+        spec_slides = template_spec.get("slides", [])
+
+        # Slide 1: Hook assertion + quick wins merged
+        hook_title = hook_blocks[0].get("title", "Friction Analysis") if hook_blocks else "Friction Analysis"
+        hook_text = hook_blocks[0].get("body", "")[:300] if hook_blocks else ""
+        wins_text = wins_blocks[0].get("body", "")[:500] if wins_blocks else "Quick wins to be identified."
         result_slides.append({
             "slide_number": 1,
-            "slide_role": "hook",
-            "layout_index": template_spec.get("slides", [{}])[0].get("layout_index", 6) if template_spec.get("slides") else 6,
-            "title": hook_blocks[0].get("title", "Friction Analysis") if hook_blocks else "Friction Analysis",
-            "elements": [{"type": "point_description", "text": hook_text[:500]}],
+            "slide_role": "hook_and_quick_wins",
+            "layout_index": spec_slides[0].get("layout_index", 6) if spec_slides else 6,
+            "title": hook_title,
+            "elements": [
+                {"type": "point_description", "text": hook_text},
+                {"type": "h3", "text": "Quick Wins: Start Monday"},
+                {"type": "point_description", "text": wins_text},
+            ],
         })
 
-        # Slide 2: Situation + pain points merged
-        pain_text_parts = []
-        for b in (hook_blocks[1:] + pain_blocks):
-            pain_text_parts.append(b.get("body", "")[:300])
+        # Slide 2: Pain points with structured blocks
+        pain_elements: list[dict[str, Any]] = []
+        for i, b in enumerate(pain_blocks[:3], start=1):
+            title = b.get("title", f"Pain Point {i}")
+            body = b.get("body", "")[:300]
+            pain_elements.append({"type": "h3", "text": f"Pain Point {i}: {title}"})
+            pain_elements.append({"type": "bullet", "bold_label": "Issue", "text": body})
         result_slides.append({
             "slide_number": 2,
-            "slide_role": "situation_and_pain_points",
-            "layout_index": template_spec.get("slides", [{}, {}])[1].get("layout_index", 1) if len(template_spec.get("slides", [])) > 1 else 1,
-            "title": "The Situation & Key Pain Points",
-            "elements": [{"type": "point_description", "text": t} for t in pain_text_parts[:5]],
-        })
-
-        # Slide 3: Quick wins
-        wins_text = wins_blocks[0]["body"] if wins_blocks else "Quick wins to be identified."
-        result_slides.append({
-            "slide_number": 3,
-            "slide_role": "quick_wins",
-            "layout_index": template_spec.get("slides", [{}, {}, {}])[2].get("layout_index", 1) if len(template_spec.get("slides", [])) > 2 else 1,
-            "title": "Quick Wins: Start Monday",
-            "elements": [{"type": "point_description", "text": wins_text[:500]}],
+            "slide_role": "pain_points",
+            "layout_index": spec_slides[1].get("layout_index", 1) if len(spec_slides) > 1 else 1,
+            "title": "Key Pain Points",
+            "elements": pain_elements if pain_elements else [
+                {"type": "point_description", "text": "Pain points to be identified."},
+            ],
         })
 
     elif section_key == "impact":
         matrix_blocks = [b for b in slide_blocks if "matrix" in b.get("section_type", "").lower() and "bet" not in b.get("section_type", "").lower()]
-        bet_blocks = [b for b in slide_blocks if "bet" in b.get("section_type", "").lower()]
         rec_blocks = [b for b in slide_blocks if "recommend" in b.get("section_type", "").lower()]
 
         spec_slides = template_spec.get("slides", [])
 
+        # Slide 1: Impact matrix (table LEFT, chart RIGHT)
+        matrix_elements: list[dict[str, Any]] = []
+        matrix_elements.append({
+            "type": "point_description",
+            "text": matrix_blocks[0].get("body", "")[:500] if matrix_blocks else "",
+        })
+        matrix_elements.append({
+            "type": "chart_placeholder",
+            "chart_key": "impact_ease_scatter",
+            "position": "right",
+        })
         result_slides.append({
             "slide_number": 1,
             "slide_role": "impact_matrix",
             "layout_index": spec_slides[0].get("layout_index", 51) if spec_slides else 51,
-            "title": matrix_blocks[0].get("title", "Impact vs. Ease Matrix") if matrix_blocks else "Impact vs. Ease Matrix",
-            "elements": [{"type": "point_description", "text": matrix_blocks[0].get("body", "")[:500] if matrix_blocks else ""}],
+            "title": matrix_blocks[0].get("title", "Impact vs. Ease Analysis") if matrix_blocks else "Impact vs. Ease Analysis",
+            "elements": matrix_elements,
         })
 
-        result_slides.append({
-            "slide_number": 2,
-            "slide_role": "biggest_bet",
-            "layout_index": spec_slides[1].get("layout_index", 37) if len(spec_slides) > 1 else 37,
-            "title": bet_blocks[0].get("title", "The Biggest Bet") if bet_blocks else "The Biggest Bet",
-            "elements": [{"type": "callout", "text": bet_blocks[0].get("body", "")[:300] if bet_blocks else ""}],
-        })
-
+        # Slide 2: Recommendations grouped by owning team
         rec_text = "\n".join([b.get("body", "") for b in rec_blocks])[:800]
         result_slides.append({
-            "slide_number": 3,
+            "slide_number": 2,
             "slide_role": "recommendations",
-            "layout_index": spec_slides[2].get("layout_index", 1) if len(spec_slides) > 2 else 1,
-            "title": "Recommended Actions by Team",
+            "layout_index": spec_slides[1].get("layout_index", 1) if len(spec_slides) > 1 else 1,
+            "title": "Recommended Actions by Owning Team",
             "elements": [{"type": "point_description", "text": rec_text}],
         })
 

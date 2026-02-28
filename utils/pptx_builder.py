@@ -344,12 +344,19 @@ def _build_table_slide(
     slide_data: dict,
     hierarchy: dict,
     layout_idx: int,
+    chart_paths: dict[str, str] | None = None,
 ) -> None:
-    """Table-focused slide: title + full-width table."""
+    """Table-focused slide: title + table, with optional chart.
+
+    When a chart_placeholder element is present alongside a table, renders
+    side-by-side: table on LEFT, chart on RIGHT.
+    Otherwise renders full-width table.
+    """
     layout = prs.slide_layouts[min(layout_idx, len(prs.slide_layouts) - 1)]
     slide = prs.slides.add_slide(layout)
 
     title_text = _strip_md(slide_data.get("title", ""))
+    elements = slide_data.get("elements", [])
 
     if slide.shapes.title:
         slide.shapes.title.text = title_text
@@ -357,11 +364,56 @@ def _build_table_slide(
             for run in p.runs:
                 _apply_font(run, hierarchy["h1"])
 
-    # Find first table element
-    for elem in slide_data.get("elements", []):
-        if elem.get("type") == "table":
-            _add_table_to_slide(slide, elem, hierarchy, left=0.4, top=2.0, width=12.5)
-            break
+    # Render callout elements above the table (e.g., biggest-bet statement)
+    callout_elements = [e for e in elements if e.get("type") == "callout"]
+    if callout_elements:
+        # Add callout text in a text box above the table area
+        from pptx.util import Inches as _Inches
+        txBox = slide.shapes.add_textbox(_Inches(0.6), _Inches(1.4), _Inches(12.0), _Inches(0.5))
+        tf = txBox.text_frame
+        tf.word_wrap = True
+        first = True
+        for elem in callout_elements:
+            text = _strip_md(elem.get("text", ""))
+            if not text:
+                continue
+            if first:
+                p = tf.paragraphs[0]
+                first = False
+            else:
+                p = tf.add_paragraph()
+            run = p.add_run()
+            run.text = text
+            _apply_font(run, hierarchy.get("callout", _DEFAULT_HIERARCHY["callout"]))
+
+    # Check for chart + table co-placement
+    chart_elem = None
+    table_elem = None
+    for elem in elements:
+        if elem.get("type") == "chart_placeholder" and chart_elem is None:
+            chart_elem = elem
+        if elem.get("type") == "table" and table_elem is None:
+            table_elem = elem
+
+    has_chart = chart_elem is not None and chart_paths
+    callout_offset = 0.5 if callout_elements else 0.0
+
+    if has_chart and table_elem:
+        # Side-by-side: table LEFT, chart RIGHT
+        _add_table_to_slide(
+            slide, table_elem, hierarchy,
+            left=0.4, top=2.0 + callout_offset, width=7.0,
+        )
+        _add_chart_image(
+            slide, chart_elem.get("chart_key", ""), chart_paths,
+            position="right",
+        )
+    elif table_elem:
+        # Full-width table (no chart)
+        _add_table_to_slide(
+            slide, table_elem, hierarchy,
+            left=0.4, top=2.0 + callout_offset, width=12.5,
+        )
 
 
 def _build_callout_slide(
@@ -425,6 +477,18 @@ def _build_theme_card_slide(
     if body_ph:
         text_elements = [e for e in elements if e.get("type") not in ("table", "chart_placeholder")]
         _add_text_elements(body_ph.text_frame, text_elements, hierarchy)
+
+    # Tables — rendered as shapes below text elements
+    table_elements = [e for e in elements if e.get("type") == "table"]
+    if table_elements:
+        # Position table below text content; adjust top based on text density
+        table_top = 4.0  # default: below scorecard + story text
+        for t_elem in table_elements:
+            _add_table_to_slide(
+                slide, t_elem, hierarchy,
+                left=0.6, top=table_top, width=7.5, row_height=0.30,
+            )
+            table_top += 0.35 * (len(t_elem.get("rows", [])) + 1) + 0.3
 
     # Chart in picture placeholder or fallback to manual placement
     for elem in elements:
@@ -494,11 +558,14 @@ def build_pptx_from_sections(
             if slide_role == "hook":
                 _build_title_slide(prs, slide_data, hierarchy, layout_idx)
             elif slide_role == "impact_matrix":
-                _build_table_slide(prs, slide_data, hierarchy, layout_idx)
+                _build_table_slide(prs, slide_data, hierarchy, layout_idx, chart_paths)
             elif slide_role in ("biggest_bet", "callout"):
                 _build_callout_slide(prs, slide_data, hierarchy, layout_idx)
             elif slide_role == "theme_card":
                 _build_theme_card_slide(prs, slide_data, hierarchy, layout_idx, chart_paths)
+            elif slide_role in ("hook_and_quick_wins", "pain_points", "recommendations",
+                                "quick_wins", "situation_and_pain_points"):
+                _build_content_slide(prs, slide_data, hierarchy, layout_idx, chart_paths)
             else:
                 _build_content_slide(prs, slide_data, hierarchy, layout_idx, chart_paths)
 

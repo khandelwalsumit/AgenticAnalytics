@@ -38,6 +38,12 @@ DEFAULT_TEMPERATURE = float(os.getenv("DEFAULT_TEMPERATURE", "0.1"))
 DEFAULT_TOP_P = float(os.getenv("DEFAULT_TOP_P", "0.95"))
 DEFAULT_MAX_TOKENS = int(os.getenv("DEFAULT_MAX_TOKENS", "8192"))
 
+# -- Parallelism --------------------------------------------------------------
+# Total concurrent agent workers across all friction agents.
+# Per-agent limit = floor(MAX_MULTITHREADING_WORKERS / number_of_active_friction_agents).
+# Example: 40 workers / 4 agents = 10 themes per agent in parallel.
+MAX_MULTITHREADING_WORKERS = int(os.getenv("MAX_MULTITHREADING_WORKERS", "40"))
+
 # -- Thresholds ---------------------------------------------------------------
 MAX_SAMPLE_SIZE = 50  # Max rows returned by sample_data
 TOP_N_DEFAULT = 10  # Default for top-N distributions

@@ -54,6 +54,7 @@ from agents.schemas import (
     SynthesizerOutput,
 )
 from agents.state import AnalyticsState
+from config import MAX_MULTITHREADING_WORKERS
 from core.agent_factory import AgentFactory
 from core.skill_loader import SkillLoader
 from tools import TOOL_REGISTRY
@@ -674,8 +675,20 @@ def build_graph(
         total_buckets = len(bucket_keys)
 
         total_runs = len(lens_ids) * total_buckets
-        logger.info("Friction analysis: %d lenses × %d buckets = %d runs",
-                    len(lens_ids), total_buckets, total_runs)
+        per_agent_limit = MAX_MULTITHREADING_WORKERS // len(lens_ids)
+        per_agent_limit = max(per_agent_limit, 1)  # at least 1
+        semaphore = asyncio.Semaphore(MAX_MULTITHREADING_WORKERS)
+        logger.info(
+            "Friction analysis: %d lenses × %d buckets = %d runs "
+            "(max %d workers, %d per agent)",
+            len(lens_ids), total_buckets, total_runs,
+            MAX_MULTITHREADING_WORKERS, per_agent_limit,
+        )
+
+        # Per-agent semaphores to enforce floor(MAX_WORKERS / num_agents) limit
+        agent_semaphores: dict[str, asyncio.Semaphore] = {
+            lid: asyncio.Semaphore(per_agent_limit) for lid in lens_ids
+        }
 
         # Build sub_agents with (0/N) progress counters
         sub_agents: list[dict[str, Any]] = []
@@ -696,8 +709,10 @@ def build_graph(
         completed_per_lens: dict[str, int] = {lid: 0 for lid in lens_ids}
 
         async def _tracked_run(lens_id: str, bucket_key: str, coro):
-            """Wrap a lens coroutine to update UI progress on completion."""
-            result = await coro
+            """Wrap a lens coroutine with concurrency limiting + UI progress."""
+            async with semaphore:
+                async with agent_semaphores[lens_id]:
+                    result = await coro
             completed_per_lens[lens_id] += 1
             done = completed_per_lens[lens_id]
             base_detail = FRICTION_SUB_AGENTS[lens_id]["detail"]
