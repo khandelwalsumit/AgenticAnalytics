@@ -690,6 +690,7 @@ for agent_name in ["supervisor", "planner", "data_analyst"]:
 
 section("15. filter_data Error Reporting")
 
+import tools.data_tools as _dt_mod
 from tools.data_tools import filter_data, set_data_store as set_dt_store
 
 try:
@@ -700,6 +701,14 @@ try:
     })
     store.store_dataframe("main_dataset", test_df, metadata={})
     set_dt_store(store)
+
+    # filter_data reads from DEFAULT_PARQUET_PATH, not from DataStore.
+    # Write the test DataFrame to a temp parquet so filter_data can read it.
+    import tempfile
+    _tmp_pq = Path(tempfile.mktemp(suffix=".parquet"))
+    test_df.to_parquet(_tmp_pq, index=False)
+    _orig_pq_path = _dt_mod.DEFAULT_PARQUET_PATH
+    _dt_mod.DEFAULT_PARQUET_PATH = _tmp_pq
 
     # Test: wrong column name -> should report skipped_filters
     result = json.loads(filter_data.invoke({"filters": {"wrong_col": "X"}}))
@@ -720,6 +729,12 @@ try:
     else:
         fail("filter_data correct filter", f"expected 2 rows, got {result2.get('filtered_rows')}")
 
+    # Restore original parquet path and clean up temp file
+    _dt_mod.DEFAULT_PARQUET_PATH = _orig_pq_path
+    try:
+        _tmp_pq.unlink(missing_ok=True)
+    except OSError:
+        pass
     try:
         store.cleanup()
     except PermissionError as cleanup_exc:

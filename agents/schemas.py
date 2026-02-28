@@ -202,12 +202,59 @@ class SynthesizerOutput(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Formatting Agent (Structured Slide Deck Blueprint)
+# Formatting Agent — Section-based Slide Blueprint
+# ---------------------------------------------------------------------------
+
+
+class SectionSlideElement(BaseModel):
+    """A single content element in a section slide blueprint.
+
+    Simpler than the legacy SlideElement — no image placement fields.
+    Charts are referenced by key; the PPTX builder handles placement.
+    """
+
+    type: str = Field(
+        default="point_description",
+        description="Element type: h2, h3, point_heading, point_description, sub_point, bullet, callout, table, chart_placeholder",
+    )
+    text: str = Field(default="")
+    bold_label: Optional[str] = Field(default=None, description="Bold prefix before text (e.g., 'Impact:')")
+    level: Optional[int] = Field(default=None, ge=1, le=3, description="Bullet indent level (1-3)")
+
+    # table-only
+    headers: list[str] = Field(default_factory=list)
+    rows: list[list[str]] = Field(default_factory=list)
+
+    # chart-only
+    chart_key: Optional[str] = Field(default=None, description="Chart key: friction_distribution, impact_ease_scatter, driver_breakdown")
+    position: Optional[Literal["right", "left", "bottom", "full"]] = Field(default=None)
+
+
+class SectionSlide(BaseModel):
+    """One slide in a section blueprint."""
+
+    slide_number: int = Field(default=1, ge=1)
+    slide_role: str = Field(default="content", description="Slide role from section contract: hook, situation_and_pain_points, quick_wins, impact_matrix, biggest_bet, recommendations, theme_card")
+    layout_index: int = Field(default=1, ge=0, description="Template layout index from template_spec")
+    title: str = Field(default="")
+    subtitle: Optional[str] = Field(default=None)
+    elements: list[SectionSlideElement] = Field(default_factory=list)
+
+
+class SectionBlueprintOutput(BaseModel):
+    """Structured output from formatting agent — one section at a time."""
+
+    section_key: str = Field(description="Section identifier: exec_summary, impact, or theme_deep_dives")
+    slides: list[SectionSlide] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Legacy Formatting Agent schemas (kept for fallback compatibility)
 # ---------------------------------------------------------------------------
 
 
 class SlideElement(BaseModel):
-    """A single content element in the deck blueprint."""
+    """A single content element in the deck blueprint (legacy)."""
 
     type: str = Field(default="paragraph")
     text: str = Field(default="")
@@ -235,7 +282,7 @@ class SlideElement(BaseModel):
 
 
 class SlideBlueprint(BaseModel):
-    """One slide blueprint object."""
+    """One slide blueprint object (legacy)."""
 
     slide_number: int = Field(default=1, ge=1)
     section_type: str = Field(default="narrative")
@@ -246,7 +293,7 @@ class SlideBlueprint(BaseModel):
 
 
 class FormattingDeckOutput(BaseModel):
-    """Structured deck output from formatting agent."""
+    """Structured deck output from formatting agent (legacy — kept for fallback)."""
 
     deck_title: str = Field(default="Friction Analysis Report")
     deck_subtitle: str = Field(default="")
@@ -310,7 +357,7 @@ STRUCTURED_OUTPUT_SCHEMAS: dict[str, type[BaseModel]] = {
     "supervisor": SupervisorOutput,
     "planner": PlannerOutput,
     "synthesizer_agent": SynthesizerOutput,
-    "formatting_agent": FormattingDeckOutput,
+    "formatting_agent": SectionBlueprintOutput,
     # data_analyst removed: it needs ReAct (tool-calling) agent, not structured-only.
     # DataAnalystOutput schema is kept for reference / fallback JSON parsing.
     # critique removed: needs validate_findings and score_quality tools.

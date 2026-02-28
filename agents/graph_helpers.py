@@ -1284,3 +1284,292 @@ def _persist_friction_outputs(
         logger.info("  DataStore: wrote %s (%d chars)", key, len(full_response))
     return output_keys
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Section-based formatting pipeline
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _build_section_formatting_message(
+    section_key: str,
+    section_data: dict[str, Any],
+    synthesis_summary: dict[str, Any],
+) -> str:
+    """Build the HumanMessage content for a single section formatting call."""
+    template_spec = section_data.get("template_spec", {})
+    visual_hierarchy = section_data.get("visual_hierarchy", {})
+    narrative_chunk = section_data.get("narrative_chunk", "")
+
+    chart_placeholders = [
+        "{{chart.friction_distribution}}",
+        "{{chart.impact_ease_scatter}}",
+        "{{chart.driver_breakdown}}",
+    ]
+
+    parts = [
+        f"section_key: {section_key}",
+        "",
+        "--- TEMPLATE SPEC ---",
+        json.dumps(template_spec, indent=2, default=str),
+        "",
+        "--- VISUAL HIERARCHY ---",
+        json.dumps(visual_hierarchy, indent=2, default=str),
+        "",
+        "--- CHART PLACEHOLDERS ---",
+        json.dumps(chart_placeholders),
+        "",
+        "--- SYNTHESIS SUMMARY (verification only) ---",
+        json.dumps(synthesis_summary, indent=2, default=str),
+        "",
+        "--- NARRATIVE CHUNK ---",
+        narrative_chunk,
+    ]
+    return "\n".join(parts)
+
+
+def _validate_section_blueprint(result: dict[str, Any]) -> list[str]:
+    """Validate a single section formatting agent output."""
+    payload = result.get("formatting_output", {})
+    full = payload.get("full_response", "") if isinstance(payload, dict) else ""
+    data = _extract_json(full)
+
+    if not isinstance(data, dict):
+        return ["Section formatting output is not valid JSON."]
+
+    slides = data.get("slides", [])
+    if not isinstance(slides, list) or len(slides) < 1:
+        return ["Section formatting output must include at least 1 slide."]
+
+    section_key = data.get("section_key", "")
+    expected_counts = {"exec_summary": 3, "impact": 3}
+    expected = expected_counts.get(section_key)
+    if expected and len(slides) != expected:
+        return [f"Section '{section_key}' expected {expected} slides but got {len(slides)}."]
+
+    return []
+
+
+def _build_fallback_section_blueprint(
+    section_key: str,
+    section_data: dict[str, Any],
+) -> dict[str, Any]:
+    """Deterministic fallback: build section blueprint from narrative slide tags."""
+    slide_blocks = section_data.get("slides", [])
+    template_spec = section_data.get("template_spec", {})
+
+    # Get default layout index from template spec
+    default_layout = 1
+    if "slides" in template_spec:
+        spec_slides = template_spec["slides"]
+        if spec_slides:
+            default_layout = spec_slides[0].get("layout_index", 1)
+    elif "per_theme_slide" in template_spec:
+        default_layout = template_spec["per_theme_slide"].get("layout_index", 19)
+
+    result_slides: list[dict[str, Any]] = []
+
+    if section_key == "exec_summary":
+        # Merge into 3 slides: hook, situation+pain points, quick wins
+        hook_blocks = [b for b in slide_blocks if "executive" in b.get("section_type", "").lower()]
+        pain_blocks = [b for b in slide_blocks if "pain" in b.get("section_type", "").lower()]
+        wins_blocks = [b for b in slide_blocks if "quick" in b.get("section_type", "").lower()]
+
+        # Slide 1: Hook
+        hook_text = hook_blocks[0]["body"] if hook_blocks else "Analysis report"
+        result_slides.append({
+            "slide_number": 1,
+            "slide_role": "hook",
+            "layout_index": template_spec.get("slides", [{}])[0].get("layout_index", 6) if template_spec.get("slides") else 6,
+            "title": hook_blocks[0].get("title", "Friction Analysis") if hook_blocks else "Friction Analysis",
+            "elements": [{"type": "point_description", "text": hook_text[:500]}],
+        })
+
+        # Slide 2: Situation + pain points merged
+        pain_text_parts = []
+        for b in (hook_blocks[1:] + pain_blocks):
+            pain_text_parts.append(b.get("body", "")[:300])
+        result_slides.append({
+            "slide_number": 2,
+            "slide_role": "situation_and_pain_points",
+            "layout_index": template_spec.get("slides", [{}, {}])[1].get("layout_index", 1) if len(template_spec.get("slides", [])) > 1 else 1,
+            "title": "The Situation & Key Pain Points",
+            "elements": [{"type": "point_description", "text": t} for t in pain_text_parts[:5]],
+        })
+
+        # Slide 3: Quick wins
+        wins_text = wins_blocks[0]["body"] if wins_blocks else "Quick wins to be identified."
+        result_slides.append({
+            "slide_number": 3,
+            "slide_role": "quick_wins",
+            "layout_index": template_spec.get("slides", [{}, {}, {}])[2].get("layout_index", 1) if len(template_spec.get("slides", [])) > 2 else 1,
+            "title": "Quick Wins: Start Monday",
+            "elements": [{"type": "point_description", "text": wins_text[:500]}],
+        })
+
+    elif section_key == "impact":
+        matrix_blocks = [b for b in slide_blocks if "matrix" in b.get("section_type", "").lower() and "bet" not in b.get("section_type", "").lower()]
+        bet_blocks = [b for b in slide_blocks if "bet" in b.get("section_type", "").lower()]
+        rec_blocks = [b for b in slide_blocks if "recommend" in b.get("section_type", "").lower()]
+
+        spec_slides = template_spec.get("slides", [])
+
+        result_slides.append({
+            "slide_number": 1,
+            "slide_role": "impact_matrix",
+            "layout_index": spec_slides[0].get("layout_index", 51) if spec_slides else 51,
+            "title": matrix_blocks[0].get("title", "Impact vs. Ease Matrix") if matrix_blocks else "Impact vs. Ease Matrix",
+            "elements": [{"type": "point_description", "text": matrix_blocks[0].get("body", "")[:500] if matrix_blocks else ""}],
+        })
+
+        result_slides.append({
+            "slide_number": 2,
+            "slide_role": "biggest_bet",
+            "layout_index": spec_slides[1].get("layout_index", 37) if len(spec_slides) > 1 else 37,
+            "title": bet_blocks[0].get("title", "The Biggest Bet") if bet_blocks else "The Biggest Bet",
+            "elements": [{"type": "callout", "text": bet_blocks[0].get("body", "")[:300] if bet_blocks else ""}],
+        })
+
+        rec_text = "\n".join([b.get("body", "") for b in rec_blocks])[:800]
+        result_slides.append({
+            "slide_number": 3,
+            "slide_role": "recommendations",
+            "layout_index": spec_slides[2].get("layout_index", 1) if len(spec_slides) > 2 else 1,
+            "title": "Recommended Actions by Team",
+            "elements": [{"type": "point_description", "text": rec_text}],
+        })
+
+    else:  # theme_deep_dives
+        per_theme = template_spec.get("per_theme_slide", {})
+        theme_layout = per_theme.get("layout_index", 19)
+        # Group blocks by theme
+        themes: dict[str, list[dict[str, Any]]] = {}
+        current_theme = ""
+        for b in slide_blocks:
+            if b.get("section_type", "").lower() == "theme_divider":
+                current_theme = b.get("title", "").replace(" — Deep Dive", "").replace(" - Deep Dive", "").strip()
+            if current_theme:
+                themes.setdefault(current_theme, []).append(b)
+
+        max_themes = template_spec.get("max_themes", 10)
+        for idx, (theme_name, blocks) in enumerate(list(themes.items())[:max_themes], start=1):
+            body_parts = [b.get("body", "")[:200] for b in blocks]
+            result_slides.append({
+                "slide_number": idx,
+                "slide_role": "theme_card",
+                "layout_index": theme_layout,
+                "title": theme_name,
+                "elements": [
+                    {"type": "point_description", "text": t} for t in body_parts if t
+                ] + [
+                    {"type": "chart_placeholder", "chart_key": "friction_distribution", "position": "right"},
+                ],
+            })
+
+    return {
+        "section_key": section_key,
+        "slides": result_slides,
+    }
+
+
+def _run_section_artifact_writer(
+    state: AnalyticsState,
+    narrative_result: dict[str, Any],
+    section_blueprints: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Deterministic artifact writer using section-based PPTX builder.
+
+    Replaces the legacy _run_artifact_writer_node for the new pipeline.
+    """
+    from utils.pptx_builder import build_pptx_from_sections
+
+    # 1. Generate charts deterministically
+    dataviz_result = _build_deterministic_dataviz_output(state)
+    dataviz_errors = _validate_dataviz(dataviz_result)
+    if dataviz_errors:
+        raise RuntimeError(f"Deterministic DataViz generation failed: {dataviz_errors}")
+
+    # 2. Extract narrative markdown
+    narrative_payload = narrative_result.get("narrative_output", {})
+    narrative_markdown = str(
+        narrative_payload.get("full_response", "") if isinstance(narrative_payload, dict) else ""
+    ).strip()
+    if not narrative_markdown:
+        narrative_markdown = "# Analysis Report\n\nNo narrative markdown was generated."
+
+    # 3. Build chart paths map
+    dataviz_json = _extract_json(
+        dataviz_result.get("dataviz_output", {}).get("full_response", "")
+        if isinstance(dataviz_result.get("dataviz_output", {}), dict) else ""
+    )
+    chart_paths = _build_chart_paths_map(dataviz_json)
+
+    # 4. Load template catalog for visual hierarchy
+    try:
+        catalog_path = Path(__file__).resolve().parent.parent / "data" / "input" / "template_catalog.json"
+        catalog = json.loads(catalog_path.read_text(encoding="utf-8")) if catalog_path.exists() else {}
+    except Exception:
+        catalog = {}
+
+    visual_hierarchy = catalog.get("visual_hierarchy")
+
+    # 5. Persist narrative markdown
+    output_dir = _thread_output_dir()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    markdown_path = str(output_dir / "complete_analysis.md")
+    Path(markdown_path).write_text(narrative_markdown, encoding="utf-8")
+
+    report_key = "report_markdown"
+    data_store = cl.user_session.get("data_store")
+    if data_store is not None:
+        try:
+            report_key = data_store.store_text(
+                "report_markdown",
+                narrative_markdown,
+                {"agent": "narrative_agent", "type": "report_markdown"},
+            )
+        except Exception:
+            report_key = "report_markdown"
+
+    # 6. Build PPTX from section blueprints using new builder
+    from config import PPTX_TEMPLATE_PATH
+    pptx_path = str(output_dir / "report.pptx")
+    template_path = PPTX_TEMPLATE_PATH if Path(PPTX_TEMPLATE_PATH).exists() else ""
+
+    build_pptx_from_sections(
+        section_blueprints=section_blueprints,
+        chart_paths=chart_paths,
+        output_path=pptx_path,
+        template_path=template_path,
+        visual_hierarchy=visual_hierarchy,
+    )
+    report_path = pptx_path if Path(pptx_path).exists() else ""
+    logger.info("Section-based PPTX built: %s", report_path)
+
+    # 7. Export filtered CSV
+    csv_tool = TOOL_REGISTRY["export_filtered_csv"]
+    csv_raw = csv_tool.invoke({})
+    csv_data = _extract_json(str(csv_raw))
+    data_path = _resolve_existing_path(str(csv_data.get("csv_path", "")).strip())
+
+    payload = {
+        "report_markdown_key": report_key,
+        "markdown_file_path": markdown_path,
+        "report_file_path": report_path,
+        "data_file_path": data_path,
+    }
+    payload_json = json.dumps(payload, indent=2)
+    logger.info("Section artifact writer completed: %s", payload)
+    return {
+        "messages": [AIMessage(content=payload_json)],
+        "reasoning": [{
+            "step_name": "Artifact Writer",
+            "step_text": "Built PPTX from section blueprints, persisted narrative markdown, and exported filtered CSV.",
+            "agent": "artifact_writer_node",
+        }],
+        "dataviz_output": dataviz_result.get("dataviz_output", {}),
+        "report_markdown_key": report_key,
+        "markdown_file_path": markdown_path,
+        "report_file_path": report_path,
+        "data_file_path": data_path,
+    }
+

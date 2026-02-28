@@ -49,6 +49,7 @@ from agents.nodes import (
 from agents.schemas import (
     FormattingDeckOutput,
     PlannerOutput,
+    SectionBlueprintOutput,
     SupervisorOutput,
     SynthesizerOutput,
 )
@@ -62,8 +63,10 @@ from agents.graph_helpers import (
     REPORTING_SUB_AGENTS,
     _build_executive_summary_message,
     _build_fallback_formatting_from_narrative_markdown,
+    _build_fallback_section_blueprint,
     _build_friction_reasoning_entries,
     _build_report_reasoning_entries,
+    _build_section_formatting_message,
     _make_sub_agent_entries,
     _make_sub_agent_entry,
     _merge_parallel_outputs,
@@ -71,12 +74,14 @@ from agents.graph_helpers import (
     _record_plan_progress,
     _run_agent_with_retries,
     _run_artifact_writer_node,
+    _run_section_artifact_writer,
     _persist_friction_outputs,
     _set_sub_agent_status,
     _set_task_sub_agents_and_emit,
     _validate_artifact_paths,
     _validate_formatting_blueprint,
     _validate_narrative,
+    _validate_section_blueprint,
 )
 
 logger = logging.getLogger("agenticanalytics.graph")
@@ -509,10 +514,10 @@ def build_graph(
     # ══════════════════════════════════════════════════════════════════════════
 
     async def formatting_node(state: AnalyticsState) -> dict[str, Any]:
-        """Converts narrative markdown into a structured slide blueprint JSON.
+        """Converts a single narrative section into a structured slide blueprint JSON.
 
         Reads:
-            messages               – instruction to parse narrative
+            messages               – section formatting instruction with template spec
             narrative_output       – full_response contains the markdown text with slide tags
             synthesis_result       – summary context for chart data
             findings               – compact finding list
@@ -520,28 +525,27 @@ def build_graph(
 
         Writes:
             formatting_output      – {output, full_response, agent}
-                                     full_response is a JSON slide blueprint
-                                     (FormattingDeckOutput serialised)
+                                     full_response is a JSON section blueprint
+                                     (SectionBlueprintOutput serialised)
         """
         ctx = _build_extra_context("formatting_agent", state, None)
         sys_prompt = agent_factory.parse_agent_md("formatting_agent").system_prompt + ctx
 
         base, structured, last_msg = await _run_structured_node(
-            "formatting_agent", formatting_chain, FormattingDeckOutput, sys_prompt, state, extra_context=ctx
+            "formatting_agent", formatting_chain, SectionBlueprintOutput, sys_prompt, state, extra_context=ctx
         )
 
-        if isinstance(structured, FormattingDeckOutput):
+        if isinstance(structured, SectionBlueprintOutput):
             blueprint_json = structured.model_dump_json(indent=2)
             slide_count    = len(structured.slides)
-            qa_count       = len(structured.qa_enhancements_applied)
             base["formatting_output"] = {
-                "output":        f"{slide_count} slides, {qa_count} QA notes",
+                "output":        f"{structured.section_key}: {slide_count} slides",
                 "full_response": blueprint_json,
                 "agent":         "formatting_agent",
             }
             base["reasoning"] = [{
                 "step_name": "Formatting Agent",
-                "step_text": f"Slide blueprint ready: {slide_count} slides, {qa_count} QA enhancements.",
+                "step_text": f"Section blueprint ready: {structured.section_key} with {slide_count} slides.",
             }]
         elif last_msg:
             raw = _text(last_msg.content)
@@ -915,44 +919,70 @@ def build_graph(
             tasks, agent_name="report_generation", sub_agents=sub_agents, task_status="in_progress",
         )
 
-        # --- Step 2: Formatting agent (slide blueprint) ---
-        fmt_state = dict(state)
-        for k, v in _merge_parallel_outputs([narrative_result]).items():
-            if k != "messages":
-                fmt_state[k] = v
-        fmt_state["messages"] = [HumanMessage(content=(
-            "Parse narrative markdown and create the slide blueprint JSON with chart placeholders. "
-            "Do not call export tools."
-        ))]
+        # --- Step 2: Section-based formatting (3 parallel LLM calls) ---
+        from utils.section_splitter import split_narrative_into_sections
 
-        try:
-            fmt_result = await _run_agent_with_retries(
-                agent_id="formatting_agent", node_fn=formatting_node,
-                base_state=fmt_state, required_tools=[],
-                validator=_validate_formatting_blueprint, max_attempts=2,
-            )
-        except Exception as fmt_error:
-            fallback_blueprint = _build_fallback_formatting_from_narrative_markdown(
-                str(narrative_result.get("narrative_output", {}).get("full_response", ""))
-            )
-            fallback_json = json.dumps(fallback_blueprint, indent=2)
-            fmt_result = {
-                "messages":         [AIMessage(content=fallback_json)],
-                "formatting_output": {
-                    "output":        fallback_json[:200],
-                    "full_response": fallback_json,
-                    "agent":         "formatting_agent",
-                },
-                "reasoning": [{
-                    "step_name": "Formatting Fallback",
-                    "step_text": (
-                        "Formatting agent retries failed; generated deterministic blueprint "
-                        "from narrative markdown slide tags."
-                    ),
-                    "agent": "formatting_agent",
-                }],
-            }
-            logger.warning("Report generation: formatting fallback used due to error: %s", fmt_error)
+        narrative_payload = narrative_result.get("narrative_output", {})
+        narrative_md = str(
+            narrative_payload.get("full_response", "") if isinstance(narrative_payload, dict) else ""
+        ).strip()
+
+        # Split narrative into 3 sections with template catalog slices
+        sections = split_narrative_into_sections(narrative_md)
+
+        # Extract synthesis summary for verification
+        synthesis_payload = state.get("synthesis_result", {})
+        synthesis_summary = {}
+        if isinstance(synthesis_payload, dict):
+            summary_obj = synthesis_payload.get("summary", {})
+            if isinstance(summary_obj, dict):
+                synthesis_summary = summary_obj
+
+        # Run formatting agent once per section in parallel
+        section_keys = ["exec_summary", "impact", "theme_deep_dives"]
+        section_blueprints: list[dict[str, Any]] = []
+
+        async def _format_one_section(section_key: str) -> dict[str, Any]:
+            section_data = sections.get(section_key, {})
+            if not section_data or not section_data.get("narrative_chunk"):
+                logger.warning("Report generation: section '%s' has no narrative content, using fallback", section_key)
+                return _build_fallback_section_blueprint(section_key, section_data)
+
+            fmt_state = dict(state)
+            for k, v in _merge_parallel_outputs([narrative_result]).items():
+                if k != "messages":
+                    fmt_state[k] = v
+            fmt_state["messages"] = [HumanMessage(content=_build_section_formatting_message(
+                section_key, section_data, synthesis_summary,
+            ))]
+
+            try:
+                fmt_result = await _run_agent_with_retries(
+                    agent_id="formatting_agent", node_fn=formatting_node,
+                    base_state=fmt_state, required_tools=[],
+                    validator=_validate_section_blueprint, max_attempts=2,
+                )
+                # Extract the blueprint JSON from the result
+                fmt_payload = fmt_result.get("formatting_output", {})
+                fmt_json_str = fmt_payload.get("full_response", "") if isinstance(fmt_payload, dict) else ""
+                from agents.graph_helpers import _extract_json
+                fmt_json = _extract_json(fmt_json_str)
+                if isinstance(fmt_json, dict) and fmt_json.get("slides"):
+                    return fmt_json
+            except Exception as e:
+                logger.warning("Report generation: section '%s' formatting failed: %s -- using fallback", section_key, e)
+
+            return _build_fallback_section_blueprint(section_key, section_data)
+
+        # Run all 3 sections in parallel
+        section_results = await asyncio.gather(
+            *[_format_one_section(sk) for sk in section_keys],
+            return_exceptions=False,
+        )
+        section_blueprints = list(section_results)
+        total_slides = sum(len(s.get("slides", [])) for s in section_blueprints)
+        logger.info("Report generation: section formatting complete | %d total slides across %d sections",
+                     total_slides, len(section_blueprints))
 
         _set_sub_agent_status(sub_agents, "formatting_agent",    status="done")
         _set_sub_agent_status(sub_agents, "artifact_writer_node", status="in_progress")
@@ -960,8 +990,8 @@ def build_graph(
             tasks, agent_name="report_generation", sub_agents=sub_agents, task_status="in_progress",
         )
 
-        # --- Step 3: Deterministic artifact writer ---
-        artifact_result = _run_artifact_writer_node(state, narrative_result, fmt_result)
+        # --- Step 3: Deterministic section-based artifact writer ---
+        artifact_result = _run_section_artifact_writer(state, narrative_result, section_blueprints)
         artifact_errors = _validate_artifact_paths(artifact_result)
         if artifact_errors:
             raise RuntimeError(f"artifact_writer_node failed validation: {artifact_errors}")
@@ -978,8 +1008,16 @@ def build_graph(
             tasks, agent_name="report_generation", sub_agents=sub_agents, task_status="done",
         )
 
+        # Build a formatting summary result for state merge
+        fmt_summary = {
+            "formatting_output": {
+                "output": f"{total_slides} slides across {len(section_blueprints)} sections",
+                "full_response": json.dumps(section_blueprints, indent=2, default=str),
+                "agent": "formatting_agent",
+            },
+        }
         final = _merge_state_deltas(
-            narrative_result, fmt_result, artifact_result,
+            narrative_result, fmt_summary, artifact_result,
             list_keys={"execution_trace", "io_trace"},
             skip_keys={"messages"},
         )
