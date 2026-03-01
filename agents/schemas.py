@@ -102,7 +102,64 @@ class DataAnalystOutput(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Synthesizer Agent
+# Synthesizer Agent — LLM output normalizers
+# ---------------------------------------------------------------------------
+
+_VALID_QUADRANTS = {"quick_win", "strategic_investment", "low_hanging_fruit", "deprioritize"}
+_QUADRANT_KEYWORDS: dict[str, str] = {
+    "quick": "quick_win",
+    "win": "quick_win",
+    "strategic": "strategic_investment",
+    "invest": "strategic_investment",
+    "low": "low_hanging_fruit",
+    "hanging": "low_hanging_fruit",
+    "fruit": "low_hanging_fruit",
+    "deprioritize": "deprioritize",
+    "deprio": "deprioritize",
+    "monitor": "deprioritize",
+    "defer": "deprioritize",
+}
+
+_VALID_DRIVERS = {"digital", "operations", "communication", "policy"}
+_DRIVER_KEYWORDS: dict[str, str] = {
+    "digital": "digital",
+    "tech": "digital",
+    "operations": "operations",
+    "ops": "operations",
+    "operational": "operations",
+    "communication": "communication",
+    "comms": "communication",
+    "comm": "communication",
+    "policy": "policy",
+    "policies": "policy",
+    "regulatory": "policy",
+}
+
+
+def _normalize_quadrant(raw: str) -> str:
+    """Map any LLM quadrant string to a valid literal value."""
+    cleaned = raw.lower().strip().replace("-", "_").replace(" ", "_")
+    if cleaned in _VALID_QUADRANTS:
+        return cleaned
+    for keyword, quadrant in _QUADRANT_KEYWORDS.items():
+        if keyword in cleaned:
+            return quadrant
+    return "strategic_investment"
+
+
+def _normalize_driver(raw: str) -> str:
+    """Map any LLM driver string to a valid literal value."""
+    cleaned = raw.lower().strip().replace("-", "_").replace(" ", "_")
+    if cleaned in _VALID_DRIVERS:
+        return cleaned
+    for keyword, driver in _DRIVER_KEYWORDS.items():
+        if keyword in cleaned:
+            return driver
+    return "digital"
+
+
+# ---------------------------------------------------------------------------
+# Synthesizer Agent — models
 # ---------------------------------------------------------------------------
 
 
@@ -174,14 +231,12 @@ class RankedFinding(BaseModel):
     def _normalize(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
-        # Normalize priority_quadrant casing
         pq = data.get("priority_quadrant")
         if isinstance(pq, str):
-            data["priority_quadrant"] = pq.lower().strip().replace(" ", "_")
-        # Normalize dominant_driver casing
+            data["priority_quadrant"] = _normalize_quadrant(pq)
         dd = data.get("dominant_driver")
         if isinstance(dd, str):
-            data["dominant_driver"] = dd.lower().strip()
+            data["dominant_driver"] = _normalize_driver(dd)
         return data
 
 
@@ -201,6 +256,10 @@ class ThemeDriver(BaseModel):
         """LLM sometimes returns a plain string instead of a ThemeDriver dict."""
         if isinstance(data, str):
             return {"driver": data, "dimension": "digital"}
+        if isinstance(data, dict):
+            dim = data.get("dimension")
+            if isinstance(dim, str):
+                data["dimension"] = _normalize_driver(dim)
         return data
 
 
@@ -230,14 +289,12 @@ class ThemeSummary(BaseModel):
         # LLM uses "theme_name" instead of "theme"
         if "theme_name" in data and "theme" not in data:
             data["theme"] = data.pop("theme_name")
-        # Normalize priority_quadrant casing: "Strategic Investment" → "strategic_investment"
         pq = data.get("priority_quadrant")
         if isinstance(pq, str):
-            data["priority_quadrant"] = pq.lower().strip().replace(" ", "_")
-        # Normalize dominant_driver casing
+            data["priority_quadrant"] = _normalize_quadrant(pq)
         dd = data.get("dominant_driver")
         if isinstance(dd, str):
-            data["dominant_driver"] = dd.lower().strip()
+            data["dominant_driver"] = _normalize_driver(dd)
         return data
 
 
