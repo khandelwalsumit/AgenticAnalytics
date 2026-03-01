@@ -532,13 +532,13 @@ async def on_chat_start():
 async def set_starters():
     return [
         cl.Starter(
-            label="ATT Promotion Issues",
+            label="ATT X Promotion Issues",
             message="Can you check what promotion related issues ATT customers are facing?",
             icon="https://img.icons8.com/fluency/96/discount.png",
         ),
         cl.Starter(
-            label="Rewards Friction Analysis",
-            message="Analyze the key friction points ATT card customers face regarding rewards redemption",
+            label="ATT X Rewards Friction Analysis",
+            message="Analyze the key friction points ATT card customers face regarding rewards realted activities",
             icon="https://img.icons8.com/fluency/96/gift.png",
         ),
         cl.Starter(

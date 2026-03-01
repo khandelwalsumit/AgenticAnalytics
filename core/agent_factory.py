@@ -11,17 +11,18 @@ Two agent creation paths:
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
 import yaml
 from langchain_core.messages import AIMessage, SystemMessage
-from langgraph.prebuilt import create_react_agent
+from langchain.agents import create_agent
 
 from agents.schemas import STRUCTURED_OUTPUT_SCHEMAS
 from config import AGENTS_DIR
-from core.llm import get_llm
+from core.llm import VertexAILLM
 
 
 # ------------------------------------------------------------------
@@ -105,7 +106,7 @@ class AgentFactory:
         tool_registry: dict[str, Callable] | None = None,
     ):
         self.definitions_dir = Path(definitions_dir)
-        self.llm_factory = llm_factory or get_llm
+        self.llm_factory = llm_factory or VertexAILLM
         self.tool_registry = tool_registry or {}
         self._cache: dict[str, AgentSkill] = {}
 
@@ -159,10 +160,10 @@ class AgentFactory:
 
             model = _select_model
 
-        return create_react_agent(
+        return create_agent(
             model=model,
             tools=tools,
-            prompt=SystemMessage(content=prompt),
+            system_prompt=SystemMessage(content=prompt),
         )
 
 
@@ -187,6 +188,9 @@ class StructuredOutputAgent:
         messages = input.get("messages", [])
         full_messages = [SystemMessage(content=self.system_prompt)] + list(messages)
         result_obj = await self.chain.ainvoke(full_messages)
+        # Wrapper returns AIMessage(content=JSON) instead of Pydantic instance — parse it.
+        if not isinstance(result_obj, self.output_schema):
+            result_obj = self.output_schema(**json.loads(result_obj.content))
         return {
             "structured_output": result_obj,
             "messages": [AIMessage(content=result_obj.model_dump_json(indent=2))],

@@ -13,7 +13,7 @@ from config import (
 )
 
 
-def get_llm(
+def VertexAILLM(
     model: str = DEFAULT_MODEL,
     temperature: float = DEFAULT_TEMPERATURE,
     top_p: float = DEFAULT_TOP_P,

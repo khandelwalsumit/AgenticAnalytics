@@ -8,16 +8,16 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
-from langgraph.prebuilt import create_react_agent
+from langchain.agents import create_agent
 from pydantic import BaseModel, Field
 
-from core.llm import get_llm
+from core.llm import VertexAILLM
 
 SEP = "\n" + "=" * 60 + "\n"
 
 # ── 1. Vanilla LLM call ────────────────────────────────────────────
 print(SEP + "TEST 1 — vanilla llm.invoke()")
-llm = get_llm()
+llm = VertexAILLM()
 result1 = llm.invoke([HumanMessage(content="Say one sentence like Rick from Rick and Morty.")])
 print(f"  type : {type(result1)}")
 print(f"  value: {result1}")
@@ -37,12 +37,12 @@ print(f"  type : {type(result2)}")
 print(f"  value: {result2}")
 print(f"  .quote: {result2.quote!r}")
 
-# ── 3. create_react_agent — no tools, just invoke ─────────────────
-print(SEP + "TEST 3 — create_react_agent (no tools)")
-agent3 = create_react_agent(
-    model=get_llm(),
+# ── 3. create_agent — no tools, just invoke ─────────────────
+print(SEP + "TEST 3 — create_agent (no tools)")
+agent3 = create_agent(
+    model=VertexAILLM(),
     tools=[],
-    prompt=SystemMessage(content="You are Rick Sanchez. Keep replies to one sentence."),
+    system_prompt=SystemMessage(content="You are Rick Sanchez. Keep replies to one sentence."),
 )
 result3 = agent3.invoke({"messages": [HumanMessage(content="Hi.")]})
 print(f"  type           : {type(result3)}")
@@ -53,16 +53,16 @@ print(f"  last msg       : {last_msg3}")
 print(f"  last .content type : {type(last_msg3.content)}")
 print(f"  last .content value: {last_msg3.content!r}")
 
-# ── 4. create_react_agent — with a calc tool ──────────────────────
-print(SEP + "TEST 4 — create_react_agent (with calc tool)")
+# ── 4. create_agent — with a calc tool ──────────────────────
+print(SEP + "TEST 4 — create_agent (with calc tool)")
 
 @tool
 def multiply(a: float, b: float) -> float:
     """Multiply two numbers and return the result."""
     return a * b
 
-agent4 = create_react_agent(
-    model=get_llm(),
+agent4 = create_agent(
+    model=VertexAILLM(),
     tools=[multiply],
     prompt=SystemMessage(content="You are Rick Sanchez. Use the multiply tool when asked to calculate."),
 )

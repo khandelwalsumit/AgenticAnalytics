@@ -27,10 +27,14 @@ THREAD_STATES_DIR = DATA_CACHE_DIR / "states"
 
 # Input dataset — must be a Parquet file. Never copied; read in-place every run.
 # Override via DEFAULT_PARQUET_PATH env var or change this line directly.
-DEFAULT_PARQUET_PATH = DATA_INPUT_DIR / "dummy_data.parquet"
+DEFAULT_PARQUET_PATH = DATA_INPUT_DIR / "adf.parquet"
 
 # -- Google AI Studio / Gemini -------------------------------------------------------
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+# USERNAME = os.getenv("USERNAME")
+# R2D2_ENDPOINT = os.getenv("R2D2_ENDPOINT")
+# R2D2_PROJECT = os.getenv("R2D2_PROJECT")
+# BACKOFF_MAX_DELAY = 0  # False or 0 disables backoff and retries, which may be desirable in some cases to fail fast on errors. Adjust as needed.
 
 # -- Model defaults -----------------------------------------------------------
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "gemini-2.5-flash")
@@ -72,14 +76,17 @@ TAIL_BUCKET_ENABLED = True
 # Adding a new key here (e.g. "customer_type": ["premium", "regular"])
 # automatically makes it available for filtering without any other code changes.
 LLM_ANALYSIS_CONTEXT: dict[str, list[str]] = {
-    "product": ["ATT", "Rewards", "AAdvantage", "Cash", "Costco"],
+    "product": ["Costco", "Rewards", "AAdvantage", "Cash", "others","Non Rewards","ATT"],
     "call_reason": [
         "Payments & Transfers",
-        "Fraud & Disputes",
-        "Authentication & Access",
-        "Rewards & Loyalty",
+        "Dispute & Fraud",
+        "Products & Offers",
+        "Sing On",
         "Profile & Settings",
+        "Replace Card",
         "Transactions & Statements",
+        "Other",
+        "Rewards"
     ],
 }
 
@@ -139,11 +146,14 @@ ALL_DOMAIN_SKILLS = [
     "promotions_offers",
     "general_inquiry",
 ]
-CALL_REASONS_TO_SKILLS = {'Payments & Transfers': ['payment_transfer','fraud_dispute'], 
- 'Fraud & Disputes': ['fraud_dispute'], 
- 'Authentication & Access': ['authentication'], 
- 'Rewards & Loyalty': ['rewards'], 
- 'Profile & Settings': ['profile_settings','authentication'], 
- 'Transactions & Statements': ['transaction_statement'],
- 'Promotion & Offers': ['promotions_offers'],
- 'Other': ['general_inquiry']}
+CALL_REASONS_TO_SKILLS = {
+        "Payments & Transfers":["payment_transfer","fraud_dispute"],
+        "Dispute & Fraud":["fraud_dispute","payment_transfer"],
+        "Products & Offers":["promotions_offers"],
+        "Sing On":["authentication"],
+        "Profile & Settings":["profile_settings","authentication"],
+        "Replace Card":["profile_settings"],
+        "Transactions & Statements":["transaction_statement"],
+        "Other":["general_inquiry"],
+        "Rewards":["rewards","promotions_offers"]
+}

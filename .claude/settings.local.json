@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(cmd:*)",
-      "Bash(source:*)"
+      "Bash(source:*)",
+      "Read(//c/Users/SK92484/Documents/Projects/AI Playground/**)"
     ]
   }
 }
