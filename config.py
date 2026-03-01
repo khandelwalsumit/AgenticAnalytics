@@ -145,6 +145,7 @@ ALL_DOMAIN_SKILLS = [
     "rewards",
     "promotions_offers",
     "general_inquiry",
+    "card_replacement",
 ]
 CALL_REASONS_TO_SKILLS = {
         "Payments & Transfers":["payment_transfer","fraud_dispute"],
@@ -152,7 +153,7 @@ CALL_REASONS_TO_SKILLS = {
         "Products & Offers":["promotions_offers"],
         "Sing On":["authentication"],
         "Profile & Settings":["profile_settings","authentication"],
-        "Replace Card":["profile_settings"],
+        "Replace Card":["card_replacement","profile_settings"],
         "Transactions & Statements":["transaction_statement"],
         "Other":["general_inquiry"],
         "Rewards":["rewards","promotions_offers"]

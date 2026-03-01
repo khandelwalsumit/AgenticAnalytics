@@ -32,13 +32,10 @@ def _safe_thread_id(raw: str) -> str:
 
 def _get_thread_id(store: DataStore) -> str:
     """Resolve thread_id from Chainlit session when available."""
-    try:
-        import chainlit as cl
-        thread_id = cl.user_session.get("thread_id")
-        if thread_id:
-            return _safe_thread_id(str(thread_id))
-    except Exception:
-        pass
+    import chainlit as cl
+    thread_id = cl.user_session.get("thread_id")
+    if thread_id:
+        return _safe_thread_id(str(thread_id))
     return _safe_thread_id(store.session_id)
 
 
@@ -163,26 +160,17 @@ def export_to_pptx(
 
     if slide_plan_json:
         # Template-based mode — structured slide plan from Narrative Agent
-        try:
-            slide_plan = json.loads(slide_plan_json)
-        except json.JSONDecodeError as e:
-            return json.dumps({"error": f"Invalid slide_plan_json: {e}"})
+        slide_plan = json.loads(slide_plan_json)
 
         chart_paths: dict[str, str] = {}
         if chart_paths_json:
-            try:
-                chart_paths = json.loads(chart_paths_json)
-            except json.JSONDecodeError:
-                chart_paths = {}
+            chart_paths = json.loads(chart_paths_json)
 
         template_path = PPTX_TEMPLATE_PATH if Path(PPTX_TEMPLATE_PATH).exists() else ""
         generate_pptx_from_slides(slide_plan, chart_paths, str(output_path), template_path)
     else:
         # Legacy fallback — convert markdown report to PPTX
-        try:
-            markdown_content = store.get_text(report_key)
-        except KeyError:
-            return json.dumps({"error": f"Report '{report_key}' not found. Generate a markdown report first."})
+        markdown_content = store.get_text(report_key)
         markdown_to_pptx(markdown_content, str(output_path))
 
     return json.dumps({"pptx_path": str(output_path)})

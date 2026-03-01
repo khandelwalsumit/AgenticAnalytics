@@ -67,15 +67,12 @@ class FileDataLayer(BaseDataLayer):
     async def create_user(self, user: User) -> Optional[PersistedUser]:
         path = _USERS_DIR / f"{user.identifier}.json"
         if path.exists():
-            try:
-                existing = json.loads(path.read_text(encoding="utf-8"))
-                metadata = user.metadata or existing.get("metadata", {})
-                if metadata != existing.get("metadata", {}):
-                    existing["metadata"] = metadata
-                    path.write_text(json.dumps(existing, default=str), encoding="utf-8")
-                return PersistedUser(**existing)
-            except (json.JSONDecodeError, OSError, TypeError, ValueError):
-                pass
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            metadata = user.metadata or existing.get("metadata", {})
+            if metadata != existing.get("metadata", {}):
+                existing["metadata"] = metadata
+                path.write_text(json.dumps(existing, default=str), encoding="utf-8")
+            return PersistedUser(**existing)
 
         persisted = PersistedUser(
             id=str(uuid.uuid4()),

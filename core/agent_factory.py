@@ -145,23 +145,8 @@ class AgentFactory:
         llm = self._create_llm(name)
         tools = self._resolve_tools(config.tools)
 
-        # Some ReAct agents occasionally return empty AI messages without any tool call.
-        # Formatting moved to structured output, so keep this empty unless a ReAct
-        # agent is explicitly moved back to mandatory tool-first behavior.
-        force_initial_tool_call_for: set[str] = set()
-        model: Any = llm
-        if name in force_initial_tool_call_for and tools:
-            def _select_model(state: dict[str, Any], runtime: Any) -> Any:  # noqa: ARG001
-                messages = state.get("messages", []) if isinstance(state, dict) else []
-                has_tool_result = any(getattr(m, "type", "") == "tool" for m in messages)
-                if not has_tool_result:
-                    return llm.bind_tools(tools, tool_choice="required")
-                return llm.bind_tools(tools)
-
-            model = _select_model
-
         return create_agent(
-            model=model,
+            model=llm,
             tools=tools,
             system_prompt=SystemMessage(content=prompt),
         )

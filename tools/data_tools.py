@@ -183,6 +183,12 @@ def bucket_data(group_by: str = "", focus: str = "") -> str:
     """
     store = _get_store()
 
+    if "filter_data" not in store.list_keys():
+        return json.dumps({
+            "error": "No filtered data available. You MUST call filter_data before bucket_data.",
+            "hint": "Call filter_data with appropriate filters first, then retry bucket_data.",
+        })
+
     df = store.get_dataframe("filter_data")
 
     # Determine which column to group by

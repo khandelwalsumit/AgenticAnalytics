@@ -483,8 +483,8 @@ section("11. Pydantic Schemas")
 from agents.schemas import (
     CritiqueOutput,
     DataAnalystOutput,
-    FormattingDeckOutput,
     PlannerOutput,
+    SectionBlueprintOutput,
     STRUCTURED_OUTPUT_SCHEMAS,
     SupervisorOutput,
     SynthesizerOutput,
@@ -519,22 +519,19 @@ except Exception as exc:
     fail("PlannerOutput", str(exc))
 
 try:
-    f = FormattingDeckOutput(
-        deck_title="Test Deck",
-        deck_subtitle="",
-        total_slides=1,
-        qa_enhancements_applied=[],
+    sb = SectionBlueprintOutput(
+        section_key="exec_summary",
         slides=[{
             "slide_number": 1,
-            "section_type": "executive_summary",
-            "layout": "title_slide",
+            "slide_role": "hook_and_quick_wins",
+            "layout_index": 1,
             "title": "Test Slide",
-            "elements": [{"type": "paragraph", "text": "hello"}],
+            "elements": [{"type": "point_description", "text": "hello"}],
         }],
     )
-    ok(f"FormattingDeckOutput: {f.total_slides} slide")
+    ok(f"SectionBlueprintOutput: {len(sb.slides)} slide")
 except Exception as exc:
-    fail("FormattingDeckOutput", str(exc))
+    fail("SectionBlueprintOutput", str(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -608,9 +605,9 @@ if not any("unicode" in e for e in _errors):
 # 14. Node factory & extra context builder
 # ---------------------------------------------------------------------------
 
-section("14. Node Factory & Extra Context")
+section("14. Extra Context Builder")
 
-from agents.nodes import _build_extra_context, make_agent_node
+from agents.nodes import _build_extra_context
 
 # Verify extra context for each agent type
 test_state: dict[str, Any] = {
@@ -674,14 +671,6 @@ else:
     else:
         ok("data_analyst context column-reference check skipped (no dataset schema)")
 
-# Verify node factory creates callable nodes
-for agent_name in ["supervisor", "planner", "data_analyst"]:
-    try:
-        node = make_agent_node(factory, agent_name, skill_loader=skill_loader)
-        assert callable(node), "node is not callable"
-        ok(f"make_agent_node('{agent_name}')")
-    except Exception as exc:
-        fail(f"make_agent_node('{agent_name}')", str(exc))
 
 
 # ---------------------------------------------------------------------------

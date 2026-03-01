@@ -302,14 +302,8 @@ def execute_chart_code(code: str, output_filename: str) -> str:
     import matplotlib.pyplot as plt
     import numpy as np
 
-    thread_id = "unknown_thread"
-    try:
-        import chainlit as cl
-        raw_thread_id = cl.user_session.get("thread_id")
-        if raw_thread_id:
-            thread_id = str(raw_thread_id)
-    except Exception:
-        thread_id = "unknown_thread"
+    import chainlit as cl
+    thread_id = str(cl.user_session.get("thread_id") or "unknown_thread")
 
     safe_thread_id = "".join(ch if (ch.isalnum() or ch in ("-", "_")) else "_" for ch in thread_id)[:80]
     filename = Path(str(output_filename or "chart.png")).name

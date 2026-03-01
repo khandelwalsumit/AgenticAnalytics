@@ -47,7 +47,6 @@ from agents.nodes import (
     AGENT_STATE_FIELDS,
 )
 from agents.schemas import (
-    FormattingDeckOutput,
     PlannerOutput,
     SectionBlueprintOutput,
     SupervisorOutput,

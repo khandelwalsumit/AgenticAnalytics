@@ -86,24 +86,12 @@ def _safe_thread_id(raw: str) -> str:
 
 
 def _thread_tmp_dir() -> Path:
-    thread_id = "unknown_thread"
-    try:
-        raw_thread_id = cl.user_session.get("thread_id")
-        if raw_thread_id:
-            thread_id = str(raw_thread_id)
-    except Exception:
-        thread_id = "unknown_thread"
+    thread_id = str(cl.user_session.get("thread_id") or "unknown_thread")
     return Path(DATA_CACHE_DIR) / _safe_thread_id(thread_id)
 
 
 def _thread_output_dir() -> Path:
-    thread_id = "unknown_thread"
-    try:
-        raw_thread_id = cl.user_session.get("thread_id")
-        if raw_thread_id:
-            thread_id = str(raw_thread_id)
-    except Exception:
-        thread_id = "unknown_thread"
+    thread_id = str(cl.user_session.get("thread_id") or "unknown_thread")
     return Path(DATA_OUTPUT_DIR) / _safe_thread_id(thread_id)
 
 
@@ -172,12 +160,9 @@ def _build_deterministic_dataviz_output(state: dict[str, Any]) -> dict[str, Any]
         import chainlit as cl
         data_store = cl.user_session.get("data_store")
         if data_store:
-            try:
                 loaded = data_store.get_text(state["synthesis_output_file"])
                 if loaded:
                     synthesis = json.loads(loaded)
-            except Exception as e:
-                logger.error("Failed to rehydrate synthesis_output_file: %s", e)
 
     themes_raw = synthesis.get("themes", []) if isinstance(synthesis, dict) else []
 
@@ -730,14 +715,11 @@ def _run_artifact_writer_node(
     report_key = "report_markdown"
     data_store = cl.user_session.get("data_store")
     if data_store is not None:
-        try:
-            report_key = data_store.store_text(
-                "report_markdown",
-                narrative_markdown,
-                {"agent": "narrative_agent", "type": "report_markdown"},
-            )
-        except Exception:
-            report_key = "report_markdown"
+        report_key = data_store.store_text(
+            "report_markdown",
+            narrative_markdown,
+            {"agent": "narrative_agent", "type": "report_markdown"},
+        )
 
     ppt_tool = TOOL_REGISTRY["export_to_pptx"]
     ppt_raw = ppt_tool.invoke({
@@ -1510,11 +1492,8 @@ def _run_section_artifact_writer(
     chart_paths = _build_chart_paths_map(dataviz_json)
 
     # 4. Load template catalog for visual hierarchy
-    try:
-        catalog_path = Path(__file__).resolve().parent.parent / "data" / "input" / "template_catalog.json"
-        catalog = json.loads(catalog_path.read_text(encoding="utf-8")) if catalog_path.exists() else {}
-    except Exception:
-        catalog = {}
+    catalog_path = Path(__file__).resolve().parent.parent / "data" / "input" / "template_catalog.json"
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8")) if catalog_path.exists() else {}
 
     visual_hierarchy = catalog.get("visual_hierarchy")
 
@@ -1527,14 +1506,11 @@ def _run_section_artifact_writer(
     report_key = "report_markdown"
     data_store = cl.user_session.get("data_store")
     if data_store is not None:
-        try:
-            report_key = data_store.store_text(
-                "report_markdown",
-                narrative_markdown,
-                {"agent": "narrative_agent", "type": "report_markdown"},
-            )
-        except Exception:
-            report_key = "report_markdown"
+        report_key = data_store.store_text(
+            "report_markdown",
+            narrative_markdown,
+            {"agent": "narrative_agent", "type": "report_markdown"},
+        )
 
     # 6. Build PPTX from section blueprints using new builder
     from config import PPTX_TEMPLATE_PATH

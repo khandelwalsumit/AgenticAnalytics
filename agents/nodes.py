@@ -21,7 +21,6 @@ from langchain_core.messages import AIMessage
 
 from agents.schemas import (
     CritiqueOutput,
-    FormattingDeckOutput,
     PlannerOutput,
     STRUCTURED_OUTPUT_SCHEMAS,
     SupervisorOutput,
@@ -434,11 +433,7 @@ async def _run_react_node(
         agent_name, step_id, len(state["messages"]),
         state.get("plan_steps_completed", 0), state.get("plan_steps_total", 0),
     )
-    base_prompt_chars = 0
-    try:
-        base_prompt_chars = len(agent_factory.parse_agent_md(agent_name).system_prompt)
-    except Exception:
-        base_prompt_chars = 0
+    base_prompt_chars = len(agent_factory.parse_agent_md(agent_name).system_prompt)
     _log_llm_input_signature(
         agent_name,
         state,
@@ -497,189 +492,6 @@ def _agent_output_field(agent_name: str, new_msgs: list, summary: str) -> dict[s
     return {"output": summary, "full_response": full_response, "agent": agent_name}
 
 
-# ------------------------------------------------------------------
-# DEAD CODE — kept temporarily; will be removed after graph.py migration
-# ------------------------------------------------------------------
-
-
-def make_agent_node(
-    agent_factory: AgentFactory,
-    agent_name: str,
-    skill_loader: SkillLoader | None = None,
-):
-    """Create an async node function for *agent_name*.
-
-    Structured-output agents (supervisor, planner, data_analyst, synthesizer,
-    critique) have their LLM chain bound **once** here at graph-build time.
-    ReAct agents are built per-invocation via ``agent_factory.make_agent``.
-    """
-    from core.agent_factory import StructuredOutputAgent
-
-    # -- Eager chain creation for structured agents ------------------------
-    is_structured = agent_name in STRUCTURED_OUTPUT_SCHEMAS
-    structured_chain = None
-    output_schema = None
-
-    if is_structured:
-        structured_chain, output_schema = agent_factory.create_structured_chain(agent_name)
-        logger.info("Pre-created structured chain for [%s] -> %s", agent_name, output_schema.__name__)
-
-    # -- Closure: the actual node function ---------------------------------
-    async def node_fn(state: AnalyticsState) -> dict[str, Any]:
-        start_ms = int(time.time() * 1000)
-        step_id = str(uuid.uuid4())[:8]
-        logger.info(
-            "---- Node [%s] START (step=%s) | input msgs=%d | plan=%d/%d | phase=%s",
-            agent_name, step_id, len(state["messages"]),
-            state.get("plan_steps_completed", 0), state.get("plan_steps_total", 0),
-            state.get("phase", "?"),
-        )
-        # Log key state fields for context
-        logger.debug(
-            "  State context: next_agent=%s decision=%s filters=%s objective=%s",
-            state.get("next_agent", ""), state.get("supervisor_decision", ""),
-            state.get("filters_applied", {}), state.get("analysis_objective", "")[:80] if state.get("analysis_objective") else "",
-        )
-
-        # -- Build dynamic context ----------------------------------------
-        extra_context = _build_extra_context(agent_name, state, skill_loader)
-
-        config = agent_factory.parse_agent_md(agent_name)
-        system_prompt = config.system_prompt
-        if extra_context:
-            system_prompt += f"\n\n{extra_context}"
-
-        logger.info(
-            "  Agent [%s] system prompt=%d chars, input msgs=%d, mode=%s",
-            agent_name, len(system_prompt), len(state["messages"]),
-            "structured" if (is_structured and structured_chain) else "react",
-        )
-
-        # -- Invoke agent --------------------------------------------------
-        if is_structured and structured_chain is not None:
-            agent = StructuredOutputAgent(
-                name=agent_name,
-                system_prompt=system_prompt,
-                chain=structured_chain,
-                output_schema=output_schema,
-            )
-            result = await agent.ainvoke({"messages": state["messages"]})
-        else:
-            agent = agent_factory.make_agent(agent_name, extra_context=extra_context)
-            result = await agent.ainvoke({"messages": state["messages"]})
-
-        elapsed = int(time.time() * 1000) - start_ms
-        all_msgs = result["messages"]
-
-        # Filter to only NEW messages (exclude input messages already in state)
-        input_msg_ids = {
-            m.id for m in state["messages"]
-            if hasattr(m, "id") and m.id
-        }
-        new_msgs = [
-            m for m in all_msgs
-            if not (hasattr(m, "id") and m.id and m.id in input_msg_ids)
-        ]
-
-        last_msg = new_msgs[-1] if new_msgs else (all_msgs[-1] if all_msgs else None)
-        summary = _trunc(_text(last_msg.content), 200) if last_msg and hasattr(last_msg, "content") else ""
-
-        logger.info(
-            "  Agent [%s] returned %d msgs total, %d new | last_msg type=%s",
-            agent_name, len(all_msgs), len(new_msgs),
-            getattr(last_msg, "type", "?") if last_msg else "none",
-        )
-        # Log new message types and content previews
-        for i, m in enumerate(new_msgs):
-            mtype = getattr(m, "type", "?")
-            mcontent = _text(m.content)[:150] if hasattr(m, "content") and m.content else ""
-            has_tc = bool(hasattr(m, "tool_calls") and m.tool_calls)
-            logger.debug(
-                "    new_msg[%d] type=%s tool_calls=%s content=%s",
-                i, mtype, has_tc, mcontent if mcontent else "(empty)",
-            )
-
-        # -- Build tools_used list (from new messages only) ----------------
-        tools_used = [
-            tc.get("name", "?")
-            for m in new_msgs if hasattr(m, "tool_calls")
-            for tc in m.tool_calls
-        ]
-
-        # -- Base updates --------------------------------------------------
-        updates: dict[str, Any] = {
-            "messages": new_msgs,
-            "execution_trace": state.get("execution_trace", []) + [ExecutionTrace(
-                step_id=step_id,
-                agent=agent_name,
-                input_summary=state["messages"][-1].content[:200] if state["messages"] else "",
-                output_summary=summary,
-                tools_used=tools_used,
-                latency_ms=elapsed,
-                success=True,
-            )],
-            "reasoning": [{
-                "step_name": agent_name.replace("_", " ").title(),
-                "step_text": summary,
-                "agent": agent_name,
-                **({"verbose": _verbose_details(new_msgs)} if VERBOSE else {}),
-            }],
-            **_clear_checkpoint_fields(),
-        }
-
-        # Node I/O trace
-        updates.update(_trace_io(state, agent_name, {
-            "messages_count": len(state.get("messages", [])),
-            "plan_steps_completed": state.get("plan_steps_completed", 0),
-        }, {"output_summary": summary, "tools_used": tools_used, "elapsed_ms": elapsed}))
-
-        # Dedicated state field (friction/reporting agents)
-        if agent_name in AGENT_STATE_FIELDS:
-            # Collect full output from ALL new AI messages (not just last)
-            full_output = "\n\n".join(
-                _text(m.content) for m in new_msgs
-                if hasattr(m, "type") and m.type == "ai" and _text(m.content)
-            )
-            updates[AGENT_STATE_FIELDS[agent_name]] = {
-                "output": summary,
-                "full_response": full_output,
-                "agent": agent_name,
-            }
-
-        # -- Structured output -> state mapping -----------------------------
-        structured = result.get("structured_output")
-        plan_agents = {t.get("agent", "") for t in state.get("plan_tasks", [])}
-
-        _apply_structured_updates(agent_name, structured, last_msg, state, updates)
-
-        # -- Plan progress (only for agents that ARE in the plan) -----------
-        if agent_name in plan_agents:
-            _advance_plan(agent_name, state, updates)
-
-        # Log state fields being written
-        written_fields = [k for k in updates if updates[k] and k not in ("messages", "reasoning", "execution_trace")]
-        logger.info(
-            "---- Node [%s] DONE %dms | tools=%s | new_msgs=%d | state_writes=%s",
-            agent_name, elapsed, ", ".join(tools_used) or "none",
-            len(updates.get("messages", [])), ", ".join(written_fields),
-        )
-        if agent_name in AGENT_STATE_FIELDS:
-            field = AGENT_STATE_FIELDS[agent_name]
-            val = updates.get(field, {})
-            logger.info(
-                "  -> %s.output = %s",
-                field, _trunc(str(val.get("output", "")), 200) if isinstance(val, dict) else "(not dict)",
-            )
-        if updates.get("next_agent"):
-            logger.info("  -> next_agent=%s decision=%s", updates.get("next_agent"), updates.get("supervisor_decision", ""))
-        if updates.get("plan_tasks"):
-            statuses = {t.get("status", "?") for t in updates["plan_tasks"]}
-            logger.info("  -> plan_tasks=%d statuses=%s", len(updates["plan_tasks"]), statuses)
-        return updates
-
-    node_fn.__name__ = f"{agent_name}_node"
-    return node_fn
-
 
 # ------------------------------------------------------------------
 # Extra context builders
@@ -725,14 +537,11 @@ def _write_versioned_md(base_name: str, content: str, metadata: dict) -> str:
 
     Returns the absolute file path (use as completion flag — if it exists, step is done).
     """
-    try:
-        import chainlit as cl
-        data_store = cl.user_session.get("data_store")
-        if data_store:
-            _key, path = data_store.store_versioned_md(base_name, content, metadata)
-            return path
-    except Exception as e:
-        logger.warning("_write_versioned_md failed for %s: %s", base_name, e)
+    import chainlit as cl
+    data_store = cl.user_session.get("data_store")
+    if data_store:
+        _key, path = data_store.store_versioned_md(base_name, content, metadata)
+        return path
     return ""
 
 
@@ -854,12 +663,9 @@ def _build_extra_context(
             import chainlit as cl
             data_store = cl.user_session.get("data_store")
             if data_store:
-                try:
-                    loaded = data_store.get_text(state["synthesis_output_file"])
-                    if loaded:
-                        synthesis = json.loads(loaded)
-                except Exception as e:
-                    logger.error("Failed to rehydrate synthesis_output_file: %s", e)
+                loaded = data_store.get_text(state["synthesis_output_file"])
+                if loaded:
+                    synthesis = json.loads(loaded)
         findings = state.get("findings", [])
         retry_ctx = state.get("report_retry_context", {})
         def _clip(value: Any, limit: int = 240) -> str:
@@ -1066,182 +872,6 @@ def _build_extra_context(
     return ""
 
 
-# ------------------------------------------------------------------
-# Structured output -> state mapping
-# ------------------------------------------------------------------
-
-
-def _apply_structured_updates(
-    agent_name: str,
-    structured: Any,
-    last_msg: Any,
-    state: AnalyticsState,
-    updates: dict[str, Any],
-) -> None:
-    """Map structured/fallback output to state updates. Mutates *updates*."""
-
-    # === SUPERVISOR ===
-    if agent_name == "supervisor":
-        if isinstance(structured, SupervisorOutput):
-            _apply_supervisor(structured, state, updates)
-        elif last_msg and hasattr(last_msg, "content"):
-            _apply_supervisor_fallback(_text(last_msg.content), state, updates)
-
-    # === PLANNER ===
-    elif agent_name == "planner":
-        if isinstance(structured, PlannerOutput):
-            planner_tasks = [t.model_dump() for t in structured.plan_tasks]
-            # Prepend completed data extraction step if it was in the preliminary plan
-            existing = state.get("plan_tasks", [])
-            done_steps = [t for t in existing if t.get("status") == "done"]
-            final_tasks = done_steps + planner_tasks
-            updates.update({
-                "plan_tasks": final_tasks,
-                "plan_steps_total": len(final_tasks),
-                "plan_steps_completed": len(done_steps),
-                "analysis_objective": structured.analysis_objective,
-                "reasoning": [{"step_name": "Planner", "step_text": structured.reasoning}],
-            })
-            logger.info("Planner: %d tasks (%d done + %d new), objective=%r",
-                         len(final_tasks), len(done_steps), len(planner_tasks),
-                         structured.analysis_objective[:80])
-        elif last_msg and hasattr(last_msg, "content"):
-            data = _parse_json(_text(last_msg.content))
-            if data.get("plan_tasks"):
-                planner_tasks = data["plan_tasks"]
-                existing = state.get("plan_tasks", [])
-                done_steps = [t for t in existing if t.get("status") == "done"]
-                final_tasks = done_steps + planner_tasks
-                updates.update({
-                    "plan_tasks": final_tasks,
-                    "plan_steps_total": len(final_tasks),
-                    "plan_steps_completed": len(done_steps),
-                })
-                if data.get("analysis_objective"):
-                    updates["analysis_objective"] = data["analysis_objective"]
-
-    # === DATA ANALYST (ReAct agent -- extracts state from tool results) ===
-    elif agent_name == "data_analyst":
-        # FIRST: extract filters/themes from tool result messages
-        # (must happen BEFORE we overwrite updates["messages"] below)
-        _extract_data_analyst_state(state, updates)
-
-        # Parse the last AI message for JSON summary (fallback)
-        da_data = {}
-        if last_msg and hasattr(last_msg, "content"):
-            da_data = _parse_json(_text(last_msg.content))
-
-        da_decision = da_data.get("decision", "success")
-        da_response = da_data.get("response", _text(last_msg.content) if last_msg else "")
-        da_confidence = da_data.get("confidence", 80)
-
-        # Ensure da_response is a string (tool results can be dicts)
-        if not isinstance(da_response, str):
-            da_response = json.dumps(da_response, indent=2, default=str)
-
-        updates["reasoning"] = [{"step_name": "Data Analyst", "step_text": da_response}]
-        if da_response:
-            updates["messages"] = [AIMessage(content=da_response)]
-
-        logger.info("Data Analyst: decision=%s, confidence=%s", da_decision, da_confidence)
-
-    # === SYNTHESIZER ===
-    elif agent_name == "synthesizer_agent":
-        if isinstance(structured, SynthesizerOutput):
-            narrative = structured.summary.executive_narrative
-            # Store full synthesis: summary + themes + findings for downstream agents
-            synthesis_data = structured.summary.model_dump()
-            synthesis_data["decision"] = structured.decision
-            synthesis_data["confidence"] = structured.confidence
-            synthesis_data["reasoning"] = structured.reasoning
-            if structured.themes:
-                synthesis_data["themes"] = [t.model_dump() for t in structured.themes]
-            if structured.findings:
-                synthesis_data["findings"] = [f.model_dump() for f in structured.findings]
-            updates.update({
-                "synthesis_result": synthesis_data,
-                "findings": [f.model_dump() for f in structured.findings],
-                "reasoning": [{"step_name": "Synthesizer Agent", "step_text": narrative}],
-            })
-            if narrative:
-                updates["messages"] = [AIMessage(content=narrative)]
-            logger.info("Synthesizer: %d findings, %d themes, confidence=%d",
-                         len(structured.findings), len(structured.themes), structured.confidence)
-        elif last_msg and hasattr(last_msg, "content"):
-            # ReAct fallback: parse JSON from last message
-            data = _parse_json(_text(last_msg.content))
-            # Store full synthesis data: summary + themes + findings
-            synthesis_data: dict[str, Any] = {}
-            if data.get("summary"):
-                synthesis_data = dict(data["summary"])
-            if "decision" in data:
-                synthesis_data["decision"] = data.get("decision")
-            if "confidence" in data:
-                synthesis_data["confidence"] = data.get("confidence")
-            if "reasoning" in data:
-                synthesis_data["reasoning"] = data.get("reasoning")
-            if data.get("themes"):
-                synthesis_data["themes"] = data["themes"]
-            if data.get("findings"):
-                synthesis_data["findings"] = data["findings"]
-                updates["findings"] = data["findings"]
-            if synthesis_data:
-                updates["synthesis_result"] = synthesis_data
-            narrative = data.get("summary", {}).get("executive_narrative", "")
-            if not narrative:
-                # Fallback: use raw text if no executive_narrative found
-                raw = _text(last_msg.content)
-                narrative = raw if not raw.startswith("{") else "Synthesis complete."
-            updates["reasoning"] = [{"step_name": "Synthesizer Agent", "step_text": narrative}]
-            if narrative:
-                updates["messages"] = [AIMessage(content=narrative)]
-            logger.info("Synthesizer (fallback): %d findings, %d themes, synthesis_keys=%s",
-                         len(data.get("findings", [])), len(data.get("themes", [])),
-                         list(synthesis_data.keys()))
-
-    # === CRITIQUE ===
-    elif agent_name == "critique":
-        if isinstance(structured, CritiqueOutput):
-            text = f"Grade: {structured.grade} | Score: {structured.quality_score:.2f} | Decision: {structured.decision}\n{structured.summary}"
-            updates.update({
-                "critique_feedback": structured.model_dump(),
-                "quality_score": structured.quality_score,
-                "reasoning": [{"step_name": "Critique Agent", "step_text": text}],
-                "messages": [AIMessage(content=text)],
-            })
-            logger.info("Critique: grade=%s, score=%.2f, issues=%d", structured.grade, structured.quality_score, len(structured.issues))
-        elif last_msg and hasattr(last_msg, "content"):
-            # ReAct fallback: parse JSON from last message
-            data = _parse_json(_text(last_msg.content))
-            quality_score = data.get("quality_score", data.get("overall_quality_score", 0.0))
-            grade = data.get("grade", "C")
-            decision = data.get("decision", "needs_revision")
-            summary_text = data.get("summary", _text(last_msg.content))
-            text = f"Grade: {grade} | Score: {quality_score:.2f} | Decision: {decision}\n{summary_text}"
-            updates.update({
-                "critique_feedback": data,
-                "quality_score": float(quality_score),
-                "reasoning": [{"step_name": "Critique Agent", "step_text": text}],
-                "messages": [AIMessage(content=text)],
-            })
-            logger.info("Critique (fallback): grade=%s, score=%.2f", grade, quality_score)
-
-    # === FORMATTING (structured deck blueprint) ===
-    elif agent_name == "formatting_agent":
-        if isinstance(structured, FormattingDeckOutput):
-            slide_count = len(structured.slides)
-            qa_count = len(structured.qa_enhancements_applied)
-            updates["reasoning"] = [{
-                "step_name": "Formatting Agent",
-                "step_text": (
-                    f"Prepared structured slide blueprint with {slide_count} slides "
-                    f"and {qa_count} QA enhancement note(s) for deterministic artifact assembly."
-                ),
-            }]
-
-    # === REPORT ANALYST (ReAct agent -- extracts file paths from tool results) ===
-    elif agent_name == "report_analyst":
-        _extract_formatting_state(state, updates)
 
 
 def _extract_formatting_state(

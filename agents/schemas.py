@@ -249,60 +249,6 @@ class SectionBlueprintOutput(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Legacy Formatting Agent schemas (kept for fallback compatibility)
-# ---------------------------------------------------------------------------
-
-
-class SlideElement(BaseModel):
-    """A single content element in the deck blueprint (legacy)."""
-
-    type: str = Field(default="paragraph")
-    text: str = Field(default="")
-    level: Optional[int] = Field(default=None, ge=1, le=4)
-    style: Optional[Literal["bold", "italic", "bold_italic", "normal"]] = Field(default=None)
-    label: Optional[str] = Field(default=None)
-
-    # table-only fields
-    headers: list[str] = Field(default_factory=list)
-    rows: list[list[str]] = Field(default_factory=list)
-
-    # image_prompt-only fields
-    placeholder_id: Optional[str] = Field(default=None)
-    position: Optional[
-        Literal["right", "left", "bottom", "full", "inset_right", "inset_left"]
-    ] = Field(default=None)
-    width_pct: Optional[int] = Field(default=None, ge=1, le=100)
-    height_pct: Optional[int] = Field(default=None, ge=1, le=100)
-    vertical_align: Optional[Literal["top", "middle", "bottom"]] = Field(default=None)
-    caption: Optional[str] = Field(default=None)
-    caption_position: Optional[Literal["below", "above", "none"]] = Field(default=None)
-    z_index: Optional[Literal["behind_text", "above_text", "inline"]] = Field(default=None)
-    fallback_text: Optional[str] = Field(default=None)
-    visual_injected_by_qa: Optional[bool] = Field(default=None)
-
-
-class SlideBlueprint(BaseModel):
-    """One slide blueprint object (legacy)."""
-
-    slide_number: int = Field(default=1, ge=1)
-    section_type: str = Field(default="narrative")
-    layout: str = Field(default="callout")
-    title: str = Field(default="")
-    qa_note: Optional[str] = Field(default=None)
-    elements: list[SlideElement] = Field(default_factory=list)
-
-
-class FormattingDeckOutput(BaseModel):
-    """Structured deck output from formatting agent (legacy — kept for fallback)."""
-
-    deck_title: str = Field(default="Friction Analysis Report")
-    deck_subtitle: str = Field(default="")
-    total_slides: int = Field(default=0, ge=0)
-    qa_enhancements_applied: list[str] = Field(default_factory=list)
-    slides: list[SlideBlueprint] = Field(default_factory=list)
-
-
-# ---------------------------------------------------------------------------
 # Critique
 # ---------------------------------------------------------------------------
 
