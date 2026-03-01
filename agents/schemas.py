@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -114,43 +114,75 @@ class DominantDrivers(BaseModel):
     communication: int = Field(default=0)
     policy: int = Field(default=0)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_from_list(cls, data: Any) -> Any:
+        """LLM sometimes returns a list like ['digital'] instead of a dict."""
+        if isinstance(data, list):
+            counts: dict[str, int] = {"digital": 0, "operations": 0, "communication": 0, "policy": 0}
+            for item in data:
+                key = str(item).lower().strip()
+                if key in counts:
+                    counts[key] += 1
+            return counts
+        if isinstance(data, str):
+            key = data.lower().strip()
+            return {key: 1} if key in ("digital", "operations", "communication", "policy") else {}
+        return data
+
 
 class SynthesisSummary(BaseModel):
     """High-level synthesis summary stats."""
 
     total_calls_analyzed: int = Field(default=0, description="Total call count across all themes.")
-    total_findings: int
+    total_findings: int = Field(default=0)
     total_themes: int = Field(default=0, description="Number of unique themes synthesized.")
-    dominant_drivers: DominantDrivers
-    multi_factor_count: int = Field(description="Themes flagged by 2+ lenses.")
+    dominant_drivers: DominantDrivers = Field(default_factory=DominantDrivers)
+    multi_factor_count: int = Field(default=0, description="Themes flagged by 2+ lenses.")
     overall_preventability: float = Field(
+        default=0.5,
         ge=0.0,
         le=1.0,
         description="0.0 = unavoidable, 1.0 = entirely preventable.",
     )
-    quick_wins_count: int
-    executive_narrative: str = Field(description="2-3 sentence overall summary with call counts.")
+    quick_wins_count: int = Field(default=0)
+    executive_narrative: str = Field(default="", description="2-3 sentence overall summary with call counts.")
 
 
 class RankedFinding(BaseModel):
     """A single synthesized, prioritized finding."""
 
-    finding: str
+    finding: str = Field(default="")
     theme: str = Field(default="", description="Theme/bucket this finding belongs to.")
-    category: str
+    category: str = Field(default="general")
     call_count: int = Field(default=0, description="Raw call count for this finding.")
     call_percentage: float = Field(default=0.0, description="Percentage of total call volume.")
     volume: float = Field(default=0.0, description="Legacy volume field (percentage).")
-    impact_score: float = Field(ge=0.0, le=10.0, description="1-10 impact scale.")
-    ease_score: float = Field(ge=0.0, le=10.0, description="1-10 ease of implementation scale.")
-    confidence: float = Field(ge=0.0, le=1.0)
-    recommended_action: str
-    dominant_driver: Literal["digital", "operations", "communication", "policy"]
-    contributing_factors: list[str]
-    preventability_score: float = Field(ge=0.0, le=1.0)
+    impact_score: float = Field(ge=0.0, le=10.0, default=5.0, description="1-10 impact scale.")
+    ease_score: float = Field(ge=0.0, le=10.0, default=5.0, description="1-10 ease of implementation scale.")
+    confidence: float = Field(ge=0.0, le=1.0, default=0.5)
+    recommended_action: str = Field(default="")
+    dominant_driver: Literal["digital", "operations", "communication", "policy"] = Field(default="digital")
+    contributing_factors: list[str] = Field(default_factory=list)
+    preventability_score: float = Field(ge=0.0, le=1.0, default=0.5)
     priority_quadrant: Literal[
         "quick_win", "strategic_investment", "low_hanging_fruit", "deprioritize"
-    ]
+    ] = Field(default="strategic_investment")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        # Normalize priority_quadrant casing
+        pq = data.get("priority_quadrant")
+        if isinstance(pq, str):
+            data["priority_quadrant"] = pq.lower().strip().replace(" ", "_")
+        # Normalize dominant_driver casing
+        dd = data.get("dominant_driver")
+        if isinstance(dd, str):
+            data["dominant_driver"] = dd.lower().strip()
+        return data
 
 
 class ThemeDriver(BaseModel):
@@ -160,20 +192,28 @@ class ThemeDriver(BaseModel):
     call_count: int = Field(default=0)
     contribution_pct: float = Field(default=0.0)
     type: Literal["primary", "secondary"] = Field(default="secondary")
-    dimension: Literal["digital", "operations", "communication", "policy"]
+    dimension: Literal["digital", "operations", "communication", "policy"] = Field(default="digital")
     recommended_solution: str = Field(default="")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_from_string(cls, data: Any) -> Any:
+        """LLM sometimes returns a plain string instead of a ThemeDriver dict."""
+        if isinstance(data, str):
+            return {"driver": data, "dimension": "digital"}
+        return data
 
 
 class ThemeSummary(BaseModel):
     """Theme-level aggregation across all friction dimensions."""
 
-    theme: str
+    theme: str = Field(default="")
     call_count: int = Field(default=0)
     call_percentage: float = Field(default=0.0)
     impact_score: float = Field(ge=0.0, le=10.0, default=5.0)
     ease_score: float = Field(ge=0.0, le=10.0, default=5.0)
     priority_score: float = Field(default=5.0, description="impact * 0.6 + ease * 0.4")
-    dominant_driver: Literal["digital", "operations", "communication", "policy"]
+    dominant_driver: Literal["digital", "operations", "communication", "policy"] = Field(default="digital")
     contributing_factors: list[str] = Field(default_factory=list)
     preventability_score: float = Field(ge=0.0, le=1.0, default=0.5)
     priority_quadrant: Literal[
@@ -181,6 +221,24 @@ class ThemeSummary(BaseModel):
     ] = Field(default="strategic_investment")
     all_drivers: list[ThemeDriver] = Field(default_factory=list)
     quick_wins: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        # LLM uses "theme_name" instead of "theme"
+        if "theme_name" in data and "theme" not in data:
+            data["theme"] = data.pop("theme_name")
+        # Normalize priority_quadrant casing: "Strategic Investment" → "strategic_investment"
+        pq = data.get("priority_quadrant")
+        if isinstance(pq, str):
+            data["priority_quadrant"] = pq.lower().strip().replace(" ", "_")
+        # Normalize dominant_driver casing
+        dd = data.get("dominant_driver")
+        if isinstance(dd, str):
+            data["dominant_driver"] = dd.lower().strip()
+        return data
 
 
 class SynthesizerOutput(BaseModel):

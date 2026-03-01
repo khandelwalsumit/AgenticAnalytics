@@ -109,6 +109,7 @@ class AgentFactory:
         self.llm_factory = llm_factory or VertexAILLM
         self.tool_registry = tool_registry or {}
         self._cache: dict[str, AgentSkill] = {}
+        self._llm_cache: dict[tuple, Any] = {}
 
     def parse_agent_md(self, name: str) -> AgentSkill:
         """Parse an agent markdown file into AgentSkill (cached)."""
@@ -118,13 +119,21 @@ class AgentFactory:
         return self._cache[name]
 
     def _create_llm(self, name: str) -> Any:
+        """Get or create a cached LLM instance by config key.
+
+        Agents with identical (model, temperature, top_p, max_tokens) share
+        one LLM instance — one R2D2 auth cycle instead of N.
+        """
         cfg = self.parse_agent_md(name)
-        return self.llm_factory(
-            model=cfg.model,
-            temperature=cfg.temperature,
-            top_p=cfg.top_p,
-            max_tokens=cfg.max_tokens,
-        )
+        cache_key = (cfg.model, cfg.temperature, cfg.top_p, cfg.max_tokens)
+        if cache_key not in self._llm_cache:
+            self._llm_cache[cache_key] = self.llm_factory(
+                model=cfg.model,
+                temperature=cfg.temperature,
+                top_p=cfg.top_p,
+                max_tokens=cfg.max_tokens,
+            )
+        return self._llm_cache[cache_key]
 
     def _resolve_tools(self, tool_names: list[str]) -> list[Callable]:
         return [self.tool_registry[n] for n in tool_names]
@@ -173,9 +182,11 @@ class StructuredOutputAgent:
         messages = input.get("messages", [])
         full_messages = [SystemMessage(content=self.system_prompt)] + list(messages)
         result_obj = await self.chain.ainvoke(full_messages)
-        # Wrapper returns AIMessage(content=JSON) instead of Pydantic instance — parse it.
+        # Custom VertexAI wrapper returns AIMessage(content=JSON) — parse and validate.
         if not isinstance(result_obj, self.output_schema):
-            result_obj = self.output_schema(**json.loads(result_obj.content))
+            raw = result_obj.content if hasattr(result_obj, "content") else str(result_obj)
+            data = json.loads(raw)
+            result_obj = self.output_schema.model_validate(data)
         return {
             "structured_output": result_obj,
             "messages": [AIMessage(content=result_obj.model_dump_json(indent=2))],

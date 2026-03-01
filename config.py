@@ -46,7 +46,7 @@ DEFAULT_MAX_TOKENS = int(os.getenv("DEFAULT_MAX_TOKENS", "8192"))
 # Total concurrent agent workers across all friction agents.
 # Per-agent limit = floor(MAX_MULTITHREADING_WORKERS / number_of_active_friction_agents).
 # Example: 40 workers / 4 agents = 10 themes per agent in parallel.
-MAX_MULTITHREADING_WORKERS = int(os.getenv("MAX_MULTITHREADING_WORKERS", "40"))
+MAX_MULTITHREADING_WORKERS = int(os.getenv("MAX_MULTITHREADING_WORKERS", "8"))
 
 # -- Thresholds ---------------------------------------------------------------
 MAX_SAMPLE_SIZE = 50  # Max rows returned by sample_data

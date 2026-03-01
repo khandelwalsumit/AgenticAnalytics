@@ -3,7 +3,8 @@
     "allow": [
       "Bash(cmd:*)",
       "Bash(source:*)",
-      "Read(//c/Users/SK92484/Documents/Projects/AI Playground/**)"
+      "Read(//c/Users/SK92484/Documents/Projects/AI Playground/**)",
+      "Bash(PYTHONPATH=. python -c \":*)"
     ]
   }
 }
