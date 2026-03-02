@@ -155,54 +155,46 @@ class VertexAIChatModel(BaseChatModel):
         declarations = [self._langchain_tool_to_vertex_fd(tool) for tool in tools]
         return [VertexTool(function_declarations=declarations)] if declarations else []
 
+    @staticmethod
+    def _tool_message_to_part(message: ToolMessage) -> tuple[Any, str]:
+        """Convert a single ToolMessage to a Vertex function_response Part.
+
+        Returns (Part, tool_name) so callers can log if needed.
+        """
+        tool_output: dict[str, Any]
+        if isinstance(message.content, str):
+            try:
+                parsed = json.loads(message.content)
+                tool_output = parsed if isinstance(parsed, dict) else {"result": parsed}
+            except json.JSONDecodeError:
+                tool_output = {"result": message.content}
+        elif isinstance(message.content, dict):
+            tool_output = message.content
+        else:
+            tool_output = {"result": message.content}
+
+        tool_name = message.name or message.tool_call_id or "tool_result"
+        return Part.from_function_response(name=tool_name, response=tool_output), tool_name
+
     def _convert_messages_to_vertex_format(
         self,
         messages: List[BaseMessage],
     ) -> tuple[List[Any], Optional[str]]:
+        """Convert LangChain messages to Vertex AI Content objects.
+
+        Critical: Vertex AI requires that after a model turn with N function_call
+        parts, the next Content must contain exactly N function_response parts in
+        a **single** Content block.  LangGraph emits one ToolMessage per tool call,
+        so we must group consecutive ToolMessages into one Content.
+        """
         contents: list[Any] = []
         extracted_system_instruction: Optional[str] = None
 
-        for message in messages:
-            if isinstance(message, HumanMessage):
-                contents.append(Content(role="user", parts=[Part.from_text(str(message.content))]))
-                continue
+        idx = 0
+        n = len(messages)
 
-            if isinstance(message, AIMessage):
-                ai_parts: list[Any] = []
-                if message.content:
-                    ai_parts.append(Part.from_text(str(message.content)))
-
-                for tool_call in getattr(message, "tool_calls", []) or []:
-                    name = tool_call.get("name") if isinstance(tool_call, dict) else getattr(tool_call, "name", "")
-                    args = tool_call.get("args", {}) if isinstance(tool_call, dict) else getattr(tool_call, "args", {})
-                    if name:
-                        ai_parts.append(Part.from_dict({"function_call": {"name": name, "args": args or {}}}))
-
-                if ai_parts:
-                    contents.append(Content(role="model", parts=ai_parts))
-                continue
-
-            if isinstance(message, ToolMessage):
-                tool_output: dict[str, Any]
-                if isinstance(message.content, str):
-                    try:
-                        parsed = json.loads(message.content)
-                        tool_output = parsed if isinstance(parsed, dict) else {"result": parsed}
-                    except json.JSONDecodeError:
-                        tool_output = {"result": message.content}
-                elif isinstance(message.content, dict):
-                    tool_output = message.content
-                else:
-                    tool_output = {"result": message.content}
-
-                tool_name = message.name or message.tool_call_id or "tool_result"
-                contents.append(
-                    Content(
-                        role="tool",
-                        parts=[Part.from_function_response(name=tool_name, response=tool_output)],
-                    ),
-                )
-                continue
+        while idx < n:
+            message = messages[idx]
 
             if isinstance(message, SystemMessage):
                 sys_text = str(message.content)
@@ -211,6 +203,53 @@ class VertexAIChatModel(BaseChatModel):
                     if not extracted_system_instruction
                     else f"{extracted_system_instruction}\n{sys_text}"
                 )
+                idx += 1
+                continue
+
+            if isinstance(message, HumanMessage):
+                contents.append(Content(role="user", parts=[Part.from_text(str(message.content))]))
+                idx += 1
+                continue
+
+            if isinstance(message, AIMessage):
+                ai_parts: list[Any] = []
+
+                # Only add a text part when the model actually produced text.
+                # Empty-string content (common when the model only calls tools)
+                # must be omitted — Vertex rejects empty text parts.
+                text = str(message.content) if message.content else ""
+                if text.strip():
+                    ai_parts.append(Part.from_text(text))
+
+                for tool_call in getattr(message, "tool_calls", []) or []:
+                    tc_name = tool_call.get("name") if isinstance(tool_call, dict) else getattr(tool_call, "name", "")
+                    tc_args = tool_call.get("args", {}) if isinstance(tool_call, dict) else getattr(tool_call, "args", {})
+                    if tc_name:
+                        ai_parts.append(Part.from_dict({
+                            "function_call": {"name": tc_name, "args": tc_args or {}},
+                        }))
+
+                if ai_parts:
+                    contents.append(Content(role="model", parts=ai_parts))
+                idx += 1
+                continue
+
+            if isinstance(message, ToolMessage):
+                # --- Core fix: batch ALL consecutive ToolMessages into one
+                # Content so the function_response count matches the preceding
+                # model turn's function_call count. ---
+                tool_parts: list[Any] = []
+                while idx < n and isinstance(messages[idx], ToolMessage):
+                    part, _ = self._tool_message_to_part(messages[idx])
+                    tool_parts.append(part)
+                    idx += 1
+
+                if tool_parts:
+                    contents.append(Content(role="tool", parts=tool_parts))
+                continue
+
+            # Unknown message type — skip gracefully
+            idx += 1
 
         return contents, extracted_system_instruction
 
