@@ -7,6 +7,7 @@ from typing import Any
 
 import pandas as pd
 from langchain_core.tools import tool
+from pydantic import BaseModel
 
 from pathlib import Path
 
@@ -170,7 +171,11 @@ def apply_skill(skill_name: str, bucket: str) -> str:
     )
 
 
-@tool
+class _NoArgs(BaseModel):
+    pass
+
+
+@tool(args_schema=_NoArgs)
 def get_findings_summary() -> str:
     """Aggregate and rank all findings accumulated so far.
 

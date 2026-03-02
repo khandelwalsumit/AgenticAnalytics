@@ -12,6 +12,7 @@ Two agent creation paths:
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -167,8 +168,31 @@ class AgentFactory:
 # ------------------------------------------------------------------
 
 
+def _extract_json_from_ai_message(result: Any) -> str:
+    """Extract raw JSON string from whatever the wrapper returned.
+
+    The Citi VertexAI wrapper always returns AIMessage(content=JSON_string).
+    Standard langchain-google-genai may return the Pydantic object directly.
+    Handles markdown fences (```json ... ```) that some models add.
+    """
+    if hasattr(result, "content"):
+        raw = result.content or ""
+    else:
+        raw = str(result)
+
+    # Strip markdown code fences: ```json\n...\n``` or ```\n...\n```
+    stripped = raw.strip()
+    stripped = re.sub(r"^```(?:json)?\s*\n?", "", stripped)
+    stripped = re.sub(r"\n?```\s*$", "", stripped)
+    return stripped.strip()
+
+
 class StructuredOutputAgent:
-    """Wraps ``LLM.with_structured_output(Schema)`` with async ainvoke."""
+    """Wraps ``LLM.with_structured_output(Schema)`` with async ainvoke.
+
+    Handles the Citi VertexAI wrapper which always returns
+    ``AIMessage(content=JSON_string)`` instead of the Pydantic object directly.
+    """
 
     __slots__ = ("name", "system_prompt", "chain", "output_schema")
 
@@ -181,13 +205,37 @@ class StructuredOutputAgent:
     async def ainvoke(self, input: dict[str, Any]) -> dict[str, Any]:
         messages = input.get("messages", [])
         full_messages = [SystemMessage(content=self.system_prompt)] + list(messages)
-        result_obj = await self.chain.ainvoke(full_messages)
-        # Custom VertexAI wrapper returns AIMessage(content=JSON) — parse and validate.
-        if not isinstance(result_obj, self.output_schema):
-            raw = result_obj.content if hasattr(result_obj, "content") else str(result_obj)
-            data = json.loads(raw)
-            result_obj = self.output_schema.model_validate(data)
+        result = await self.chain.ainvoke(full_messages)
+
+        # Fast path: wrapper already returned the Pydantic object (e.g. local dev with
+        # standard langchain-google-genai that honours with_structured_output natively).
+        if isinstance(result, self.output_schema):
+            structured = result
+            return {
+                "structured_output": structured,
+                "messages": [AIMessage(content=structured.model_dump_json(indent=2))],
+            }
+
+        # Normal path: wrapper returned AIMessage(content=JSON_string).
+        # Extract, strip any markdown fences, parse, and validate.
+        raw_json = _extract_json_from_ai_message(result)
+        try:
+            data = json.loads(raw_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"StructuredOutputAgent({self.name}): LLM returned non-JSON content. "
+                f"Parse error: {exc}. First 300 chars: {raw_json[:300]!r}"
+            ) from exc
+
+        try:
+            structured = self.output_schema.model_validate(data)
+        except Exception as exc:
+            raise ValueError(
+                f"StructuredOutputAgent({self.name}): JSON parsed but failed schema validation "
+                f"({self.output_schema.__name__}): {exc}"
+            ) from exc
+
         return {
-            "structured_output": result_obj,
-            "messages": [AIMessage(content=result_obj.model_dump_json(indent=2))],
+            "structured_output": structured,
+            "messages": [AIMessage(content=structured.model_dump_json(indent=2))],
         }

@@ -344,6 +344,30 @@ class SectionSlideElement(BaseModel):
     chart_key: Optional[str] = Field(default=None, description="Chart key: friction_distribution, impact_ease_scatter, driver_breakdown")
     position: Optional[Literal["right", "left", "bottom", "full"]] = Field(default=None)
 
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_fields(cls, data: Any) -> Any:
+        """Coerce LLM quirks: stringify non-str values, normalise rows to list[list[str]]."""
+        if not isinstance(data, dict):
+            return data
+        # Coerce rows: each row must be list[str]; dicts become their values
+        raw_rows = data.get("rows")
+        if isinstance(raw_rows, list):
+            coerced: list[list[str]] = []
+            for row in raw_rows:
+                if isinstance(row, list):
+                    coerced.append([str(cell) for cell in row])
+                elif isinstance(row, dict):
+                    coerced.append([str(v) for v in row.values()])
+                else:
+                    coerced.append([str(row)])
+            data = {**data, "rows": coerced}
+        # Coerce headers: each header must be str
+        raw_headers = data.get("headers")
+        if isinstance(raw_headers, list):
+            data = {**data, "headers": [str(h) for h in raw_headers]}
+        return data
+
 
 class SectionSlide(BaseModel):
     """One slide in a section blueprint."""
@@ -354,6 +378,24 @@ class SectionSlide(BaseModel):
     title: str = Field(default="")
     subtitle: Optional[str] = Field(default=None)
     elements: list[SectionSlideElement] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_elements(cls, data: Any) -> Any:
+        """Coerce elements list: strings become point_description dicts; non-dicts are dropped."""
+        if not isinstance(data, dict):
+            return data
+        raw_elements = data.get("elements")
+        if not isinstance(raw_elements, list):
+            return data
+        coerced: list[dict] = []
+        for el in raw_elements:
+            if isinstance(el, dict):
+                coerced.append(el)
+            elif isinstance(el, str) and el.strip():
+                coerced.append({"type": "point_description", "text": el})
+        data = {**data, "elements": coerced}
+        return data
 
 
 class SectionBlueprintOutput(BaseModel):
