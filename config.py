@@ -31,9 +31,13 @@ DEFAULT_PARQUET_PATH = DATA_INPUT_DIR / "adf.parquet"
 
 # -- Google AI Studio / Gemini -------------------------------------------------------
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-# USERNAME = os.getenv("USERNAME")
-# R2D2_ENDPOINT = os.getenv("R2D2_ENDPOINT")
-# R2D2_PROJECT = os.getenv("R2D2_PROJECT")
+GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "")
+GOOGLE_CLOUD_LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+USE_VERTEXAI_SDK = os.getenv("USE_VERTEXAI_SDK", "false").lower() in ("1", "true", "yes")
+BACKOFF_MAX_DELAY = int(os.getenv("BACKOFF_MAX_DELAY", "0"))
+USERNAME = os.getenv("USERNAME", "")
+R2D2_ENDPOINT = os.getenv("R2D2_ENDPOINT", "")
+R2D2_PROJECT = os.getenv("R2D2_PROJECT", "")
 # BACKOFF_MAX_DELAY = 0  # False or 0 disables backoff and retries, which may be desirable in some cases to fail fast on errors. Adjust as needed.
 
 # -- Model defaults -----------------------------------------------------------

@@ -23,7 +23,7 @@ from langchain.agents import create_agent
 
 from agents.schemas import STRUCTURED_OUTPUT_SCHEMAS
 from config import AGENTS_DIR
-from core.llm import VertexAILLM
+from core.chat_model import VertexAILLM
 
 
 # ------------------------------------------------------------------
