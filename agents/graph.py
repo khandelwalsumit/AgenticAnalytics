@@ -46,9 +46,6 @@ from agents.nodes import (
     user_checkpoint_node,
     # constants
     AGENT_STATE_FIELDS,
-    ANALYSIS_CONFIRMATION_PENDING,
-    # dimension preference parser (used by lens_confirmation node)
-    _parse_dimension_preferences,
 )
 from agents.schemas import (
     PlannerOutput,
@@ -90,6 +87,11 @@ from agents.graph_helpers import (
 )
 
 logger = logging.getLogger("agenticanalytics.graph")
+
+# Matches the constant in agents/nodes.py — defined here to avoid importing
+# from nodes.py at graph-load time (nodes + graph_helpers share that module
+# and a cross-import at load time can cause partial-init errors).
+_ANALYSIS_CONFIRMATION_PENDING = "analysis_dimension_confirmation"
 
 
 def build_graph(
@@ -300,7 +302,7 @@ def build_graph(
 
         # ── interrupt() pauses graph here; returns user's reply on resume ──
         user_reply = interrupt({
-            "type": ANALYSIS_CONFIRMATION_PENDING,
+            "type": _ANALYSIS_CONFIRMATION_PENDING,
             "message": (
                 f"Data extraction complete \u2014 {bucket_count} theme bucket(s) "
                 f"identified: {theme_list}.\n\n"
@@ -325,9 +327,10 @@ def build_graph(
             "pending_input_for": "",
             "messages": [HumanMessage(content=str(user_reply))],
         }
-        # Reuse the existing dimension parser (reads last HumanMessage).
+        # Lazy import — avoids any graph.py↔nodes.py load-time circular dep.
         # Build a temporary state snapshot with the user's reply so the
         # parser can find it as the last human message.
+        from agents.nodes import _parse_dimension_preferences  # noqa: PLC0415
         tmp_state = dict(state)
         tmp_state["messages"] = list(state.get("messages", [])) + updates["messages"]
         _parse_dimension_preferences(tmp_state, updates)
