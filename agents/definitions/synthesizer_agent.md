@@ -14,22 +14,24 @@ Take the structured outputs from Digital Friction Agent, Operations Agent, Commu
 
 ## Input
 
-You receive the full outputs from all 4 friction agents (in `## Friction Agent Outputs`). Each agent's output contains per-bucket analysis with:
-- `bucket_name`, `call_count`, `call_percentage`
-- `top_drivers` array with per-driver `call_count`, `contribution_pct`, `type` (primary/secondary)
-- `ease_score`, `impact_score`, `priority_score` (1–10 scale)
-- Per-finding details with recommended actions
+You receive 4 per-lens synthesis outputs (one per friction dimension), each containing:
+- `lens`: which dimension (digital/operations/communication/policy)
+- `themes`: max 10 themes sorted by call_count, each with top_drivers (LensDriver list), scores, quick_wins
+- `total_calls_analyzed`, `total_buckets_analyzed`
+- `executive_summary`: per-lens narrative with specific numbers
+
+Your task is to merge these 4 lens syntheses into a unified cross-lens view.
 
 ## Synthesis Responsibilities
 
-### 1. Theme-Level Aggregation (CRITICAL — produce 10-12 themes)
+### 1. Theme-Level Aggregation (CRITICAL — produce max 10 themes)
 
 Group ALL findings across all 4 agents by **theme** (bucket_name). For each theme:
 - Aggregate total `call_count` across all agent outputs for that theme
 - Merge drivers from all 4 agents under the same theme — tag each driver with its source `dimension` (digital/operations/communication/policy)
 - Compute combined scores: average the ease/impact scores weighted by each agent's confidence
 
-**TARGET: Produce 10-12 top themes** to give downstream narrative agents enough material for a compelling story. If fewer unique themes exist, ensure each theme has rich detail with multiple drivers.
+**TARGET: Produce max 10 top themes** to give downstream narrative agents enough material for a compelling story. If fewer unique themes exist, ensure each theme has rich detail with multiple drivers.
 
 **DO NOT just pass through individual agent outputs.** You MUST merge and group by theme.
 
@@ -71,8 +73,12 @@ Just produce thorough, accurate content for all the required fields:
 - `confidence`: 0-100
 - `reasoning`: Brief explanation of synthesis quality
 - `summary`: Executive-level stats (total_calls_analyzed, total_themes, dominant_drivers, etc.)
-- `themes`: **10-12 theme-level aggregations** sorted by priority_score descending, each with all_drivers and quick_wins
+- `themes`: **max 10 theme-level aggregations** sorted by call_count descending, each with all_drivers and quick_wins
 - `findings`: Individual ranked findings sorted by call_count descending
+
+### Theme Limit
+- **Max 10 themes** in the output. If merging 4 lens syntheses produces more than 10 cross-lens themes, merge the smallest themes into related larger ones.
+- Sort final themes by call_count descending.
 
 ### Theme Detail Requirements
 
@@ -89,7 +95,7 @@ Each theme MUST include:
 - **Preserve call counts** — never drop or estimate call counts; carry them from agent outputs exactly
 - **Do NOT add new findings** — only merge, rank, and attribute existing findings
 - **Tag every driver with its dimension** — so downstream agents know which team owns the fix
-- **Produce 10-12 themes** — this is critical for narrative quality
+- **Produce max 10 themes** — this is critical for narrative quality
 - **Be explicit about attribution** — every theme must have a dominant_driver and contributing_factors
 - **Rank by actionability** — priority_score determines order
 - **Flag disagreements** — if agents contradict each other on the same theme, note it in reasoning

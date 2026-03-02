@@ -102,6 +102,109 @@ class DataAnalystOutput(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Friction Lens Agents — shared structured output
+# ---------------------------------------------------------------------------
+
+
+class LensDriver(BaseModel):
+    """A single friction driver identified within a bucket."""
+
+    driver: str = Field(description="Specific description of the friction driver.")
+    call_count: int = Field(default=0, description="Number of calls attributable to this driver.")
+    contribution_pct: float = Field(default=0.0, ge=0.0, le=100.0, description="Percentage of bucket calls.")
+    type: Literal["primary", "secondary"] = Field(default="secondary")
+    recommended_solution: str = Field(default="", description="Specific actionable fix for this driver.")
+
+
+class BucketAnalysis(BaseModel):
+    """Analysis output for a single data bucket from one lens agent."""
+
+    bucket_name: str = Field(description="Human-readable bucket name.")
+    bucket_key: str = Field(default="", description="Internal bucket key.")
+    call_count: int = Field(default=0, description="Total calls in this bucket.")
+    call_percentage: float = Field(default=0.0, ge=0.0, le=100.0)
+    top_drivers: list[LensDriver] = Field(
+        default_factory=list,
+        description="Friction drivers sorted by call_count descending. Include primary and secondary.",
+    )
+    impact_score: float = Field(ge=0.0, le=10.0, default=5.0, description="1-10 customer impact scale.")
+    ease_score: float = Field(ge=0.0, le=10.0, default=5.0, description="1-10 ease of implementation.")
+    priority_score: float = Field(default=5.0, description="impact * 0.6 + ease * 0.4.")
+    key_finding: str = Field(default="", description="One-sentence summary of the most important finding.")
+    preventability_assessment: str = Field(
+        default="",
+        description="Whether better design/process/communication/policy would have prevented most calls.",
+    )
+
+
+class LensAnalysisOutput(BaseModel):
+    """Structured output from a friction lens agent analyzing one bucket."""
+
+    decision: Literal["analyzed", "insufficient_data", "no_friction"] = Field(
+        description=(
+            "'analyzed' = meaningful friction found, "
+            "'insufficient_data' = too few rows, "
+            "'no_friction' = no lens-relevant issues."
+        )
+    )
+    confidence: int = Field(ge=0, le=100, description="Confidence in the analysis quality.")
+    reasoning: str = Field(description="Brief explanation of analysis approach and data quality.")
+    bucket_analysis: BucketAnalysis = Field(description="Structured analysis for the focus bucket.")
+
+
+# ---------------------------------------------------------------------------
+# Per-Lens Synthesis (Phase 1) — merges bucket-level into themes
+# ---------------------------------------------------------------------------
+
+
+class LensSynthesisTheme(BaseModel):
+    """A single theme aggregated across all buckets within one lens."""
+
+    theme: str = Field(description="Theme name (maps to a bucket or cross-bucket pattern).")
+    call_count: int = Field(default=0, description="Total calls across all contributing buckets.")
+    call_percentage: float = Field(default=0.0, ge=0.0, le=100.0)
+    top_drivers: list[LensDriver] = Field(
+        default_factory=list,
+        description="Merged and de-duplicated drivers from all bucket analyses.",
+    )
+    impact_score: float = Field(ge=0.0, le=10.0, default=5.0)
+    ease_score: float = Field(ge=0.0, le=10.0, default=5.0)
+    priority_score: float = Field(default=5.0, description="impact * 0.6 + ease * 0.4.")
+    quick_wins: list[str] = Field(
+        default_factory=list,
+        description="Specific actionable fixes that are high-ease (ease >= 7).",
+    )
+    key_insight: str = Field(default="", description="One-sentence insight about this theme.")
+
+
+class LensSynthesisOutput(BaseModel):
+    """Per-lens synthesis: aggregates all bucket-level outputs into max 10 themes."""
+
+    lens: Literal["digital", "operations", "communication", "policy"] = Field(
+        description="Which friction dimension this synthesis covers."
+    )
+    decision: Literal["complete", "partial", "empty"] = Field(
+        description=(
+            "'complete' = all buckets had data, "
+            "'partial' = some buckets had insufficient data, "
+            "'empty' = no friction found."
+        )
+    )
+    confidence: int = Field(ge=0, le=100)
+    reasoning: str = Field(description="Brief assessment of this lens's findings quality.")
+    total_calls_analyzed: int = Field(default=0)
+    total_buckets_analyzed: int = Field(default=0)
+    themes: list[LensSynthesisTheme] = Field(
+        default_factory=list,
+        description="Max 10 themes sorted by call_count descending.",
+    )
+    executive_summary: str = Field(
+        default="",
+        description="2-3 sentence summary of this lens's key findings with call counts.",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Synthesizer Agent — LLM output normalizers
 # ---------------------------------------------------------------------------
 
@@ -417,10 +520,14 @@ class CritiqueOutput(BaseModel):
 STRUCTURED_OUTPUT_SCHEMAS: dict[str, type[BaseModel]] = {
     "supervisor": SupervisorOutput,
     "planner": PlannerOutput,
+    # Friction lens agents — all 4 use the same schema
+    "digital_friction_agent": LensAnalysisOutput,
+    "operations_agent": LensAnalysisOutput,
+    "communication_agent": LensAnalysisOutput,
+    "policy_agent": LensAnalysisOutput,
+    # Per-lens synthesis (Phase 1)
+    "lens_synthesizer": LensSynthesisOutput,
+    # Cross-lens synthesis (Phase 2)
     "synthesizer_agent": SynthesizerOutput,
     "formatting_agent": SectionBlueprintOutput,
-    # data_analyst removed: it needs ReAct (tool-calling) agent, not structured-only.
-    # DataAnalystOutput schema is kept for reference / fallback JSON parsing.
-    # critique removed: needs validate_findings and score_quality tools.
-    # CritiqueOutput schema is kept for reference / fallback JSON parsing.
 }

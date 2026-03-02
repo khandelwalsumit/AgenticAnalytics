@@ -545,31 +545,124 @@ def _write_versioned_md(base_name: str, content: str, metadata: dict) -> str:
     return ""
 
 
+def _precompute_bucket_data(bucket_key: str) -> dict[str, Any]:
+    """Programmatically compute what analyze_bucket would return, without tool invocation.
+
+    Returns dict with: row_count, distributions, sample_rows, columns_included.
+    """
+    import chainlit as cl
+    from config import LLM_ANALYSIS_FOCUS, GROUP_BY_COLUMNS
+    from tools.metrics import MetricsEngine
+
+    data_store = cl.user_session.get("data_store")
+    if not data_store:
+        return {}
+
+    df_all = data_store.get_dataframe("bucketed_data")
+    df = df_all[df_all["_bucket_key"] == bucket_key]
+
+    if df.empty:
+        return {"row_count": 0, "distributions": {}, "sample_rows": []}
+
+    distributions: dict[str, Any] = {}
+    for col in LLM_ANALYSIS_FOCUS:
+        if col in df.columns:
+            dist = MetricsEngine.get_distribution(df, col)
+            if "distribution" in dist:
+                dist["distribution"] = dist["distribution"][:10]
+            distributions[col] = dist
+    for col in GROUP_BY_COLUMNS:
+        if col in df.columns and col not in distributions:
+            dist = MetricsEngine.get_distribution(df, col)
+            if "distribution" in dist:
+                dist["distribution"] = dist["distribution"][:10]
+            distributions[col] = dist
+
+    relevant_cols = list(dict.fromkeys(LLM_ANALYSIS_FOCUS + GROUP_BY_COLUMNS))
+    available_cols = [c for c in relevant_cols if c in df.columns]
+    df_slim = df[available_cols] if available_cols else df.drop(columns=["_bucket_key"], errors="ignore")
+    sample = df_slim.sample(n=min(10, len(df_slim)), random_state=42)
+    rows: list[dict[str, str]] = []
+    for _, row in sample.iterrows():
+        row_dict = {}
+        for col, val in row.items():
+            s = str(val)
+            row_dict[col] = s[:300] + "..." if len(s) > 300 else s
+        rows.append(row_dict)
+
+    return {
+        "row_count": len(df),
+        "distributions": distributions,
+        "sample_rows": rows,
+        "columns_included": available_cols,
+    }
+
+
+def _precompute_skill_data(skill_name: str, bucket_key: str) -> dict[str, Any]:
+    """Programmatically compute top_problems for a skill+bucket, without tool invocation."""
+    import chainlit as cl
+    from config import LLM_ANALYSIS_FOCUS
+    from tools.metrics import MetricsEngine
+
+    data_store = cl.user_session.get("data_store")
+    if not data_store:
+        return {}
+
+    df_all = data_store.get_dataframe("bucketed_data")
+    df = df_all[df_all["_bucket_key"] == bucket_key]
+
+    focus_col = LLM_ANALYSIS_FOCUS[0] if LLM_ANALYSIS_FOCUS else ""
+    top_problems = (
+        MetricsEngine.top_n(df, focus_col, n=10)
+        if focus_col and focus_col in df.columns
+        else []
+    )
+    return {"top_problems": top_problems}
+
+
 def _build_extra_context(
     agent_name: str,
     state: AnalyticsState,
     skill_loader: SkillLoader | None,
 ) -> str:
     """Build agent-specific context to append to the system prompt."""
-    if agent_name in FRICTION_AGENTS and skill_loader:
+    if agent_name in FRICTION_AGENTS:
         focus_bucket = state.get("_focus_bucket", "")
         raw_buckets = state.get("data_buckets", {})
-        bucket_context = ""
+        parts: list[str] = []
 
         if focus_bucket and isinstance(raw_buckets, dict) and focus_bucket in raw_buckets:
-            # Single-bucket mode: load only this bucket's assigned skills
             binfo = raw_buckets[focus_bucket]
-            skills_to_load: list[str] = binfo.get("assigned_skills", []) if isinstance(binfo, dict) else []
             bucket_name = binfo.get("bucket_name", focus_bucket) if isinstance(binfo, dict) else focus_bucket
             row_count = binfo.get("row_count", 0) if isinstance(binfo, dict) else 0
-            bucket_context = (
-                f"\n\n## Active Bucket\n"
-                f"You are analyzing bucket: **{bucket_name}** ({row_count} rows). "
-                f"Key: `{focus_bucket}`\n"
-                f"Use `analyze_bucket(bucket='{focus_bucket}')` for this bucket's data.\n"
-            )
+            skills_to_load: list[str] = binfo.get("assigned_skills", []) if isinstance(binfo, dict) else []
+
+            parts.append(f"\n\n## Bucket Data: {bucket_name}")
+            parts.append(f"Bucket key: `{focus_bucket}` | Rows: {row_count}\n")
+
+            # Pre-compute bucket data (replaces analyze_bucket tool call)
+            bucket_data = _precompute_bucket_data(focus_bucket)
+            if bucket_data:
+                parts.append("### Distributions\n```json")
+                parts.append(json.dumps(bucket_data.get("distributions", {}), indent=2, default=str))
+                parts.append("```\n")
+                parts.append("### Sample Rows\n```json")
+                parts.append(json.dumps(bucket_data.get("sample_rows", []), indent=2, default=str))
+                parts.append("```\n")
+
+            # Pre-compute skill top_problems
+            if not skills_to_load:
+                skills_to_load = list(ALL_DOMAIN_SKILLS)
+            skill_data_parts: list[str] = []
+            for sname in skills_to_load:
+                sdata = _precompute_skill_data(sname, focus_bucket)
+                if sdata and sdata.get("top_problems"):
+                    skill_data_parts.append(
+                        f"#### Skill: {sname}\nTop problems:\n```json\n"
+                        + json.dumps(sdata["top_problems"], indent=2, default=str)
+                        + "\n```\n"
+                    )
         else:
-            # All-buckets mode: union of all assigned skills across active buckets
             skills_to_load = []
             if isinstance(raw_buckets, dict):
                 for binfo in raw_buckets.values():
@@ -577,39 +670,43 @@ def _build_extra_context(
                         for s in binfo.get("assigned_skills", []):
                             if s not in skills_to_load:
                                 skills_to_load.append(s)
+            if not skills_to_load:
+                skills_to_load = list(ALL_DOMAIN_SKILLS)
+            skill_data_parts = []
 
-        # Fall back to full catalog only if bucketing ran without skill assignment
-        if not skills_to_load:
-            skills_to_load = list(ALL_DOMAIN_SKILLS)
+        # Load skill markdown frameworks
+        if skill_loader and skills_to_load:
+            if len(skills_to_load) == 1:
+                loaded_skills = skill_loader.load_skill(skills_to_load[0])
+            else:
+                loaded_skills = skill_loader.load_skills(skills_to_load)
+            parts.append("\n\n## Domain Skills\n")
+            parts.append("Apply these domain skill frameworks through your analytical lens:\n\n")
+            parts.append(loaded_skills)
 
-        # Load: single skill → direct load (no list iteration); multiple → batch load
-        if len(skills_to_load) == 1:
-            loaded_skills = skill_loader.load_skill(skills_to_load[0])
-        else:
-            loaded_skills = skill_loader.load_skills(skills_to_load)
+        if skill_data_parts:
+            parts.append("\n\n## Skill-Specific Context\n")
+            parts.extend(skill_data_parts)
 
-        return (
-            bucket_context
-            + "\n\n## Loaded Domain Skills\n"
-            "Apply these domain skills through your specific analytical lens:\n\n"
-            + loaded_skills
-        )
+        return "\n".join(parts)
+
+    if agent_name == "lens_synthesizer":
+        lens_id = state.get("_synthesis_lens_id", "")
+        lens_bucket_outputs = state.get("_lens_bucket_outputs", [])
+        parts = [
+            f"\n\n## Lens: {lens_id}",
+            f"\nYou are synthesizing the **{lens_id.replace('_agent', '').replace('_friction', '')}** dimension.",
+            f"\n\n## Bucket-Level Analyses ({len(lens_bucket_outputs)} buckets)\n",
+        ]
+        for i, bucket_output in enumerate(lens_bucket_outputs, 1):
+            parts.append(f"### Bucket {i}\n```json")
+            parts.append(json.dumps(bucket_output, indent=2, default=str))
+            parts.append("```\n")
+        return "\n".join(parts)
 
     if agent_name == "synthesizer_agent":
-        from pathlib import Path as _Path
-
         expected = state.get("expected_friction_lenses", []) or state.get("selected_friction_agents", [])
         expected = list(dict.fromkeys([a for a in expected if a]))
-        parts = [
-            "\n\n## Friction Agent Outputs\n",
-            "Synthesize the following lens analyses into 10-12 top themes:\n",
-        ]
-        if expected:
-            parts.append(
-                "\nExpected lenses for this run: "
-                + ", ".join(expected)
-                + ". Set decision='complete' when all expected lenses have outputs.\n"
-            )
 
         dimension_labels = {
             "digital_friction_agent": "Digital Friction",
@@ -618,42 +715,26 @@ def _build_extra_context(
             "policy_agent": "Policy",
         }
 
-        # Phase 2 path: read per-lens synthesis files (one aggregated file per lens)
-        lens_synthesis_paths = state.get("lens_synthesis_paths", {})
-        if lens_synthesis_paths:
-            for agent_id, label in dimension_labels.items():
-                path = lens_synthesis_paths.get(agent_id, "")
-                if path and _Path(path).exists():
-                    content = _Path(path).read_text(encoding="utf-8")
-                    logger.info("Synthesizer context (Phase 2): read %s (%d chars)", agent_id, len(content))
-                    parts.append(f"\n### {label} Analysis\n{content}\n")
-                else:
-                    parts.append(f"\n### {label} Analysis\n(No output available)\n")
-            return "\n".join(parts)
+        parts = [
+            "\n\n## Per-Lens Synthesis Outputs\n",
+            "Synthesize these 4 lens syntheses into max 10 cross-lens themes:\n",
+        ]
+        if expected:
+            parts.append(
+                "\nExpected lenses: " + ", ".join(expected)
+                + ". Set decision='complete' when all expected lenses have outputs.\n"
+            )
 
-        # Nested friction_md_paths: {agent_id: {bucket_key: path}} or flat {agent_id: path}
-        friction_md = state.get("friction_md_paths", {})
+        # Read structured LensSynthesisOutput objects from state
+        lens_synthesis_results = state.get("lens_synthesis_results", {})
         for agent_id, label in dimension_labels.items():
-            content = ""
-            md_val = friction_md.get(agent_id, "")
-
-            if isinstance(md_val, dict):
-                # Nested: {bucket_key: md_path} — concatenate all bucket outputs
-                bucket_parts = []
-                for bk in sorted(md_val.keys()):
-                    bpath = md_val[bk]
-                    if bpath and _Path(bpath).exists():
-                        bucket_parts.append(_Path(bpath).read_text(encoding="utf-8"))
-                content = "\n\n".join(bucket_parts)
-                logger.info("Synthesizer context: read %s from %d bucket files (%d chars)",
-                            agent_id, len(bucket_parts), len(content))
-            elif isinstance(md_val, str) and md_val and _Path(md_val).exists():
-                # Flat legacy: single path string
-                content = _Path(md_val).read_text(encoding="utf-8")
-                logger.info("Synthesizer context: read %s from file (%d chars)", agent_id, len(content))
-
-            parts.append(f"\n### {label} Agent Output\n{content}\n" if content
-                         else f"\n### {label} Agent Output\n(No output available)\n")
+            synth = lens_synthesis_results.get(agent_id)
+            if synth:
+                parts.append(f"\n### {label}\n```json")
+                parts.append(json.dumps(synth, indent=2, default=str))
+                parts.append("```\n")
+            else:
+                parts.append(f"\n### {label}\n(No output available)\n")
 
         return "\n".join(parts)
 

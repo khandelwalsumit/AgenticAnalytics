@@ -232,9 +232,9 @@ EXPECTED_AGENTS = [
     "supervisor", "planner", "data_analyst", "report_analyst",
     "digital_friction_agent", "operations_agent",
     "communication_agent", "policy_agent",
-    "synthesizer_agent", "narrative_agent",
-    "formatting_agent", "critique",
-    "business_analyst",
+    "synthesizer_agent", "lens_synthesizer",
+    "narrative_agent", "formatting_agent",
+    "critique", "business_analyst",
 ]
 
 for agent_name in EXPECTED_AGENTS:
@@ -481,8 +481,13 @@ except Exception as exc:
 section("11. Pydantic Schemas")
 
 from agents.schemas import (
+    BucketAnalysis,
     CritiqueOutput,
     DataAnalystOutput,
+    LensAnalysisOutput,
+    LensDriver,
+    LensSynthesisOutput,
+    LensSynthesisTheme,
     PlannerOutput,
     SectionBlueprintOutput,
     STRUCTURED_OUTPUT_SCHEMAS,
@@ -490,17 +495,16 @@ from agents.schemas import (
     SynthesizerOutput,
 )
 
-# Verify all expected schemas exist
-for name in ["supervisor", "planner"]:
+# Verify all expected schemas exist in registry
+for name in [
+    "supervisor", "planner", "formatting_agent", "synthesizer_agent",
+    "digital_friction_agent", "operations_agent", "communication_agent",
+    "policy_agent", "lens_synthesizer",
+]:
     if name in STRUCTURED_OUTPUT_SCHEMAS:
         ok(f"STRUCTURED_OUTPUT_SCHEMAS['{name}']")
     else:
         fail(f"STRUCTURED_OUTPUT_SCHEMAS['{name}']", "missing")
-
-if "formatting_agent" in STRUCTURED_OUTPUT_SCHEMAS:
-    ok("STRUCTURED_OUTPUT_SCHEMAS['formatting_agent']")
-else:
-    fail("STRUCTURED_OUTPUT_SCHEMAS['formatting_agent']", "missing")
 
 # Quick instantiation checks
 try:
@@ -532,6 +536,32 @@ try:
     ok(f"SectionBlueprintOutput: {len(sb.slides)} slide")
 except Exception as exc:
     fail("SectionBlueprintOutput", str(exc))
+
+try:
+    la = LensAnalysisOutput(
+        decision="analyzed", confidence=85, reasoning="test",
+        bucket_analysis=BucketAnalysis(
+            bucket_name="Test", bucket_key="test_key",
+            call_count=100, call_percentage=50.0,
+            top_drivers=[LensDriver(driver="test", call_count=50, contribution_pct=50.0, type="primary")],
+            impact_score=7.0, ease_score=8.0, priority_score=7.4,
+            key_finding="Test finding",
+        ),
+    )
+    ok(f"LensAnalysisOutput: decision={la.decision}, drivers={len(la.bucket_analysis.top_drivers)}")
+except Exception as exc:
+    fail("LensAnalysisOutput", str(exc))
+
+try:
+    ls = LensSynthesisOutput(
+        lens="digital", decision="complete", confidence=80, reasoning="test",
+        total_calls_analyzed=200, total_buckets_analyzed=3,
+        themes=[LensSynthesisTheme(theme="Test theme", call_count=100, call_percentage=50.0)],
+        executive_summary="Test summary.",
+    )
+    ok(f"LensSynthesisOutput: lens={ls.lens}, themes={len(ls.themes)}")
+except Exception as exc:
+    fail("LensSynthesisOutput", str(exc))
 
 
 # ---------------------------------------------------------------------------

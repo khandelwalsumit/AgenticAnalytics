@@ -83,6 +83,10 @@ class AnalyticsState(TypedDict):
     friction_md_paths: dict[str, Any]
     # Per-lens synthesis paths — {agent_id: absolute .md path} from Phase 1
     lens_synthesis_paths: dict[str, str]
+    # Per-lens structured synthesis results — {agent_id: LensSynthesisOutput dict}
+    lens_synthesis_results: dict[str, dict[str, Any]]
+    # Per-lens bucket-level structured outputs — {agent_id: {bucket_key: LensAnalysisOutput dict}}
+    lens_bucket_results: dict[str, dict[str, dict[str, Any]]]
 
     # Synthesis output (written by Synthesizer Agent)
     synthesis_result: dict[str, Any]
