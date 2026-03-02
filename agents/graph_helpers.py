@@ -1482,7 +1482,8 @@ def _build_fixed_deck_blueprint(
         4. Biggest Bet / Impact Statement
         5. Recommendations by Owning Team
       theme_deep_dives (1 per theme, max 10):
-        6+. Theme Card (scorecard + driver table + chart)
+        6+. Theme Card (LEFT: metrics + solutions table,
+                        RIGHT: driver breakdown table)
 
     To customize the deck layout, edit the slide definitions below.
     Each slide's layout_index maps to a python-pptx slide layout in template.pptx.
@@ -1492,6 +1493,8 @@ def _build_fixed_deck_blueprint(
         raw = synthesis_result.get("themes", [])
         themes = raw if isinstance(raw, list) else []
 
+    # synthesis_result is FLAT (SynthesisSummary fields at top level, no "summary" key)
+    # but handle both cases: flat dict or nested under "summary"
     summary: dict[str, Any] = {}
     if isinstance(synthesis_result, dict):
         s = synthesis_result.get("summary", synthesis_result)
@@ -1516,6 +1519,19 @@ def _build_fixed_deck_blueprint(
         except (TypeError, ValueError):
             return default
 
+    def _call_text(item: dict[str, Any]) -> str:
+        """Build human-readable call volume string with fallback."""
+        cc = _n(item.get("call_count", 0))
+        cp = _f(item.get("call_percentage", 0))
+        vol = _f(item.get("volume", 0))
+        if cc > 0:
+            return f"{cc:,} calls" + (f" ({cp}%)" if cp > 0 else "")
+        if cp > 0:
+            return f"{cp}% of call volume"
+        if vol > 0:
+            return f"{vol}% volume"
+        return "See impact score"
+
     total_calls = _n(summary.get("total_calls_analyzed", 0))
     total_themes = _n(summary.get("total_themes", len(themes)))
     exec_narrative = _s(
@@ -1533,12 +1549,27 @@ def _build_fixed_deck_blueprint(
             if qw and len(all_quick_wins) < 5:
                 all_quick_wins.append(str(qw)[:200])
 
-    # Top 3 findings by call_count
+    # Sort findings by composite score: call_count first, then impact_score
     sorted_findings = sorted(
         [f for f in findings if isinstance(f, dict)],
-        key=lambda x: _n(x.get("call_count", 0)),
+        key=lambda x: (_n(x.get("call_count", 0)) * 100 + _f(x.get("impact_score", 0))),
         reverse=True,
     )[:3]
+    # If no findings, fall back to top themes as pain points
+    if not sorted_findings and themes:
+        for t in themes[:3]:
+            if isinstance(t, dict):
+                sorted_findings.append({
+                    "finding": _s(t.get("theme", ""), "Issue"),
+                    "call_count": _n(t.get("call_count", 0)),
+                    "call_percentage": _f(t.get("call_percentage", 0)),
+                    "impact_score": _f(t.get("impact_score", 5)),
+                    "dominant_driver": _s(t.get("dominant_driver", ""), "digital"),
+                    "recommended_action": "; ".join(str(qw) for qw in (t.get("quick_wins", []) or [])[:2]) or "Action to be determined",
+                })
+
+    # Build top theme names for exec summary fallback
+    top_theme_names = [_s(t.get("theme", "")) for t in themes[:3] if isinstance(t, dict) and t.get("theme")]
 
     # ================================================================
     # SECTION 1: EXECUTIVE SUMMARY (2 slides)
@@ -1546,19 +1577,26 @@ def _build_fixed_deck_blueprint(
 
     # -- Slide 1: Executive Hook + Quick Wins --
     hook_elements: list[dict[str, Any]] = [
-        {"type": "h2", "text": exec_narrative[:300]},
-        {
-            "type": "point_description",
-            "text": (
-                f"Analyzed {total_calls:,} customer calls across "
-                f"{total_themes} friction themes."
-            ),
-        },
-        {
-            "type": "point_description",
-            "text": f"Overall preventability score: {preventability:.0%}",
-        },
+        {"type": "h2", "text": exec_narrative[:400]},
     ]
+    # Stats line
+    stats_parts: list[str] = []
+    if total_calls > 0:
+        stats_parts.append(f"{total_calls:,} customer calls analyzed")
+    if total_themes > 0:
+        stats_parts.append(f"{total_themes} friction themes identified")
+    if preventability > 0:
+        stats_parts.append(f"{preventability:.0%} preventable")
+    if stats_parts:
+        hook_elements.append({"type": "point_description", "text": " | ".join(stats_parts)})
+
+    # Top themes overview
+    if top_theme_names:
+        hook_elements.append({"type": "h3", "text": "Top Friction Themes"})
+        for tn in top_theme_names:
+            hook_elements.append({"type": "bullet", "text": tn, "level": 1})
+
+    # Quick wins
     if all_quick_wins:
         hook_elements.append(
             {"type": "h3", "text": f"Quick Wins ({len(all_quick_wins)} identified)"}
@@ -1570,16 +1608,16 @@ def _build_fixed_deck_blueprint(
     pain_elements: list[dict[str, Any]] = []
     for i, f in enumerate(sorted_findings, 1):
         finding_text = _s(f.get("finding", ""), f"Finding {i}")
-        call_count = _n(f.get("call_count", 0))
         impact = _f(f.get("impact_score", 0))
         driver = _s(f.get("dominant_driver", ""), "unknown")
         action = _s(f.get("recommended_action", ""), "To be determined")
+        volume_text = _call_text(f)
 
         pain_elements.append({"type": "h3", "text": f"#{i}: {finding_text}"})
         pain_elements.append({
             "type": "bullet",
             "bold_label": "Impact:",
-            "text": f"Score {impact}/10 — {call_count:,} calls affected",
+            "text": f"Score {impact}/10 — {volume_text}",
             "level": 1,
         })
         pain_elements.append({
@@ -1607,7 +1645,7 @@ def _build_fixed_deck_blueprint(
             {
                 "slide_number": 1,
                 "slide_role": "hook_and_quick_wins",
-                "layout_index": 6,
+                "layout_index": 1,
                 "title": "Friction Analysis: Executive Summary",
                 "elements": hook_elements,
             },
@@ -1633,7 +1671,7 @@ def _build_fixed_deck_blueprint(
             continue
         matrix_rows.append([
             _s(t.get("theme", ""), "?")[:40],
-            str(_n(t.get("call_count", 0))),
+            _call_text(t),
             str(_f(t.get("impact_score", 0))),
             str(_f(t.get("ease_score", 0))),
             str(_f(t.get("priority_score", 0))),
@@ -1655,12 +1693,31 @@ def _build_fixed_deck_blueprint(
 
     # -- Slide 4: Biggest Bet / Impact Statement --
     biggest = themes[0] if themes and isinstance(themes[0], dict) else {}
-    bet_text = f"Top priority: {_s(biggest.get('theme', ''), 'N/A')}"
-    bet_detail = (
-        f"Impact {_f(biggest.get('impact_score', 0))}/10 · "
-        f"Ease {_f(biggest.get('ease_score', 0))}/10 · "
-        f"{_n(biggest.get('call_count', 0)):,} calls"
-    )
+    bet_theme = _s(biggest.get("theme", ""), "N/A")
+    bet_volume = _call_text(biggest) if biggest else "N/A"
+    bet_impact = _f(biggest.get("impact_score", 0))
+    bet_ease = _f(biggest.get("ease_score", 0))
+    bet_quadrant = _s(biggest.get("priority_quadrant", ""), "N/A").replace("_", " ").title()
+    bet_driver = _s(biggest.get("dominant_driver", ""), "N/A").replace("_", " ").title()
+
+    bet_elements: list[dict[str, Any]] = [
+        {"type": "callout", "text": bet_theme},
+        {"type": "point_description", "text": f"Impact {bet_impact}/10 · Ease {bet_ease}/10 · {bet_volume}"},
+        {"type": "bullet", "bold_label": "Quadrant:", "text": bet_quadrant, "level": 1},
+        {"type": "bullet", "bold_label": "Primary Driver:", "text": bet_driver, "level": 1},
+    ]
+    # Add contributing factors for biggest bet
+    bet_factors = biggest.get("contributing_factors", []) if biggest else []
+    if isinstance(bet_factors, list) and bet_factors:
+        bet_elements.append({"type": "h3", "text": "Contributing Factors"})
+        for cf in bet_factors[:3]:
+            bet_elements.append({"type": "bullet", "text": str(cf)[:150], "level": 1})
+    # Add quick wins for biggest bet
+    bet_qw = biggest.get("quick_wins", []) if biggest else []
+    if isinstance(bet_qw, list) and bet_qw:
+        bet_elements.append({"type": "h3", "text": "Quick Wins"})
+        for qw in bet_qw[:3]:
+            bet_elements.append({"type": "bullet", "text": str(qw)[:150], "level": 1})
 
     # -- Slide 5: Recommendations by Owning Team --
     driver_groups: dict[str, list[dict[str, Any]]] = {
@@ -1678,6 +1735,16 @@ def _build_fixed_deck_blueprint(
         action = _s(f.get("recommended_action", ""))
         if action:
             driver_groups[driver].append(f)
+    # Fallback: use theme quick_wins grouped by dominant_driver
+    if not any(driver_groups.values()):
+        for t in themes:
+            if not isinstance(t, dict):
+                continue
+            driver = _s(t.get("dominant_driver", "digital")).lower()
+            if driver not in driver_groups:
+                driver = "digital"
+            for qw in (t.get("quick_wins", []) or [])[:2]:
+                driver_groups[driver].append({"recommended_action": str(qw)})
 
     rec_elements: list[dict[str, Any]] = []
     driver_labels = {
@@ -1710,7 +1777,7 @@ def _build_fixed_deck_blueprint(
             {
                 "slide_number": 3,
                 "slide_role": "impact_matrix",
-                "layout_index": 51,
+                "layout_index": 1,
                 "title": "Impact vs. Ease Prioritization",
                 "elements": matrix_elements,
             },
@@ -1719,10 +1786,7 @@ def _build_fixed_deck_blueprint(
                 "slide_role": "callout",
                 "layout_index": 1,
                 "title": "The Biggest Bet",
-                "elements": [
-                    {"type": "callout", "text": bet_text},
-                    {"type": "point_description", "text": bet_detail},
-                ],
+                "elements": bet_elements,
             },
             {
                 "slide_number": 5,
@@ -1736,6 +1800,7 @@ def _build_fixed_deck_blueprint(
 
     # ================================================================
     # SECTION 3: THEME DEEP DIVES (1 slide per theme, max 10)
+    #   Layout: LEFT table (metrics + solutions) | RIGHT table (drivers)
     # ================================================================
 
     theme_slides: list[dict[str, Any]] = []
@@ -1744,81 +1809,64 @@ def _build_fixed_deck_blueprint(
             continue
         theme_name = _s(t.get("theme", ""), f"Theme {idx - 5}")
 
-        # Scorecard elements
-        elements: list[dict[str, Any]] = [
-            {
-                "type": "point_heading",
-                "bold_label": "Calls:",
-                "text": f"{_n(t.get('call_count', 0)):,} ({_f(t.get('call_percentage', 0))}%)",
-            },
-            {
-                "type": "point_heading",
-                "bold_label": "Impact:",
-                "text": f"{_f(t.get('impact_score', 0))}/10",
-            },
-            {
-                "type": "point_heading",
-                "bold_label": "Ease:",
-                "text": f"{_f(t.get('ease_score', 0))}/10",
-            },
-            {
-                "type": "point_heading",
-                "bold_label": "Quadrant:",
-                "text": _s(t.get("priority_quadrant", ""), "?").replace("_", " ").title(),
-            },
-            {
-                "type": "point_heading",
-                "bold_label": "Driver:",
-                "text": _s(t.get("dominant_driver", ""), "?").replace("_", " ").title(),
-            },
+        # -- LEFT TABLE: Theme Metrics + Key Solutions --
+        metrics_rows: list[list[str]] = [
+            ["Calls", _call_text(t)],
+            ["Impact Score", f"{_f(t.get('impact_score', 0))}/10"],
+            ["Ease Score", f"{_f(t.get('ease_score', 0))}/10"],
+            ["Priority Score", str(_f(t.get("priority_score", 0)))],
+            ["Quadrant", _s(t.get("priority_quadrant", ""), "?").replace("_", " ").title()],
+            ["Primary Driver", _s(t.get("dominant_driver", ""), "?").replace("_", " ").title()],
+            ["Preventability", f"{_f(t.get('preventability_score', 0)) * 100:.0f}%"],
         ]
-
-        # Contributing factors
+        # Append contributing factors as rows
         factors = t.get("contributing_factors", [])
-        if isinstance(factors, list) and factors:
-            elements.append({"type": "h3", "text": "Contributing Factors"})
-            for cf in factors[:4]:
-                elements.append({"type": "bullet", "text": str(cf)[:150], "level": 1})
-
-        # Quick wins for this theme
+        if isinstance(factors, list):
+            for ci, cf in enumerate(factors[:3], 1):
+                metrics_rows.append([f"Factor {ci}", str(cf)[:80]])
+        # Append quick wins / key solutions as rows
         theme_qw = t.get("quick_wins", [])
-        if isinstance(theme_qw, list) and theme_qw:
-            elements.append({"type": "h3", "text": "Quick Wins"})
-            for qw in theme_qw[:3]:
-                elements.append({"type": "bullet", "text": str(qw)[:150], "level": 1})
+        if isinstance(theme_qw, list):
+            for qi, qw in enumerate(theme_qw[:3], 1):
+                metrics_rows.append([f"Solution {qi}", str(qw)[:80]])
 
-        # Driver breakdown table
+        # -- RIGHT TABLE: Driver Breakdown --
         drivers = t.get("all_drivers", [])
-        if isinstance(drivers, list) and drivers:
-            driver_headers = ["Driver", "Calls", "%", "Type", "Dimension"]
-            driver_rows: list[list[str]] = []
-            for d in drivers[:6]:
+        driver_rows: list[list[str]] = []
+        if isinstance(drivers, list):
+            for d in drivers[:8]:
                 if not isinstance(d, dict):
                     continue
+                d_calls = _n(d.get("call_count", 0))
+                d_pct = _f(d.get("contribution_pct", 0))
                 driver_rows.append([
                     _s(d.get("driver", ""), "?")[:50],
-                    str(_n(d.get("call_count", 0))),
-                    f"{_f(d.get('contribution_pct', 0))}%",
-                    _s(d.get("type", ""), "?"),
-                    _s(d.get("dimension", ""), "?"),
+                    str(d_calls) if d_calls > 0 else f"{d_pct}%",
+                    _s(d.get("type", ""), "?").title(),
+                    _s(d.get("dimension", ""), "?").replace("_", " ").title(),
+                    _s(d.get("recommended_solution", ""), "-")[:60],
                 ])
-            if driver_rows:
-                elements.append({
-                    "type": "table",
-                    "headers": driver_headers,
-                    "rows": driver_rows,
-                })
 
-        elements.append({
-            "type": "chart_placeholder",
-            "chart_key": "driver_breakdown",
-            "position": "right",
-        })
+        elements: list[dict[str, Any]] = [
+            {
+                "type": "table",
+                "headers": ["Metric", "Value"],
+                "rows": metrics_rows,
+                "position": "left",
+            },
+        ]
+        if driver_rows:
+            elements.append({
+                "type": "table",
+                "headers": ["Driver", "Volume", "Type", "Dimension", "Solution"],
+                "rows": driver_rows,
+                "position": "right",
+            })
 
         theme_slides.append({
             "slide_number": idx,
             "slide_role": "theme_card",
-            "layout_index": 19,
+            "layout_index": 1,
             "title": theme_name,
             "elements": elements,
         })

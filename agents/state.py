@@ -113,6 +113,7 @@ class AnalyticsState(TypedDict):
     checkpoint_prompt: str
     checkpoint_token: str
     pending_input_for: str
+    analysis_scope_confirmed: bool
     analysis_complete: bool  # True once all plan steps are done
     phase: str  # "analysis" | "qa"
 

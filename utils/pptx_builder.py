@@ -450,7 +450,16 @@ def _build_theme_card_slide(
     layout_idx: int,
     chart_paths: dict[str, str],
 ) -> None:
-    """Theme deep dive card: text left + chart right."""
+    """Theme deep dive card: side-by-side tables or text + chart.
+
+    Supports ``position`` field on table elements:
+      - ``left``:  table on left half of slide
+      - ``right``: table on right half of slide
+      - (none):    stacked vertically below text (legacy)
+
+    When both left and right tables are present, renders them side-by-side
+    with no chart. Otherwise falls back to text + chart layout.
+    """
     layout = prs.slide_layouts[min(layout_idx, len(prs.slide_layouts) - 1)]
     slide = prs.slides.add_slide(layout)
 
@@ -464,7 +473,32 @@ def _build_theme_card_slide(
             for run in p.runs:
                 _apply_font(run, hierarchy["h1"])
 
-    # Body — OBJECT placeholder for text content
+    # Classify tables by position
+    table_elements = [e for e in elements if e.get("type") == "table"]
+    left_tables = [e for e in table_elements if e.get("position") == "left"]
+    right_tables = [e for e in table_elements if e.get("position") == "right"]
+    unpositioned_tables = [e for e in table_elements if e.get("position") not in ("left", "right")]
+
+    # Side-by-side mode: LEFT table + RIGHT table
+    if left_tables or right_tables:
+        table_top = 1.8
+        for t_elem in left_tables:
+            _add_table_to_slide(
+                slide, t_elem, hierarchy,
+                left=0.3, top=table_top, width=6.2, row_height=0.28,
+            )
+            table_top += 0.30 * (len(t_elem.get("rows", [])) + 1) + 0.2
+
+        table_top = 1.8
+        for t_elem in right_tables:
+            _add_table_to_slide(
+                slide, t_elem, hierarchy,
+                left=6.8, top=table_top, width=6.2, row_height=0.28,
+            )
+            table_top += 0.30 * (len(t_elem.get("rows", [])) + 1) + 0.2
+        return
+
+    # Legacy mode: text elements in body placeholder
     body_ph = None
     pic_ph = None
     for ph in slide.placeholders:
@@ -478,12 +512,10 @@ def _build_theme_card_slide(
         text_elements = [e for e in elements if e.get("type") not in ("table", "chart_placeholder")]
         _add_text_elements(body_ph.text_frame, text_elements, hierarchy)
 
-    # Tables — rendered as shapes below text elements
-    table_elements = [e for e in elements if e.get("type") == "table"]
-    if table_elements:
-        # Position table below text content; adjust top based on text density
-        table_top = 4.0  # default: below scorecard + story text
-        for t_elem in table_elements:
+    # Unpositioned tables — stacked vertically below text
+    if unpositioned_tables:
+        table_top = 4.0
+        for t_elem in unpositioned_tables:
             _add_table_to_slide(
                 slide, t_elem, hierarchy,
                 left=0.6, top=table_top, width=7.5, row_height=0.30,

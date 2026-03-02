@@ -358,6 +358,7 @@ def make_initial_state() -> dict[str, Any]:
         "requires_user_input": False,
         "checkpoint_message": "", "checkpoint_prompt": "",
         "checkpoint_token": "", "pending_input_for": "",
+        "analysis_scope_confirmed": False,
         "execution_trace": [], "reasoning": [],
         "node_io": {}, "io_trace": [], "last_completed_node": "",
         "dataset_path": "", "dataset_schema": {},

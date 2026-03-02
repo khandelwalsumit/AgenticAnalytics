@@ -68,6 +68,11 @@ _DECISION_TO_NEXT: dict[str, str] = {
 
 # Safety: max consecutive supervisor->data_analyst loops before forcing progress
 MAX_SUPERVISOR_LOOPS = 2
+ANALYSIS_START_NODES = {
+    "planner",
+    "friction_analysis",
+}
+ANALYSIS_CONFIRMATION_PENDING = "analysis_dimension_confirmation"
 
 
 LLM_INPUT_FIELDS: dict[str, list[str]] = {
@@ -75,6 +80,7 @@ LLM_INPUT_FIELDS: dict[str, list[str]] = {
         "messages", "dataset_schema", "filters_applied", "data_buckets",
         "themes_for_analysis", "plan_tasks", "analysis_objective",
         "selected_friction_agents", "expected_friction_lenses",
+        "analysis_scope_confirmed", "pending_input_for",
     ],
     "planner": [
         "messages", "filters_applied", "themes_for_analysis",
@@ -960,6 +966,7 @@ def _extract_data_analyst_state(
             logger.info("[DATA][bucket_data] themes_for_analysis=%s", data["themes"])
         if "buckets" in data:
             updates["data_buckets"] = data["buckets"]
+            updates["analysis_scope_confirmed"] = False
             # Top-level theme names for supervisor quick-answers
             bucket_names = [
                 info.get("bucket_name", key)
@@ -1086,6 +1093,67 @@ def _parse_dimension_preferences(
         logger.info("Supervisor: user selected dimensions=%s", selected_unique)
 
 
+def _has_bucketed_output(state: AnalyticsState) -> bool:
+    buckets = state.get("data_buckets", {})
+    themes = state.get("themes_for_analysis", [])
+    has_buckets = isinstance(buckets, dict) and bool(buckets)
+    has_themes = isinstance(themes, list) and bool(themes)
+    return has_buckets or has_themes
+
+
+def _should_gate_analysis_start(next_agent: str) -> bool:
+    return next_agent in ANALYSIS_START_NODES
+
+
+def _enforce_analysis_start_guard(state: AnalyticsState, updates: dict[str, Any]) -> None:
+    """Prevent analysis start before bucketed data exists and user confirms scope."""
+    next_agent = str(updates.get("next_agent", "") or "")
+    if not _should_gate_analysis_start(next_agent):
+        return
+
+    if not _has_bucketed_output(state):
+        logger.warning(
+            "Supervisor guard: blocked %s because bucketed output is not available yet.",
+            next_agent,
+        )
+        updates["next_agent"] = "data_analyst"
+        updates["supervisor_decision"] = "extract"
+        updates["analysis_scope_confirmed"] = False
+        return
+
+    if state.get("analysis_scope_confirmed"):
+        return
+
+    pending = str(state.get("pending_input_for", "") or "")
+    decision = str(updates.get("supervisor_decision", "") or "")
+    if pending == ANALYSIS_CONFIRMATION_PENDING and decision in {"analyse", "execute"}:
+        updates["analysis_scope_confirmed"] = True
+        _parse_dimension_preferences(state, updates)
+        if "expected_friction_lenses" not in updates:
+            selected = updates.get("selected_friction_agents", state.get("selected_friction_agents", []))
+            updates["expected_friction_lenses"] = list(dict.fromkeys([a for a in selected if a]))
+        updates["missing_friction_lenses"] = []
+        logger.info("Supervisor guard: analysis scope confirmed by user response.")
+        return
+
+    updates["next_agent"] = "user_checkpoint"
+    updates["requires_user_input"] = True
+    updates["checkpoint_message"] = (
+        "Bucketing is complete. Confirm which friction dimensions to run before analysis starts."
+    )
+    updates["checkpoint_prompt"] = (
+        "Reply `run all lenses`, or specify lenses: digital, operations, communication, policy."
+    )
+    updates["pending_input_for"] = ANALYSIS_CONFIRMATION_PENDING
+    updates["checkpoint_token"] = str(uuid.uuid4())[:8]
+    updates["analysis_scope_confirmed"] = False
+    updates["reasoning"] = [{
+        "step_name": "Supervisor",
+        "step_text": "Waiting for explicit dimension confirmation before starting analysis.",
+    }]
+    logger.info("Supervisor guard: requested explicit dimension confirmation before analysis start.")
+
+
 def _enforce_synthesis_completeness_guard(
     state: AnalyticsState,
     updates: dict[str, Any],
@@ -1198,6 +1266,7 @@ def _apply_extract_transition(
     log_prefix: str,
     bootstrap_tasks: bool,
 ) -> None:
+    updates["analysis_scope_confirmed"] = False
     if _has_real_filters(state):
         logger.info(
             "%s: filters already applied (%s), forcing extract -> analyse",
@@ -1210,17 +1279,36 @@ def _apply_extract_transition(
 
     consecutive = _count_consecutive_data_analyst_loops(state)
     if consecutive >= MAX_SUPERVISOR_LOOPS:
-        logger.warning(
-            "%s loop detected: %d consecutive extract->data_analyst cycles. "
-            "Forcing transition to 'analyse' (planner).",
-            log_prefix,
-            consecutive,
-        )
-        updates["next_agent"] = "planner"
-        updates["supervisor_decision"] = "analyse"
+        if _has_bucketed_output(state):
+            logger.warning(
+                "%s loop detected: %d consecutive extract->data_analyst cycles with bucketed output present. "
+                "Transitioning to 'analyse' (planner).",
+                log_prefix,
+                consecutive,
+            )
+            updates["next_agent"] = "planner"
+            updates["supervisor_decision"] = "analyse"
+        else:
+            logger.warning(
+                "%s loop detected: %d consecutive extract->data_analyst cycles without bucketed output. "
+                "Requesting user confirmation to retry extraction instead of forcing analysis.",
+                log_prefix,
+                consecutive,
+            )
+            updates["next_agent"] = "user_checkpoint"
+            updates["requires_user_input"] = True
+            updates["checkpoint_message"] = (
+                "Data extraction ran but bucketed output is still missing, so analysis cannot start yet."
+            )
+            updates["checkpoint_prompt"] = (
+                "Reply `retry extraction` to run extraction again, or update filters before retrying."
+            )
+            updates["pending_input_for"] = "extraction_retry_confirmation"
+            updates["checkpoint_token"] = str(uuid.uuid4())[:8]
         return
 
     updates["next_agent"] = target_agent
+    updates["analysis_scope_confirmed"] = False
     if bootstrap_tasks and not state.get("plan_tasks"):
         updates["plan_tasks"] = _PRELIMINARY_PLAN_TASKS()
         updates["plan_steps_total"] = len(updates["plan_tasks"])
@@ -1252,6 +1340,8 @@ def _apply_supervisor(s: SupervisorOutput, state: AnalyticsState, updates: dict)
         _apply_analyse_transition(state, updates, target_agent)
     else:
         updates["next_agent"] = target_agent
+
+    _enforce_analysis_start_guard(state, updates)
 
     # Only emit supervisor chat text for direct user answers/clarifications.
     # For orchestration decisions (extract/analyse/execute), keep reasoning trace
@@ -1290,6 +1380,8 @@ def _apply_supervisor_fallback(raw: str, state: AnalyticsState, updates: dict) -
         _apply_analyse_transition(state, updates, _DECISION_TO_NEXT[decision])
     else:
         updates["next_agent"] = _DECISION_TO_NEXT[decision]
+
+    _enforce_analysis_start_guard(state, updates)
 
     if decision in ("answer", "clarify") and data.get("response") and not suppress_model_response:
         updates["messages"] = [AIMessage(content=data["response"])]
