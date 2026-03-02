@@ -158,6 +158,44 @@ def _normalize_driver(raw: str) -> str:
     return "digital"
 
 
+_LABEL_TO_PROB: dict[str, float] = {
+    "high": 0.8, "medium": 0.5, "low": 0.2,
+    "very high": 0.9, "very low": 0.1,
+    "none": 0.0, "full": 1.0, "n/a": 0.5, "unknown": 0.5,
+}
+
+
+def _coerce_probability(value: Any, default: float = 0.5) -> float:
+    """Coerce an LLM-produced value to a 0.0–1.0 float.
+
+    Handles:
+    - Already a float/int in [0, 1]          → pass through
+    - Int/float > 1 (e.g. 75 meaning 75%)    → divide by 100
+    - String "0.75" or "75%"                 → parse then normalise
+    - Label strings "high", "medium", "low"  → map to fixed values
+    - Anything unparseable                   → return default
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0
+    if isinstance(value, (int, float)):
+        v = float(value)
+        return v / 100.0 if v > 1.0 else max(0.0, min(1.0, v))
+    if isinstance(value, str):
+        s = value.strip()
+        label = s.lower().rstrip(".")
+        if label in _LABEL_TO_PROB:
+            return _LABEL_TO_PROB[label]
+        s = s.rstrip("%").strip()
+        try:
+            v = float(s)
+            return v / 100.0 if v > 1.0 else max(0.0, min(1.0, v))
+        except ValueError:
+            return default
+    return default
+
+
 # ---------------------------------------------------------------------------
 # Synthesizer Agent — models
 # ---------------------------------------------------------------------------
@@ -205,6 +243,15 @@ class SynthesisSummary(BaseModel):
     quick_wins_count: int = Field(default=0)
     executive_narrative: str = Field(default="", description="2-3 sentence overall summary with call counts.")
 
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_floats(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        if "overall_preventability" in data:
+            data["overall_preventability"] = _coerce_probability(data["overall_preventability"], default=0.5)
+        return data
+
 
 class RankedFinding(BaseModel):
     """A single synthesized, prioritized finding."""
@@ -237,6 +284,18 @@ class RankedFinding(BaseModel):
         dd = data.get("dominant_driver")
         if isinstance(dd, str):
             data["dominant_driver"] = _normalize_driver(dd)
+        for field in ("preventability_score", "confidence", "call_percentage", "volume"):
+            if field in data:
+                data[field] = _coerce_probability(data[field], default=0.5)
+        for field in ("impact_score", "ease_score"):
+            if field in data:
+                raw = data[field]
+                try:
+                    v = float(raw) if not isinstance(raw, (int, float)) else float(raw)
+                    # LLM may return 0-100 scale instead of 0-10
+                    data[field] = v / 10.0 if v > 10.0 else max(0.0, min(10.0, v))
+                except (TypeError, ValueError):
+                    data[field] = 5.0
         return data
 
 
@@ -295,6 +354,17 @@ class ThemeSummary(BaseModel):
         dd = data.get("dominant_driver")
         if isinstance(dd, str):
             data["dominant_driver"] = _normalize_driver(dd)
+        for field in ("preventability_score", "call_percentage"):
+            if field in data:
+                data[field] = _coerce_probability(data[field], default=0.5)
+        for field in ("impact_score", "ease_score", "priority_score"):
+            if field in data:
+                raw = data[field]
+                try:
+                    v = float(raw) if not isinstance(raw, (int, float)) else float(raw)
+                    data[field] = v / 10.0 if v > 10.0 else max(0.0, min(10.0, v))
+                except (TypeError, ValueError):
+                    data[field] = 5.0
         return data
 
 
