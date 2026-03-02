@@ -18,6 +18,7 @@ from typing import Any
 
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import interrupt
 from langchain_core.messages import AIMessage, HumanMessage
 
 from agents.nodes import (
@@ -45,6 +46,9 @@ from agents.nodes import (
     user_checkpoint_node,
     # constants
     AGENT_STATE_FIELDS,
+    ANALYSIS_CONFIRMATION_PENDING,
+    # dimension preference parser (used by lens_confirmation node)
+    _parse_dimension_preferences,
 )
 from agents.schemas import (
     PlannerOutput,
@@ -266,6 +270,82 @@ def build_graph(
 
         _advance_plan("data_analyst", state, base)
         return base
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # LENS CONFIRMATION  (mandatory interrupt after data bucketing)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    async def lens_confirmation_node(state: AnalyticsState) -> dict[str, Any]:
+        """Mandatory gate between data analysis and friction analysis.
+
+        Uses LangGraph ``interrupt()`` to pause the graph and collect the
+        user's friction-dimension preferences.  The graph **cannot** proceed
+        to friction_analysis without passing through this node.
+
+        On first entry (buckets exist, scope not confirmed):
+            → ``interrupt()`` pauses the graph; payload is shown to user.
+        On resume:
+            → ``interrupt()`` returns the user's reply; this node parses
+              dimension preferences and sets ``analysis_scope_confirmed``.
+        Pass-through (no buckets, or already confirmed):
+            → returns empty dict, graph continues to supervisor.
+        """
+        buckets = state.get("data_buckets", {})
+        if not buckets or state.get("analysis_scope_confirmed"):
+            return {}
+
+        themes = state.get("themes_for_analysis", [])
+        theme_list = ", ".join(str(t) for t in themes[:10]) if themes else "(see buckets above)"
+        bucket_count = len(buckets) if isinstance(buckets, dict) else 0
+
+        # ── interrupt() pauses graph here; returns user's reply on resume ──
+        user_reply = interrupt({
+            "type": ANALYSIS_CONFIRMATION_PENDING,
+            "message": (
+                f"Data extraction complete \u2014 {bucket_count} theme bucket(s) "
+                f"identified: {theme_list}.\n\n"
+                "Before starting multi-lens friction analysis, please confirm "
+                "which dimensions to analyse:\n"
+                "\u2022 **Digital Friction** \u2014 app failures, self-service gaps, web/UX issues\n"
+                "\u2022 **Operations** \u2014 process breakdowns, SLA breaches, handoff failures\n"
+                "\u2022 **Communication** \u2014 notification gaps, expectation mismatches\n"
+                "\u2022 **Policy** \u2014 regulatory constraints, fee disputes, compliance issues"
+            ),
+            "prompt": (
+                "Reply **run all lenses** to analyse all dimensions, "
+                "or specify which ones (e.g. 'digital and operations')."
+            ),
+        })
+
+        # ── Graph resumes here with user's reply ──
+        logger.info("lens_confirmation: user replied %r", str(user_reply)[:120])
+
+        updates: dict[str, Any] = {
+            "analysis_scope_confirmed": True,
+            "pending_input_for": "",
+            "messages": [HumanMessage(content=str(user_reply))],
+        }
+        # Reuse the existing dimension parser (reads last HumanMessage).
+        # Build a temporary state snapshot with the user's reply so the
+        # parser can find it as the last human message.
+        tmp_state = dict(state)
+        tmp_state["messages"] = list(state.get("messages", [])) + updates["messages"]
+        _parse_dimension_preferences(tmp_state, updates)
+
+        if "expected_friction_lenses" not in updates:
+            all_lenses = [
+                "digital_friction_agent", "operations_agent",
+                "communication_agent", "policy_agent",
+            ]
+            updates["selected_friction_agents"] = list(all_lenses)
+            updates["expected_friction_lenses"] = list(all_lenses)
+        updates["missing_friction_lenses"] = []
+
+        logger.info(
+            "lens_confirmation: scope confirmed, lenses=%s",
+            updates.get("selected_friction_agents", "all"),
+        )
+        return updates
 
     # ══════════════════════════════════════════════════════════════════════════
     # FRICTION LENS AGENTS  (4 agents, run in parallel inside friction_analysis)
@@ -1013,10 +1093,11 @@ def build_graph(
     graph.add_node("planner",           planner_node)
     graph.add_node("data_analyst",      data_analyst_node)
     graph.add_node("report_analyst",    report_analyst_node)
-    graph.add_node("critique",          critique_node)
-    graph.add_node("user_checkpoint",   user_checkpoint_node)
-    graph.add_node("friction_analysis", friction_analysis_node)
-    graph.add_node("report_generation", report_generation_node)
+    graph.add_node("critique",           critique_node)
+    graph.add_node("user_checkpoint",    user_checkpoint_node)
+    graph.add_node("lens_confirmation",  lens_confirmation_node)
+    graph.add_node("friction_analysis",  friction_analysis_node)
+    graph.add_node("report_generation",  report_generation_node)
 
     graph.add_edge(START, "supervisor")
 
@@ -1045,9 +1126,15 @@ def build_graph(
         END:                 END,
     })
 
+    # data_analyst → lens_confirmation (mandatory interrupt gate)
+    # → supervisor.  The lens_confirmation node uses interrupt() to
+    # pause the graph when bucketed data exists but the user hasn't
+    # yet confirmed which friction dimensions to run.
+    graph.add_edge("data_analyst",      "lens_confirmation")
+    graph.add_edge("lens_confirmation", "supervisor")
+
     graph.add_edge("friction_analysis", "supervisor")
     graph.add_edge("report_generation", "supervisor")
-    graph.add_edge("data_analyst",      "supervisor")
     graph.add_edge("planner",           "supervisor")
     graph.add_edge("report_analyst",    "supervisor")
     graph.add_edge("critique",          "supervisor")

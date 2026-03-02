@@ -17,6 +17,7 @@ import pandas as pd
 import chainlit as cl
 from chainlit.input_widget import MultiSelect,Switch
 from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.types import Command
 
 from agents.graph import build_graph
 from config import (
@@ -593,9 +594,23 @@ async def on_message(message: cl.Message):
     is_resuming = bool(snapshot and snapshot.next)
     human_msg = HumanMessage(content=user_text)
     state["messages"].append(human_msg)
+
     if is_resuming:
-        graph_input = {"messages": [human_msg]}
-        log.info("Resuming from checkpoint with user message (next=%s)", snapshot.next)
+        # Detect whether graph paused via interrupt() or interrupt_before.
+        # interrupt() populates task.interrupts; interrupt_before does not.
+        has_interrupt_call = any(
+            getattr(task, "interrupts", None)
+            for task in (snapshot.tasks or ())
+        )
+        if has_interrupt_call:
+            # interrupt() resume: pass user reply as the resume value AND
+            # inject the HumanMessage so conversation history stays intact.
+            graph_input = Command(resume=user_text, update={"messages": [human_msg]})
+            log.info("Resuming from interrupt() with Command(resume=...) (next=%s)", snapshot.next)
+        else:
+            # interrupt_before resume: pass state update with new message.
+            graph_input = {"messages": [human_msg]}
+            log.info("Resuming from interrupt_before with user message (next=%s)", snapshot.next)
     else:
         graph_input = state
         log.info("Fresh graph run (messages=%d)", len(state["messages"]))
@@ -728,8 +743,35 @@ async def on_message(message: cl.Message):
         # Check if input is required after all nodes
         final_snapshot = graph.get_state(config)
         is_interrupted = bool(final_snapshot and final_snapshot.next)
-        
+
+        # Surface interrupt() payloads (e.g. lens_confirmation) to the user.
+        # These carry {message, prompt} dicts that should be displayed.
+        interrupt_handled = False
+        if is_interrupted and final_snapshot.tasks:
+            for task in final_snapshot.tasks:
+                for intr in getattr(task, "interrupts", ()):
+                    payload = getattr(intr, "value", None)
+                    if isinstance(payload, dict):
+                        info = payload.get("message", "")
+                        prompt = payload.get("prompt", "Please provide input to continue.")
+                        if info:
+                            await cl.Message(content=info).send()
+                        prompt_msg = await send_awaiting_input(prompt)
+                        cl.user_session.set("awaiting_prompt", prompt_msg)
+                        interrupt_handled = True
+                        log.info("interrupt() payload displayed (type=%s)", payload.get("type", "?"))
+
         if state.get("requires_user_input") or is_interrupted:
+            # If the old checkpoint pattern set requires_user_input and
+            # the interrupt() handler above didn't already show a prompt,
+            # fall back to the legacy checkpoint display.
+            if not interrupt_handled and state.get("requires_user_input"):
+                prompt = state.get("checkpoint_prompt", "Please provide input to continue.")
+                info = state.get("checkpoint_message", "")
+                if info:
+                    await cl.Message(content=info).send()
+                prompt_msg = await send_awaiting_input(prompt)
+                cl.user_session.set("awaiting_prompt", prompt_msg)
             active_node_msg.content = "Waiting for your input..."
             await active_node_msg.update()
         else:
