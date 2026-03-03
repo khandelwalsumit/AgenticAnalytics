@@ -14,6 +14,10 @@ import random
 import threading
 import time
 import uuid
+import warnings
+
+# Suppress the vertexai SDK deprecation warning (sunset June 2026, still works fine)
+warnings.filterwarnings("ignore", message="This feature is deprecated", module="vertexai")
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 from langchain_core.callbacks import CallbackManagerForLLMRun
@@ -343,11 +347,17 @@ class VertexAIChatModel(BaseChatModel):
             if not getattr(response, "candidates", None):
                 # Log block reason for diagnosis
                 feedback = getattr(response, "prompt_feedback", None)
+                block_reason = getattr(feedback, "block_reason", "UNKNOWN") if feedback else "NO_FEEDBACK"
+                safety_ratings = getattr(feedback, "safety_ratings", []) if feedback else []
                 logger.error(
-                    "Model returned no candidates. prompt_feedback=%s",
+                    "Model returned no candidates. block_reason=%s safety_ratings=%s prompt_feedback=%s",
+                    block_reason,
+                    safety_ratings,
                     feedback,
                 )
-                msg = AIMessage(content="[Model returned no response. The request may have been blocked.]")
+                msg = AIMessage(
+                    content=f"[Model returned no response. Block reason: {block_reason}. The request may have been blocked.]"
+                )
                 return ChatResult(generations=[ChatGeneration(message=msg)])
 
             candidate = response.candidates[0]
