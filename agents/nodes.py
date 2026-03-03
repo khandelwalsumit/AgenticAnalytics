@@ -1113,7 +1113,11 @@ def _should_gate_analysis_start(next_agent: str) -> bool:
 
 
 def _enforce_analysis_start_guard(state: AnalyticsState, updates: dict[str, Any]) -> None:
-    """Prevent analysis start before bucketed data exists and user confirms scope."""
+    """Prevent analysis start before bucketed data exists.
+
+    Dimension confirmation is handled by lens_confirmation_node (interrupt),
+    so this guard only redirects to data_analyst when no buckets exist.
+    """
     next_agent = str(updates.get("next_agent", "") or "")
     if not _should_gate_analysis_start(next_agent):
         return
@@ -1128,37 +1132,12 @@ def _enforce_analysis_start_guard(state: AnalyticsState, updates: dict[str, Any]
         updates["analysis_scope_confirmed"] = False
         return
 
+    # Scope confirmation is handled by lens_confirmation_node via interrupt().
+    # No user_checkpoint needed here.
     if state.get("analysis_scope_confirmed"):
         return
 
-    pending = str(state.get("pending_input_for", "") or "")
-    decision = str(updates.get("supervisor_decision", "") or "")
-    if pending == ANALYSIS_CONFIRMATION_PENDING and decision in {"analyse", "execute"}:
-        updates["analysis_scope_confirmed"] = True
-        _parse_dimension_preferences(state, updates)
-        if "expected_friction_lenses" not in updates:
-            selected = updates.get("selected_friction_agents", state.get("selected_friction_agents", []))
-            updates["expected_friction_lenses"] = list(dict.fromkeys([a for a in selected if a]))
-        updates["missing_friction_lenses"] = []
-        logger.info("Supervisor guard: analysis scope confirmed by user response.")
-        return
-
-    updates["next_agent"] = "user_checkpoint"
-    updates["requires_user_input"] = True
-    updates["checkpoint_message"] = (
-        "Bucketing is complete. Confirm which friction dimensions to run before analysis starts."
-    )
-    updates["checkpoint_prompt"] = (
-        "Reply `run all lenses`, or specify lenses: digital, operations, communication, policy."
-    )
-    updates["pending_input_for"] = ANALYSIS_CONFIRMATION_PENDING
-    updates["checkpoint_token"] = str(uuid.uuid4())[:8]
-    updates["analysis_scope_confirmed"] = False
-    updates["reasoning"] = [{
-        "step_name": "Supervisor",
-        "step_text": "Waiting for explicit dimension confirmation before starting analysis.",
-    }]
-    logger.info("Supervisor guard: requested explicit dimension confirmation before analysis start.")
+    logger.info("Supervisor guard: buckets exist, scope not yet confirmed — lens_confirmation will handle it.")
 
 
 def _enforce_synthesis_completeness_guard(

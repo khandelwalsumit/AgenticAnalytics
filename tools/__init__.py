@@ -171,7 +171,12 @@ def apply_skill(skill_name: str, bucket: str) -> str:
     )
 
 
-@tool
+class _FindingsSummaryInput(BaseModel):
+    """Input schema for get_findings_summary (no user-supplied args)."""
+    pass
+
+
+@tool(args_schema=_FindingsSummaryInput)
 def get_findings_summary() -> str:
     """Aggregate and rank all findings accumulated so far.
 

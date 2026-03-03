@@ -40,7 +40,7 @@ from tools import TOOL_REGISTRY, set_analysis_deps
 from tools.data_tools import set_data_store as set_data_tools_store
 from tools.report_tools import set_data_store as set_report_tools_store
 from ui.chat_history import load_analysis_state, save_analysis_state
-from ui.components import clear_awaiting_prompt, send_awaiting_input, send_downloads, sync_task_list
+from ui.components import send_downloads, sync_task_list
 
 # -- Logging setup ---
 log = logging.getLogger("app")
@@ -61,10 +61,9 @@ Path(DATA_OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
 
 # Nodes whose AI messages render as collapsible Steps, not chat messages.
 # The first line becomes the step title; full text is the expanded body.
-STEP_NODES = {"data_analyst", "planner", "report_analyst"}
+STEP_NODES = {"planner", "report_analyst"}
 
 STEP_NODE_LABELS = {
-    "data_analyst": "Data Extraction",
     "planner": "Planning",
     "report_analyst": "Report Review",
 }
@@ -394,7 +393,7 @@ def _setup_session(thread_id: str, state: dict[str, Any]) -> None:
     cl.user_session.set("thread_id", thread_id)
     cl.user_session.set("state", state)
     cl.user_session.set("task_list", None)
-    cl.user_session.set("awaiting_prompt", None)
+
 
 
 def _rehydrate_friction_outputs(state: dict[str, Any]) -> None:
@@ -578,7 +577,7 @@ async def on_message(message: cl.Message):
     user_text = message.content or "Proceed"
     log.info("User message: %s", user_text[:80])
     _apply_agent_selection(state, cl.user_session.get("selected_agents") or DEFAULT_SELECTED_AGENTS)
-    await clear_awaiting_prompt()
+
 
     config = {"configurable": {"thread_id": thread_id}}
     task_list: cl.TaskList | None = cl.user_session.get("task_list")
@@ -729,11 +728,11 @@ async def on_message(message: cl.Message):
                     payload = getattr(intr, "value", None)
                     if isinstance(payload, dict):
                         info = payload.get("message", "")
-                        prompt = payload.get("prompt", "Please provide input to continue.")
-                        if info:
-                            await cl.Message(content=info).send()
-                        prompt_msg = await send_awaiting_input(prompt)
-                        cl.user_session.set("awaiting_prompt", prompt_msg)
+                        prompt = payload.get("prompt", "")
+                        # Show interrupt info + prompt as a single message
+                        combined = "\n\n".join(p for p in [info, prompt] if p)
+                        if combined:
+                            await cl.Message(content=combined).send()
                         interrupt_handled = True
                         log.info("interrupt() payload displayed (type=%s)", payload.get("type", "?"))
 
