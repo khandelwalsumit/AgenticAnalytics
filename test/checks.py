@@ -293,7 +293,7 @@ try:
     # Check node names
     expected_nodes = {
         "supervisor", "planner", "data_analyst", "report_analyst",
-        "critique", "user_checkpoint", "friction_analysis",
+        "critique", "friction_analysis",
         "report_generation",
     }
     # LangGraph compiled graph stores nodes differently
@@ -329,7 +329,8 @@ try:
         "messages", "user_focus", "analysis_type", "selected_skills",
         "critique_enabled", "selected_agents", "selected_friction_agents",
         "auto_approve_checkpoints", "plan_steps_total", "plan_steps_completed",
-        "plan_tasks", "requires_user_input", "checkpoint_message",
+        "plan_tasks",
+        "checkpoint_message",
         "checkpoint_prompt", "checkpoint_token", "pending_input_for",
         "execution_trace", "reasoning", "node_io", "io_trace",
         "last_completed_node", "dataset_path", "dataset_schema",

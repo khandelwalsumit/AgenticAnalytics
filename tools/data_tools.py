@@ -74,23 +74,20 @@ def load_dataset(path: str = "") -> str:
         JSON string with schema info, row count, column types, sample values,
         and the registered parquet path.
     """
-    try:
-        df = pd.read_parquet(DEFAULT_PARQUET_PATH)
+    df = pd.read_parquet(DEFAULT_PARQUET_PATH)
 
-        stats = MetricsEngine.summary_stats(df)
-        samples: dict[str, list[str]] = {}
-        for col in df.columns:
-            non_null = df[col].dropna()
-            samples[col] = [str(v) for v in non_null.head(3).tolist()] if len(non_null) > 0 else []
-        stats["sample_values"] = samples
-        stats["data_filter_columns"] = [c for c in DATA_FILTER_COLUMNS if c in df.columns]
-        stats["llm_analysis_focus"] = [c for c in LLM_ANALYSIS_FOCUS if c in df.columns]
-        stats["group_by_columns"] = [c for c in GROUP_BY_COLUMNS if c in df.columns]
-        stats["input_parquet_path"] = str(DEFAULT_PARQUET_PATH)
+    stats = MetricsEngine.summary_stats(df)
+    samples: dict[str, list[str]] = {}
+    for col in df.columns:
+        non_null = df[col].dropna()
+        samples[col] = [str(v) for v in non_null.head(3).tolist()] if len(non_null) > 0 else []
+    stats["sample_values"] = samples
+    stats["data_filter_columns"] = [c for c in DATA_FILTER_COLUMNS if c in df.columns]
+    stats["llm_analysis_focus"] = [c for c in LLM_ANALYSIS_FOCUS if c in df.columns]
+    stats["group_by_columns"] = [c for c in GROUP_BY_COLUMNS if c in df.columns]
+    stats["input_parquet_path"] = str(DEFAULT_PARQUET_PATH)
 
-        return json.dumps(stats, indent=2)
-    except Exception as exc:
-        return json.dumps({"error": f"load_dataset failed: {exc}"})
+    return json.dumps(stats, indent=2)
 
 
 @tool
@@ -107,64 +104,61 @@ def filter_data(filters: dict[str, Any]) -> str:
     Returns:
         JSON string with filtered row count, filter summary, and filtered_parquet_path.
     """
-    try:
-        store = _get_store()
-        df = pd.read_parquet(DEFAULT_PARQUET_PATH)
+    store = _get_store()
+    df = pd.read_parquet(DEFAULT_PARQUET_PATH)
 
-        mask = pd.Series(True, index=df.index)
-        applied = {}
-        skipped = {}
+    mask = pd.Series(True, index=df.index)
+    applied = {}
+    skipped = {}
 
-        for col, val in filters.items():
-            if col not in df.columns:
-                # Find close matches to suggest
-                from difflib import get_close_matches
-                close = get_close_matches(col, list(df.columns), n=3, cutoff=0.4)
-                skipped[col] = {
-                    "reason": f"Column '{col}' not found in dataset",
-                    "suggestions": close,
-                    "available_columns": sorted(df.columns.tolist()),
+    for col, val in filters.items():
+        if col not in df.columns:
+            # Find close matches to suggest
+            from difflib import get_close_matches
+            close = get_close_matches(col, list(df.columns), n=3, cutoff=0.4)
+            skipped[col] = {
+                "reason": f"Column '{col}' not found in dataset",
+                "suggestions": close,
+                "available_columns": sorted(df.columns.tolist()),
+            }
+            continue
+        if isinstance(val, list):
+            # Check which values actually exist in the column
+            existing = set(df[col].dropna().unique().astype(str))
+            missing_vals = [v for v in val if str(v) not in existing]
+            mask &= df[col].isin(val)
+            applied[col] = val
+            if missing_vals:
+                skipped[f"{col}_values"] = {
+                    "reason": f"Some values not found in column '{col}'",
+                    "missing": missing_vals,
+                    "available": sorted(list(existing))[:30],
                 }
-                continue
-            if isinstance(val, list):
-                # Check which values actually exist in the column
-                existing = set(df[col].dropna().unique().astype(str))
-                missing_vals = [v for v in val if str(v) not in existing]
-                mask &= df[col].isin(val)
-                applied[col] = val
-                if missing_vals:
-                    skipped[f"{col}_values"] = {
-                        "reason": f"Some values not found in column '{col}'",
-                        "missing": missing_vals,
-                        "available": sorted(list(existing))[:30],
-                    }
-            else:
-                mask &= df[col] == val
-                applied[col] = val
+        else:
+            mask &= df[col] == val
+            applied[col] = val
 
-        filtered = df[mask]
+    filtered = df[mask]
 
-        metadata: dict[str, Any] = {
-            "original_rows": len(df),
-            "filtered_rows": len(filtered),
-            "filters_applied": applied,
-            "reduction_pct": round((1 - len(filtered) / max(len(df), 1)) * 100, 2),
-        }
+    metadata: dict[str, Any] = {
+        "original_rows": len(df),
+        "filtered_rows": len(filtered),
+        "filters_applied": applied,
+        "reduction_pct": round((1 - len(filtered) / max(len(df), 1)) * 100, 2),
+    }
 
-        if skipped:
-            metadata["skipped_filters"] = skipped
+    if skipped:
+        metadata["skipped_filters"] = skipped
 
-        if not applied:
-            metadata["warning"] = (
-                "No filters were applied. All requested columns were not found. "
-                "Check the 'skipped_filters' field for suggestions."
-            )
+    if not applied:
+        metadata["warning"] = (
+            "No filters were applied. All requested columns were not found. "
+            "Check the 'skipped_filters' field for suggestions."
+        )
 
-        store.store_dataframe("filter_data", filtered, metadata=metadata)
+    store.store_dataframe("filter_data", filtered, metadata=metadata)
 
-        return json.dumps(metadata, indent=2)
-    except Exception as exc:
-        return json.dumps({"error": f"filter_data failed: {exc}"})
+    return json.dumps(metadata, indent=2)
 
 
 @tool
@@ -186,140 +180,137 @@ def bucket_data(group_by: str = "", focus: str = "") -> str:
     Returns:
         JSON string with bucket names, sizes, config used, and top values.
     """
-    try:
-        store = _get_store()
+    store = _get_store()
 
-        if "filter_data" not in store.list_keys():
+    if "filter_data" not in store.list_keys():
+        return json.dumps({
+            "error": "No filtered data available. You MUST call filter_data before bucket_data.",
+            "hint": "Call filter_data with appropriate filters first, then retry bucket_data.",
+        })
+
+    df = store.get_dataframe("filter_data")
+
+    # Determine which column to group by
+    if not group_by:
+        available = [c for c in GROUP_BY_COLUMNS if c in df.columns]
+        if not available:
             return json.dumps({
-                "error": "No filtered data available. You MUST call filter_data before bucket_data.",
-                "hint": "Call filter_data with appropriate filters first, then retry bucket_data.",
-            })
-
-        df = store.get_dataframe("filter_data")
-
-        # Determine which column to group by
-        if not group_by:
-            available = [c for c in GROUP_BY_COLUMNS if c in df.columns]
-            if not available:
-                return json.dumps({
-                    "error": "No GROUP_BY_COLUMNS found in dataset",
-                    "configured": GROUP_BY_COLUMNS,
-                    "available": list(df.columns),
-                })
-            group_by = available[0]
-
-        if group_by not in df.columns:
-            return json.dumps({
-                "error": f"Column '{group_by}' not found",
+                "error": "No GROUP_BY_COLUMNS found in dataset",
+                "configured": GROUP_BY_COLUMNS,
                 "available": list(df.columns),
             })
+        group_by = available[0]
 
-        # Determine the next column in hierarchy for sub-bucketing oversized groups
-        available_cols = [c for c in GROUP_BY_COLUMNS if c in df.columns]
-        current_idx = available_cols.index(group_by) if group_by in available_cols else -1
-        next_col = available_cols[current_idx + 1] if current_idx + 1 < len(available_cols) else None
+    if group_by not in df.columns:
+        return json.dumps({
+            "error": f"Column '{group_by}' not found",
+            "available": list(df.columns),
+        })
 
-        # --- Group and apply min/max logic ---
-        grouped = df.groupby(group_by, dropna=False)
-        regular_buckets: dict[str, pd.DataFrame] = {}
-        tail_rows: list[pd.DataFrame] = []
+    # Determine the next column in hierarchy for sub-bucketing oversized groups
+    available_cols = [c for c in GROUP_BY_COLUMNS if c in df.columns]
+    current_idx = available_cols.index(group_by) if group_by in available_cols else -1
+    next_col = available_cols[current_idx + 1] if current_idx + 1 < len(available_cols) else None
 
-        for name, group_df in grouped:
-            bucket_name = str(name) if pd.notna(name) else "Unknown"
-            count = len(group_df)
+    # --- Group and apply min/max logic ---
+    grouped = df.groupby(group_by, dropna=False)
+    regular_buckets: dict[str, pd.DataFrame] = {}
+    tail_rows: list[pd.DataFrame] = []
 
-            if TAIL_BUCKET_ENABLED and count < MIN_BUCKET_SIZE:
-                # Collect into tail
-                tail_rows.append(group_df)
-            elif count > MAX_BUCKET_SIZE and next_col:
-                # Sub-bucket by next column in hierarchy
-                sub_grouped = group_df.groupby(next_col, dropna=False)
-                sub_tail: list[pd.DataFrame] = []
-                for sub_name, sub_df in sub_grouped:
-                    sub_bucket_name = f"{bucket_name} > {sub_name}" if pd.notna(sub_name) else f"{bucket_name} > Unknown"
-                    if TAIL_BUCKET_ENABLED and len(sub_df) < MIN_BUCKET_SIZE:
-                        sub_tail.append(sub_df)
-                    else:
-                        regular_buckets[sub_bucket_name] = sub_df
+    for name, group_df in grouped:
+        bucket_name = str(name) if pd.notna(name) else "Unknown"
+        count = len(group_df)
 
-                # Merge sub-tails into parent-level tail
-                if sub_tail:
-                    merged_sub_tail = pd.concat(sub_tail, ignore_index=True)
-                    if len(merged_sub_tail) >= MIN_BUCKET_SIZE:
-                        regular_buckets[f"{bucket_name} > Other"] = merged_sub_tail
-                    else:
-                        tail_rows.append(merged_sub_tail)
-            else:
-                regular_buckets[bucket_name] = group_df
+        if TAIL_BUCKET_ENABLED and count < MIN_BUCKET_SIZE:
+            # Collect into tail
+            tail_rows.append(group_df)
+        elif count > MAX_BUCKET_SIZE and next_col:
+            # Sub-bucket by next column in hierarchy
+            sub_grouped = group_df.groupby(next_col, dropna=False)
+            sub_tail: list[pd.DataFrame] = []
+            for sub_name, sub_df in sub_grouped:
+                sub_bucket_name = f"{bucket_name} > {sub_name}" if pd.notna(sub_name) else f"{bucket_name} > Unknown"
+                if TAIL_BUCKET_ENABLED and len(sub_df) < MIN_BUCKET_SIZE:
+                    sub_tail.append(sub_df)
+                else:
+                    regular_buckets[sub_bucket_name] = sub_df
 
-        # Merge all tail rows into "Other" bucket
-        if tail_rows:
-            other_df = pd.concat(tail_rows, ignore_index=True)
-            regular_buckets["Other"] = other_df
+            # Merge sub-tails into parent-level tail
+            if sub_tail:
+                merged_sub_tail = pd.concat(sub_tail, ignore_index=True)
+                if len(merged_sub_tail) >= MIN_BUCKET_SIZE:
+                    regular_buckets[f"{bucket_name} > Other"] = merged_sub_tail
+                else:
+                    tail_rows.append(merged_sub_tail)
+        else:
+            regular_buckets[bucket_name] = group_df
 
-        # --- Build per-bucket metadata and combine into one parquet ---
-        buckets_info: dict[str, Any] = {}
-        frames: list[pd.DataFrame] = []
-        for bucket_name, bucket_df in regular_buckets.items():
-            bucket_key = f"bucket_{_safe_key(bucket_name)}"
+    # Merge all tail rows into "Other" bucket
+    if tail_rows:
+        other_df = pd.concat(tail_rows, ignore_index=True)
+        regular_buckets["Other"] = other_df
 
-            # Build LLM-relevant summary (only LLM_ANALYSIS_FOCUS)
-            llm_cols = [c for c in LLM_ANALYSIS_FOCUS if c in bucket_df.columns]
-            llm_summary: dict[str, Any] = {}
-            for col in llm_cols:
-                top = MetricsEngine.top_n(bucket_df, col, n=5)
-                llm_summary[col] = top
+    # --- Build per-bucket metadata and combine into one parquet ---
+    buckets_info: dict[str, Any] = {}
+    frames: list[pd.DataFrame] = []
+    for bucket_name, bucket_df in regular_buckets.items():
+        bucket_key = f"bucket_{_safe_key(bucket_name)}"
 
-            # Resolve skills for this bucket from the CALL_REASONS_TO_SKILLS mapping.
-            # For sub-buckets ("Parent > Sub"), use only the parent part for lookup.
-            parent_reason = bucket_name.split(" > ")[0].strip()
-            assigned_skills: list[str] = (
-                CALL_REASONS_TO_SKILLS.get(parent_reason)
-                or CALL_REASONS_TO_SKILLS.get(bucket_name)
-                or []
-            )
+        # Build LLM-relevant summary (only LLM_ANALYSIS_FOCUS)
+        llm_cols = [c for c in LLM_ANALYSIS_FOCUS if c in bucket_df.columns]
+        llm_summary: dict[str, Any] = {}
+        for col in llm_cols:
+            top = MetricsEngine.top_n(bucket_df, col, n=5)
+            llm_summary[col] = top
 
-            meta: dict[str, Any] = {
-                "bucket_name": bucket_name,
-                "row_count": len(bucket_df),
-                "group_by": group_by,
-                "llm_field_summary": llm_summary,
-                "assigned_skills": assigned_skills,
-            }
-
-            if len(bucket_df) < MIN_BUCKET_SIZE:
-                meta["warning"] = f"Small bucket ({len(bucket_df)} rows)"
-
-            if focus and focus in bucket_df.columns:
-                meta["top_values"] = MetricsEngine.top_n(bucket_df, focus, n=5)
-
-            tagged = bucket_df.copy()
-            tagged["_bucket_key"] = bucket_key
-            frames.append(tagged)
-            buckets_info[bucket_key] = meta
-
-        # Store all buckets in one combined parquet
-        combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-        store.store_dataframe("bucketed_data", combined, metadata={"buckets": buckets_info})
-
-        return json.dumps(
-            {
-                "group_by": group_by,
-                "bucket_count": len(buckets_info),
-                "total_rows": len(df),
-                "config": {
-                    "min_bucket_size": MIN_BUCKET_SIZE,
-                    "max_bucket_size": MAX_BUCKET_SIZE,
-                    "tail_enabled": TAIL_BUCKET_ENABLED,
-                    "group_by_columns": GROUP_BY_COLUMNS,
-                    "llm_analysis_focus": LLM_ANALYSIS_FOCUS,
-                },
-                "buckets": buckets_info,
-            },
-            indent=2,
+        # Resolve skills for this bucket from the CALL_REASONS_TO_SKILLS mapping.
+        # For sub-buckets ("Parent > Sub"), use only the parent part for lookup.
+        parent_reason = bucket_name.split(" > ")[0].strip()
+        assigned_skills: list[str] = (
+            CALL_REASONS_TO_SKILLS.get(parent_reason)
+            or CALL_REASONS_TO_SKILLS.get(bucket_name)
+            or []
         )
-    except Exception as exc:
-        return json.dumps({"error": f"bucket_data failed: {exc}"})
+
+        meta: dict[str, Any] = {
+            "bucket_name": bucket_name,
+            "row_count": len(bucket_df),
+            "group_by": group_by,
+            "llm_field_summary": llm_summary,
+            "assigned_skills": assigned_skills,
+        }
+
+        if len(bucket_df) < MIN_BUCKET_SIZE:
+            meta["warning"] = f"Small bucket ({len(bucket_df)} rows)"
+
+        if focus and focus in bucket_df.columns:
+            meta["top_values"] = MetricsEngine.top_n(bucket_df, focus, n=5)
+
+        tagged = bucket_df.copy()
+        tagged["_bucket_key"] = bucket_key
+        frames.append(tagged)
+        buckets_info[bucket_key] = meta
+
+    # Store all buckets in one combined parquet
+    combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    store.store_dataframe("bucketed_data", combined, metadata={"buckets": buckets_info})
+
+    return json.dumps(
+        {
+            "group_by": group_by,
+            "bucket_count": len(buckets_info),
+            "total_rows": len(df),
+            "config": {
+                "min_bucket_size": MIN_BUCKET_SIZE,
+                "max_bucket_size": MAX_BUCKET_SIZE,
+                "tail_enabled": TAIL_BUCKET_ENABLED,
+                "group_by_columns": GROUP_BY_COLUMNS,
+                "llm_analysis_focus": LLM_ANALYSIS_FOCUS,
+            },
+            "buckets": buckets_info,
+        },
+        indent=2,
+    )
 
 
 @tool
@@ -336,38 +327,35 @@ def sample_data(bucket: str, n: int = 5) -> str:
     Returns:
         JSON string with sampled rows (LLM columns only).
     """
-    try:
-        store = _get_store()
-        n = min(n, MAX_SAMPLE_SIZE)
+    store = _get_store()
+    n = min(n, MAX_SAMPLE_SIZE)
 
-        df_all = store.get_dataframe("bucketed_data")
-        df = df_all[df_all["_bucket_key"] == bucket] if bucket else df_all
+    df_all = store.get_dataframe("bucketed_data")
+    df = df_all[df_all["_bucket_key"] == bucket] if bucket else df_all
 
-        # Only include LLM_ANALYSIS_FOCUS columns + grouping columns for context
-        relevant_cols = list(dict.fromkeys(
-            LLM_ANALYSIS_FOCUS + GROUP_BY_COLUMNS
-        ))
-        available_cols = [c for c in relevant_cols if c in df.columns]
-        df_slim = df[available_cols] if available_cols else df.drop(columns=["_bucket_key"], errors="ignore")
+    # Only include LLM_ANALYSIS_FOCUS columns + grouping columns for context
+    relevant_cols = list(dict.fromkeys(
+        LLM_ANALYSIS_FOCUS + GROUP_BY_COLUMNS
+    ))
+    available_cols = [c for c in relevant_cols if c in df.columns]
+    df_slim = df[available_cols] if available_cols else df.drop(columns=["_bucket_key"], errors="ignore")
 
-        sample = df_slim.sample(n=min(n, len(df_slim)), random_state=42) if len(df_slim) > 0 else df_slim
+    sample = df_slim.sample(n=min(n, len(df_slim)), random_state=42) if len(df_slim) > 0 else df_slim
 
-        rows = []
-        for _, row in sample.iterrows():
-            row_dict = {}
-            for col, val in row.items():
-                s = str(val)
-                row_dict[col] = s[:200] + "..." if len(s) > 200 else s
-            rows.append(row_dict)
+    rows = []
+    for _, row in sample.iterrows():
+        row_dict = {}
+        for col, val in row.items():
+            s = str(val)
+            row_dict[col] = s[:200] + "..." if len(s) > 200 else s
+        rows.append(row_dict)
 
-        return json.dumps({
-            "bucket": bucket,
-            "sampled_rows": len(rows),
-            "columns_included": available_cols,
-            "rows": rows,
-        }, indent=2)
-    except Exception as exc:
-        return json.dumps({"error": f"sample_data failed: {exc}", "bucket": bucket})
+    return json.dumps({
+        "bucket": bucket,
+        "sampled_rows": len(rows),
+        "columns_included": available_cols,
+        "rows": rows,
+    }, indent=2)
 
 
 @tool
@@ -381,19 +369,16 @@ def get_distribution(column: str, bucket: str = "") -> str:
     Returns:
         JSON string with value counts and percentages.
     """
-    try:
-        store = _get_store()
+    store = _get_store()
 
-        if bucket:
-            df_all = store.get_dataframe("bucketed_data")
-            df = df_all[df_all["_bucket_key"] == bucket]
-        else:
-            df = store.get_dataframe("filter_data")
+    if bucket:
+        df_all = store.get_dataframe("bucketed_data")
+        df = df_all[df_all["_bucket_key"] == bucket]
+    else:
+        df = store.get_dataframe("filter_data")
 
-        result = MetricsEngine.get_distribution(df, column)
-        return json.dumps(result, indent=2)
-    except Exception as exc:
-        return json.dumps({"error": f"get_distribution failed: {exc}", "column": column})
+    result = MetricsEngine.get_distribution(df, column)
+    return json.dumps(result, indent=2)
 
 
 # Registry of all data tools

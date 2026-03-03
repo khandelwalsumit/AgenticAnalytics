@@ -42,14 +42,11 @@ from agents.nodes import (
     _parse_json,
     # file writing
     _write_versioned_md,
-    # checkpoint node
-    user_checkpoint_node,
     # constants
     AGENT_STATE_FIELDS,
 )
 from agents.schemas import (
     PlannerOutput,
-    SectionBlueprintOutput,
     SupervisorOutput,
     SynthesizerOutput,
 )
@@ -63,27 +60,19 @@ from agents.graph_helpers import (
     FRICTION_SUB_AGENTS,
     REPORTING_SUB_AGENTS,
     _build_executive_summary_message,
-    _build_fallback_formatting_from_narrative_markdown,
-    _build_fallback_section_blueprint,
     _build_fixed_deck_blueprint,
     _build_friction_reasoning_entries,
     _build_report_reasoning_entries,
-    _build_section_formatting_message,
-    _make_sub_agent_entries,
     _make_sub_agent_entry,
     _merge_parallel_outputs,
     _merge_state_deltas,
     _record_plan_progress,
     _run_agent_with_retries,
-    _run_artifact_writer_node,
     _run_section_artifact_writer,
-    _persist_friction_outputs,
     _set_sub_agent_status,
     _set_task_sub_agents_and_emit,
     _validate_artifact_paths,
-    _validate_formatting_blueprint,
     _validate_narrative,
-    _validate_section_blueprint,
 )
 
 logger = logging.getLogger("agenticanalytics.graph")
@@ -122,12 +111,11 @@ def build_graph(
 
     # ------------------------------------------------------------------
     # Pre-create structured output chains (done once at build time)
-    # Structured agents: supervisor, planner, synthesizer_agent, formatting_agent
+    # Structured agents: supervisor, planner, synthesizer_agent
     # ------------------------------------------------------------------
     supervisor_chain, _ = agent_factory.create_structured_chain("supervisor")
     planner_chain, _    = agent_factory.create_structured_chain("planner")
     synthesizer_chain, _ = agent_factory.create_structured_chain("synthesizer_agent")
-    formatting_chain, _  = agent_factory.create_structured_chain("formatting_agent")
 
     # ══════════════════════════════════════════════════════════════════════════
     # SUPERVISOR
@@ -169,6 +157,22 @@ def build_graph(
             data = _parse_json(_text(last_msg.content))
             reasoning = data.get("reasoning", base.get("supervisor_decision", "?"))
             base["reasoning"] = [{"step_name": "Supervisor", "step_text": reasoning}]
+
+        # If routing helpers requested user input (old user_checkpoint route),
+        # use interrupt() to pause the graph and collect user reply inline.
+        if base.get("next_agent") == "user_checkpoint":
+            msg = base.get("checkpoint_message", "Awaiting your input...")
+            prompt = base.get("checkpoint_prompt", "Please provide input to continue.")
+            user_reply = interrupt({
+                "type": base.get("pending_input_for", "supervisor_checkpoint"),
+                "message": msg,
+                "prompt": prompt,
+            })
+            # Graph resumes here with user's reply — inject it so the
+            # next supervisor invocation sees it in conversation history.
+            base["messages"] = [HumanMessage(content=str(user_reply))]
+            base["next_agent"] = "supervisor"
+            base["requires_user_input"] = False
 
         return base
 
@@ -593,50 +597,6 @@ def build_graph(
         logger.info("Narrative: written to %s", narrative_path or "not written")
         return base
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # FORMATTING AGENT  (structured: outputs a slide blueprint JSON)
-    # ══════════════════════════════════════════════════════════════════════════
-
-    async def formatting_node(state: AnalyticsState) -> dict[str, Any]:
-        """Converts a single narrative section into a structured slide blueprint JSON.
-
-        Reads:
-            messages               – section formatting instruction with template spec
-            narrative_output       – full_response contains the markdown text with slide tags
-            synthesis_result       – summary context for chart data
-            findings               – compact finding list
-            report_retry_context   – retry instructions if validation failed
-
-        Writes:
-            formatting_output      – {output, full_response, agent}
-                                     full_response is a JSON section blueprint
-                                     (SectionBlueprintOutput serialised)
-        """
-        ctx = _build_extra_context("formatting_agent", state, None)
-        sys_prompt = agent_factory.parse_agent_md("formatting_agent").system_prompt + ctx
-
-        base, structured, last_msg = await _run_structured_node(
-            "formatting_agent", formatting_chain, SectionBlueprintOutput, sys_prompt, state, extra_context=ctx
-        )
-
-        if isinstance(structured, SectionBlueprintOutput):
-            blueprint_json = structured.model_dump_json(indent=2)
-            slide_count    = len(structured.slides)
-            base["formatting_output"] = {
-                "output":        f"{structured.section_key}: {slide_count} slides",
-                "full_response": blueprint_json,
-                "agent":         "formatting_agent",
-            }
-            base["reasoning"] = [{
-                "step_name": "Formatting Agent",
-                "step_text": f"Section blueprint ready: {structured.section_key} with {slide_count} slides.",
-            }]
-        elif last_msg:
-            raw = _text(last_msg.content)
-            base["formatting_output"] = _agent_output_field("formatting_agent", base["messages"], _trunc(raw, 200))
-            base["reasoning"] = [{"step_name": "Formatting Agent", "step_text": _trunc(raw, 200)}]
-
-        return base
 
     # ══════════════════════════════════════════════════════════════════════════
     # REPORT ANALYST
@@ -1097,7 +1057,6 @@ def build_graph(
     graph.add_node("data_analyst",      data_analyst_node)
     graph.add_node("report_analyst",    report_analyst_node)
     graph.add_node("critique",           critique_node)
-    graph.add_node("user_checkpoint",    user_checkpoint_node)
     graph.add_node("lens_confirmation",  lens_confirmation_node)
     graph.add_node("friction_analysis",  friction_analysis_node)
     graph.add_node("report_generation",  report_generation_node)
@@ -1113,7 +1072,7 @@ def build_graph(
             "planner":           "planner",
             "report_analyst":    "report_analyst",
             "critique":          "critique",
-            "user_checkpoint":   "user_checkpoint",
+            "supervisor":        "supervisor",
             "__end__":           END,
         }
         return route_map.get(next_agent, END)
@@ -1125,7 +1084,7 @@ def build_graph(
         "planner":           "planner",
         "report_analyst":    "report_analyst",
         "critique":          "critique",
-        "user_checkpoint":   "user_checkpoint",
+        "supervisor":        "supervisor",
         END:                 END,
     })
 
@@ -1141,8 +1100,7 @@ def build_graph(
     graph.add_edge("planner",           "supervisor")
     graph.add_edge("report_analyst",    "supervisor")
     graph.add_edge("critique",          "supervisor")
-    graph.add_edge("user_checkpoint",   "supervisor")
 
-    compiled = graph.compile(checkpointer=checkpointer, interrupt_before=["user_checkpoint"])
+    compiled = graph.compile(checkpointer=checkpointer)
     compiled.recursion_limit = 25
     return compiled

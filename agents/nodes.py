@@ -315,19 +315,23 @@ def _trace_io(state: AnalyticsState, node: str, inp: dict, out: dict) -> dict[st
 
 
 # ------------------------------------------------------------------
-# User checkpoint node
+# Blocked response sentinel check
 # ------------------------------------------------------------------
 
+_BLOCKED_SENTINEL = "[Model returned no response"
 
-async def user_checkpoint_node(state: AnalyticsState) -> dict[str, Any]:
-    """Graph pauses here for user input via interrupt_before."""
-    return {
-        "requires_user_input": True,
-        "reasoning": [{
-            "step_name": "User Checkpoint",
-            "step_text": state.get("checkpoint_message", "Awaiting your input..."),
-        }],
-    }
+
+def _check_blocked_response(agent_name: str, messages: list) -> None:
+    """Raise if the last AI message is the 'model blocked' sentinel."""
+    for m in reversed(messages):
+        if getattr(m, "type", "") == "ai" and hasattr(m, "content"):
+            text = str(m.content or "")
+            if text.startswith(_BLOCKED_SENTINEL):
+                raise RuntimeError(
+                    f"[{agent_name}] Model response was blocked by Vertex AI safety filters. "
+                    f"Full response: {text}"
+                )
+            break
 
 
 # ------------------------------------------------------------------
@@ -450,6 +454,9 @@ async def _run_react_node(
     agent = agent_factory.make_agent(agent_name, extra_context=extra_context)
     result = await agent.ainvoke({"messages": state["messages"]})
     elapsed = int(time.time() * 1000) - start_ms
+
+    # Fail loudly if model response was blocked (Vertex AI safety filter)
+    _check_blocked_response(agent_name, result.get("messages", []))
 
     input_ids = {m.id for m in state["messages"] if hasattr(m, "id") and m.id}
     new_msgs = [

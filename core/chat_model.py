@@ -46,7 +46,10 @@ from vertexai.generative_models import (
     FunctionDeclaration,
     GenerationConfig,
     GenerativeModel,
+    HarmBlockThreshold,
+    HarmCategory,
     Part,
+    SafetySetting,
     Tool as VertexTool,
 )
 
@@ -54,6 +57,25 @@ _VERTEX_AVAILABLE = True
 _VERTEX_IMPORT_ERROR: Exception | None = None
 
 _MODEL_INIT_LOCK = threading.Lock()
+
+_SAFETY_SETTINGS = [
+    SafetySetting(
+        category=HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+        threshold=HarmBlockThreshold.BLOCK_NONE,
+    ),
+    SafetySetting(
+        category=HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+        threshold=HarmBlockThreshold.BLOCK_NONE,
+    ),
+    SafetySetting(
+        category=HarmCategory.HARM_CATEGORY_HARASSMENT,
+        threshold=HarmBlockThreshold.BLOCK_NONE,
+    ),
+    SafetySetting(
+        category=HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+        threshold=HarmBlockThreshold.BLOCK_NONE,
+    ),
+]
 
 
 def _clean_schema(schema: dict[str, Any]) -> dict[str, Any]:
@@ -305,7 +327,10 @@ class VertexAIChatModel(BaseChatModel):
             response_mime_type = kwargs.get("response_mime_type", self.response_mime_type)
             generation_config = self._build_generation_config(stop, response_schema, response_mime_type)
 
-            call_kwargs: dict[str, Any] = {"generation_config": generation_config}
+            call_kwargs: dict[str, Any] = {
+                "generation_config": generation_config,
+                "safety_settings": _SAFETY_SETTINGS,
+            }
             if self.vertex_tools:
                 call_kwargs["tools"] = self.vertex_tools
 
@@ -316,6 +341,12 @@ class VertexAIChatModel(BaseChatModel):
             response = self._call_with_backoff(model.generate_content, contents, **call_kwargs)
 
             if not getattr(response, "candidates", None):
+                # Log block reason for diagnosis
+                feedback = getattr(response, "prompt_feedback", None)
+                logger.error(
+                    "Model returned no candidates. prompt_feedback=%s",
+                    feedback,
+                )
                 msg = AIMessage(content="[Model returned no response. The request may have been blocked.]")
                 return ChatResult(generations=[ChatGeneration(message=msg)])
 

@@ -356,7 +356,6 @@ def make_initial_state() -> dict[str, Any]:
         "missing_friction_lenses": [],
         "auto_approve_checkpoints": False,
         "plan_steps_total": 0, "plan_steps_completed": 0, "plan_tasks": [],
-        "requires_user_input": False,
         "checkpoint_message": "", "checkpoint_prompt": "",
         "checkpoint_token": "", "pending_input_for": "",
         "analysis_scope_confirmed": False,
@@ -596,21 +595,10 @@ async def on_message(message: cl.Message):
     state["messages"].append(human_msg)
 
     if is_resuming:
-        # Detect whether graph paused via interrupt() or interrupt_before.
-        # interrupt() populates task.interrupts; interrupt_before does not.
-        has_interrupt_call = any(
-            getattr(task, "interrupts", None)
-            for task in (snapshot.tasks or ())
-        )
-        if has_interrupt_call:
-            # interrupt() resume: pass user reply as the resume value AND
-            # inject the HumanMessage so conversation history stays intact.
-            graph_input = Command(resume=user_text, update={"messages": [human_msg]})
-            log.info("Resuming from interrupt() with Command(resume=...) (next=%s)", snapshot.next)
-        else:
-            # interrupt_before resume: pass state update with new message.
-            graph_input = {"messages": [human_msg]}
-            log.info("Resuming from interrupt_before with user message (next=%s)", snapshot.next)
+        # interrupt() resume: pass user reply as the resume value AND
+        # inject the HumanMessage so conversation history stays intact.
+        graph_input = Command(resume=user_text, update={"messages": [human_msg]})
+        log.info("Resuming from interrupt() with Command(resume=...) (next=%s)", snapshot.next)
     else:
         graph_input = state
         log.info("Fresh graph run (messages=%d)", len(state["messages"]))
@@ -684,17 +672,6 @@ async def on_message(message: cl.Message):
                     task_list = await sync_task_list(task_list, new_tasks)
                     cl.user_session.set("task_list", task_list)
 
-                # Checkpoint: awaiting user input
-                if node_output.get("requires_user_input"):
-                    prompt = node_output.get("checkpoint_prompt", "Please provide input to continue.")
-                    log.info("Checkpoint: awaiting user input (%s)", node_output.get("pending_input_for", "?"))
-                    info = node_output.get("checkpoint_message", "")
-                    if info:
-                        await cl.Message(content=info).send()
-                    prompt_msg = await send_awaiting_input(prompt)
-                    cl.user_session.set("awaiting_prompt", prompt_msg)
-                else:
-                    await clear_awaiting_prompt()
 
                 # Surface AI messages (deduplicated)
                 for msg in node_output.get("messages", []):
@@ -761,17 +738,7 @@ async def on_message(message: cl.Message):
                         interrupt_handled = True
                         log.info("interrupt() payload displayed (type=%s)", payload.get("type", "?"))
 
-        if state.get("requires_user_input") or is_interrupted:
-            # If the old checkpoint pattern set requires_user_input and
-            # the interrupt() handler above didn't already show a prompt,
-            # fall back to the legacy checkpoint display.
-            if not interrupt_handled and state.get("requires_user_input"):
-                prompt = state.get("checkpoint_prompt", "Please provide input to continue.")
-                info = state.get("checkpoint_message", "")
-                if info:
-                    await cl.Message(content=info).send()
-                prompt_msg = await send_awaiting_input(prompt)
-                cl.user_session.set("awaiting_prompt", prompt_msg)
+        if is_interrupted:
             active_node_msg.content = "Waiting for your input..."
             await active_node_msg.update()
         else:
@@ -796,6 +763,7 @@ async def on_message(message: cl.Message):
         active_node_msg.content = "Error occurred."
         await active_node_msg.update()
         await cl.Message(content=f"System error: {exc}", author="System").send()
+        raise  # re-raise so the full traceback is visible
     finally:
         if stream is not None:
             await stream.aclose()

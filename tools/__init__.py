@@ -71,63 +71,60 @@ def analyze_bucket(bucket: str, questions: list[str]) -> str:
     Returns:
         JSON with bucket metadata, distributions, and sample data for analysis.
     """
-    try:
-        if _data_store_ref is None:
-            return json.dumps({"error": "DataStore not initialized"})
+    if _data_store_ref is None:
+        raise RuntimeError("DataStore not initialized")
 
-        store = _data_store_ref
-        from config import LLM_ANALYSIS_FOCUS, GROUP_BY_COLUMNS
+    store = _data_store_ref
+    from config import LLM_ANALYSIS_FOCUS, GROUP_BY_COLUMNS
 
-        df_all = store.get_dataframe("bucketed_data")
-        df = df_all[df_all["_bucket_key"] == bucket]
-        bucket_meta = store.get_metadata("bucketed_data").get("buckets", {})
-        meta = bucket_meta.get(bucket, {})
+    df_all = store.get_dataframe("bucketed_data")
+    df = df_all[df_all["_bucket_key"] == bucket]
+    bucket_meta = store.get_metadata("bucketed_data").get("buckets", {})
+    meta = bucket_meta.get(bucket, {})
 
-        analysis_context: dict[str, Any] = {
-            "bucket": bucket,
-            "metadata": meta,
-            "questions": questions,
-            "row_count": len(df),
-        }
+    analysis_context: dict[str, Any] = {
+        "bucket": bucket,
+        "metadata": meta,
+        "questions": questions,
+        "row_count": len(df),
+    }
 
-        # Distributions for LLM_ANALYSIS_FOCUS columns only
-        llm_cols = [c for c in LLM_ANALYSIS_FOCUS if c in df.columns]
-        distributions = {}
-        for col in llm_cols:
+    # Distributions for LLM_ANALYSIS_FOCUS columns only
+    llm_cols = [c for c in LLM_ANALYSIS_FOCUS if c in df.columns]
+    distributions = {}
+    for col in llm_cols:
+        dist = MetricsEngine.get_distribution(df, col)
+        if "distribution" in dist:
+            dist["distribution"] = dist["distribution"][:10]
+        distributions[col] = dist
+
+    # Also include grouping column distributions for context
+    for col in GROUP_BY_COLUMNS:
+        if col in df.columns and col not in distributions:
             dist = MetricsEngine.get_distribution(df, col)
             if "distribution" in dist:
                 dist["distribution"] = dist["distribution"][:10]
             distributions[col] = dist
 
-        # Also include grouping column distributions for context
-        for col in GROUP_BY_COLUMNS:
-            if col in df.columns and col not in distributions:
-                dist = MetricsEngine.get_distribution(df, col)
-                if "distribution" in dist:
-                    dist["distribution"] = dist["distribution"][:10]
-                distributions[col] = dist
+    analysis_context["distributions"] = distributions
 
-        analysis_context["distributions"] = distributions
+    # Sample rows -- only LLM_ANALYSIS_FOCUS + grouping columns
+    relevant_cols = list(dict.fromkeys(LLM_ANALYSIS_FOCUS + GROUP_BY_COLUMNS))
+    available_cols = [c for c in relevant_cols if c in df.columns]
+    df_slim = df[available_cols] if available_cols else df.drop(columns=["_bucket_key"], errors="ignore")
 
-        # Sample rows — only LLM_ANALYSIS_FOCUS + grouping columns
-        relevant_cols = list(dict.fromkeys(LLM_ANALYSIS_FOCUS + GROUP_BY_COLUMNS))
-        available_cols = [c for c in relevant_cols if c in df.columns]
-        df_slim = df[available_cols] if available_cols else df.drop(columns=["_bucket_key"], errors="ignore")
+    sample = df_slim.sample(n=min(10, len(df_slim)), random_state=42) if len(df_slim) > 0 else df_slim
+    rows = []
+    for _, row in sample.iterrows():
+        row_dict = {}
+        for col, val in row.items():
+            s = str(val)
+            row_dict[col] = s[:300] + "..." if len(s) > 300 else s
+        rows.append(row_dict)
+    analysis_context["sample_rows"] = rows
+    analysis_context["columns_included"] = available_cols
 
-        sample = df_slim.sample(n=min(10, len(df_slim)), random_state=42) if len(df_slim) > 0 else df_slim
-        rows = []
-        for _, row in sample.iterrows():
-            row_dict = {}
-            for col, val in row.items():
-                s = str(val)
-                row_dict[col] = s[:300] + "..." if len(s) > 300 else s
-            rows.append(row_dict)
-        analysis_context["sample_rows"] = rows
-        analysis_context["columns_included"] = available_cols
-
-        return json.dumps(analysis_context, indent=2)
-    except Exception as exc:
-        return json.dumps({"error": f"analyze_bucket failed: {exc}", "bucket": bucket})
+    return json.dumps(analysis_context, indent=2)
 
 
 @tool
@@ -141,40 +138,37 @@ def apply_skill(skill_name: str, bucket: str) -> str:
     Returns:
         JSON with skill content and bucket context for LLM analysis.
     """
-    try:
-        if _skill_loader_ref is None:
-            return json.dumps({"error": "SkillLoader not initialized"})
-        if _data_store_ref is None:
-            return json.dumps({"error": "DataStore not initialized"})
+    if _skill_loader_ref is None:
+        raise RuntimeError("SkillLoader not initialized")
+    if _data_store_ref is None:
+        raise RuntimeError("DataStore not initialized")
 
-        skill_content = _skill_loader_ref.load_skill(skill_name)
-        from config import LLM_ANALYSIS_FOCUS
+    skill_content = _skill_loader_ref.load_skill(skill_name)
+    from config import LLM_ANALYSIS_FOCUS
 
-        df_all = _data_store_ref.get_dataframe("bucketed_data")
-        df = df_all[df_all["_bucket_key"] == bucket]
-        bucket_meta = _data_store_ref.get_metadata("bucketed_data").get("buckets", {})
-        meta = bucket_meta.get(bucket, {})
+    df_all = _data_store_ref.get_dataframe("bucketed_data")
+    df = df_all[df_all["_bucket_key"] == bucket]
+    bucket_meta = _data_store_ref.get_metadata("bucketed_data").get("buckets", {})
+    meta = bucket_meta.get(bucket, {})
 
-        focus_col = LLM_ANALYSIS_FOCUS[0] if LLM_ANALYSIS_FOCUS else ""
-        top_problems = (
-            MetricsEngine.top_n(df, focus_col, n=10)
-            if focus_col and focus_col in df.columns
-            else []
-        )
+    focus_col = LLM_ANALYSIS_FOCUS[0] if LLM_ANALYSIS_FOCUS else ""
+    top_problems = (
+        MetricsEngine.top_n(df, focus_col, n=10)
+        if focus_col and focus_col in df.columns
+        else []
+    )
 
-        return json.dumps(
-            {
-                "skill": skill_name,
-                "skill_content": skill_content,
-                "bucket": bucket,
-                "bucket_metadata": meta,
-                "row_count": len(df),
-                "top_problems": top_problems,
-            },
-            indent=2,
-        )
-    except Exception as exc:
-        return json.dumps({"error": f"apply_skill failed: {exc}", "skill": skill_name, "bucket": bucket})
+    return json.dumps(
+        {
+            "skill": skill_name,
+            "skill_content": skill_content,
+            "bucket": bucket,
+            "bucket_metadata": meta,
+            "row_count": len(df),
+            "top_problems": top_problems,
+        },
+        indent=2,
+    )
 
 
 class _NoArgs(BaseModel):
@@ -188,11 +182,8 @@ def get_findings_summary() -> str:
     Returns:
         JSON with ranked findings list.
     """
-    try:
-        ranked = MetricsEngine.rank_findings(list(_findings_accumulator))
-        return json.dumps({"total_findings": len(ranked), "findings": ranked}, indent=2)
-    except Exception as exc:
-        return json.dumps({"error": f"get_findings_summary failed: {exc}"})
+    ranked = MetricsEngine.rank_findings(list(_findings_accumulator))
+    return json.dumps({"total_findings": len(ranked), "findings": ranked}, indent=2)
 
 
 # ------------------------------------------------------------------
@@ -210,44 +201,41 @@ def validate_findings(findings: list[dict]) -> str:
     Returns:
         JSON with validation results and issues found.
     """
-    try:
-        issues = []
-        required_fields = [
-            "finding", "category", "volume", "impact_score",
-            "ease_score", "confidence", "recommended_action",
-        ]
+    issues = []
+    required_fields = [
+        "finding", "category", "volume", "impact_score",
+        "ease_score", "confidence", "recommended_action",
+    ]
 
-        for i, f in enumerate(findings):
-            for field in required_fields:
-                if field not in f:
-                    issues.append({
-                        "finding_index": i, "severity": "high",
-                        "issue": f"Missing required field: {field}",
-                    })
-            if "volume" in f and not (0 <= f["volume"] <= 100):
+    for i, f in enumerate(findings):
+        for field in required_fields:
+            if field not in f:
                 issues.append({
-                    "finding_index": i, "severity": "medium",
-                    "issue": f"Volume {f['volume']}% out of range [0, 100]",
+                    "finding_index": i, "severity": "high",
+                    "issue": f"Missing required field: {field}",
                 })
-            if "confidence" in f and not (0 <= f["confidence"] <= 1):
-                issues.append({
-                    "finding_index": i, "severity": "medium",
-                    "issue": f"Confidence {f['confidence']} out of range [0, 1]",
-                })
-            if "recommended_action" in f and len(str(f["recommended_action"])) < 10:
-                issues.append({
-                    "finding_index": i, "severity": "low",
-                    "issue": "Recommendation too vague (< 10 chars)",
-                })
+        if "volume" in f and not (0 <= f["volume"] <= 100):
+            issues.append({
+                "finding_index": i, "severity": "medium",
+                "issue": f"Volume {f['volume']}% out of range [0, 100]",
+            })
+        if "confidence" in f and not (0 <= f["confidence"] <= 1):
+            issues.append({
+                "finding_index": i, "severity": "medium",
+                "issue": f"Confidence {f['confidence']} out of range [0, 1]",
+            })
+        if "recommended_action" in f and len(str(f["recommended_action"])) < 10:
+            issues.append({
+                "finding_index": i, "severity": "low",
+                "issue": "Recommendation too vague (< 10 chars)",
+            })
 
-        return json.dumps({
-            "total_findings": len(findings),
-            "issues_found": len(issues),
-            "issues": issues,
-            "valid": len(issues) == 0,
-        }, indent=2)
-    except Exception as exc:
-        return json.dumps({"error": f"validate_findings failed: {exc}"})
+    return json.dumps({
+        "total_findings": len(findings),
+        "issues_found": len(issues),
+        "issues": issues,
+        "valid": len(issues) == 0,
+    }, indent=2)
 
 
 @tool
@@ -333,12 +321,8 @@ def execute_chart_code(code: str, output_filename: str) -> str:
         "np": np,
         "output_path": str(output_path),
     }
-    try:
-        exec(code, exec_globals)  # noqa: S102
-    except Exception as exc:
-        return json.dumps({"error": str(exc), "filename": output_filename})
-    finally:
-        plt.close("all")
+    exec(code, exec_globals)  # noqa: S102
+    plt.close("all")
 
     return json.dumps({"chart_path": str(output_path), "filename": output_filename})
 
