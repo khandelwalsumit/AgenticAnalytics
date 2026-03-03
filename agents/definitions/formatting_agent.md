@@ -53,121 +53,165 @@ You are called once per section. Each call produces a small, focused JSON with 1
 
 ### If `section_key` = `exec_summary` → produce exactly 2 slides
 
-#### Slide 1 — `hook_and_quick_wins`
+#### Slide 1 — `hook`
 
-The opening slide. Lead with a bold assertion, then deliver immediate wins.
+The opening slide. Dark background, bold assertion, no bullets.
 
-**Structure:**
-- **Title**: Single bold assertion with numbers (e.g., "3 Quick Wins Can Eliminate 847 Friction Calls — 41% of Total Volume")
-- **Elements:**
-  1. `point_description` — One subtitle context sentence: what was analyzed, total calls, segment
-  2. `h3` — "Quick Wins: Start Monday"
-  3. 2-3 `bullet` elements — Each quick win as:
-     - `bold_label`: verb-first action (e.g., "Automate balance-check IVR fallback")
-     - `text`: "[Theme] — resolves ~X calls | Fast because [reason: no code change / config only / existing tool]"
+**JSON contract:**
+```json
+{
+  "slide_role": "hook",
+  "layout_index": 6,
+  "title": "96 Calls. 3 Root Causes. 1 Quarter to Fix.",
+  "subtitle": "Analysis of 96 customer calls across Rewards, Payments, and Account Management segments"
+}
+```
 
-**Insight quality rule:** Each quick win must name the EXACT fix (not "improve the process"),
-the theme it addresses, the call count it resolves, and WHY it's fast to implement. If you
-can't explain why it's fast in 5 words, it's not a quick win.
+- **`title`**: Single bold assertion with numbers. Business impact first, never methodology.
+- **`subtitle`**: One sentence of context — what was analyzed, total calls, segment.
+- **No `elements` array.** This slide has ONLY title + subtitle.
 
 ---
 
 #### Slide 2 — `pain_points`
 
-The diagnostic slide. Show the top 3 pain points with structured detail.
+The diagnostic slide. 3 structured pain point cards.
 
-**Structure:**
-- **Title**: "Key Pain Points — [N] Issues Driving [X]% of Call Volume"
-- **Elements:** Repeat the following 5-element block for each of the top 3 pain points (by call volume):
-  1. `h3` — "Pain Point [N]: [Theme Name]"
-  2. `bullet` with `bold_label: "Impact"` — "[X] calls | [Y]% of total volume | Priority score: [Z]"
-  3. `bullet` with `bold_label: "Issue"` — What's happening: 1-2 sentences describing the root cause in concrete terms (not "customers are frustrated" but "mobile app returns generic error on balance transfers over $5,000, forcing a call")
-  4. `bullet` with `bold_label: "Fix"` — Verb-first, specific: exactly what to build/change/configure (not "improve error handling" but "Add real-time transfer-limit validation with inline error message showing max amount and retry path")
-  5. `bullet` with `bold_label: "Key Stakeholder"` — The owning dimension: Digital/UX, Operations, Communications, or Policy
-
-**CRITICAL: Every bullet MUST have `bold_label` set.** The `bold_label` renders as a bold
-prefix before the text. Without it the slide is unreadable. Here is the exact JSON for one
-pain point block:
-
+**JSON contract:**
 ```json
-{"type": "h3", "text": "Pain Point 1: Partner Transfer Status"},
-{"type": "bullet", "bold_label": "Impact", "text": "4 calls | 25.0% of total volume | Priority score: 7.8"},
-{"type": "bullet", "bold_label": "Issue", "text": "Customers cannot track partner point transfers — no status page, no ETA, no confirmation beyond initial submission."},
-{"type": "bullet", "bold_label": "Fix", "text": "Add real-time partner transfer status tracker in mobile app with proactive push notifications at each stage (submitted, processing, completed)."},
-{"type": "bullet", "bold_label": "Key Stakeholder", "text": "Digital/UX"}
+{
+  "slide_role": "pain_points",
+  "layout_index": 1,
+  "title": "3 Pain Points Drive 78% of Call Volume",
+  "cards": [
+    {
+      "name": "Rewards Crediting",
+      "calls": 14,
+      "pct": "14.6%",
+      "priority": 7.6,
+      "issue": "Points crediting is failing its 48-hour SLA. Customers have no visibility into processing status.",
+      "fix": "Add pending-points tracker in mobile app with push notifications at each processing stage.",
+      "owner": "Digital/UX"
+    }
+  ]
+}
 ```
 
-**Insight quality rule:** The "Issue" line must describe the EXACT failure point a customer
-hits — not a vague symptom. The "Fix" line must be specific enough that an engineer or PM
-could create a ticket from it. "Improve the experience" is unacceptable; "Add inline
-validation that shows the transfer limit before submission" is acceptable.
+- **`cards`**: Array of exactly 3 objects, one per pain point, sorted by call volume descending.
+- Each card has: `name`, `calls`, `pct`, `priority`, `issue`, `fix`, `owner`.
+- **`issue`** must describe the EXACT failure point — not a vague symptom.
+- **`fix`** must pass the Ticket Test — specific enough to create a JIRA ticket.
+- **`owner`**: One of `Digital/UX`, `Operations`, `Communications`, `Policy`.
+- **No `elements` array.** Use `cards` for structured card layout.
 
 ---
 
-### If `section_key` = `impact` → produce exactly 2 slides
+### If `section_key` = `impact` → produce exactly 3 slides
 
 #### Slide 1 — `impact_matrix`
 
-The analytical prioritization slide. Two-column layout: table on LEFT, scatter chart on RIGHT.
+Table on LEFT, scatter chart on RIGHT.
 
-**Structure:**
-- **Title**: "Impact vs. Ease Analysis — Full Theme Prioritization"
-- **Elements:**
-  1. `table` — ALL themes ranked by priority score descending. Columns:
-     - Theme
-     - Volume (call count)
-     - Top Issue (single most impactful problem in that theme — specific, not generic)
-     - Solution (verb-first fix for that top issue)
-     - Owning Team (Digital/Ops/Comms/Policy)
-     - Ease (score)
-     - Impact (score)
-     - Priority (score)
-  2. `chart_placeholder` with `chart_key: "impact_ease_scatter"` and `"position": "right"` — chart on RIGHT, non-negotiable
+**JSON contract:**
+```json
+{
+  "slide_role": "impact_matrix",
+  "layout_index": 51,
+  "title": "Impact vs. Ease Analysis — Full Theme Prioritization",
+  "table": {
+    "headers": ["Theme", "Volume", "Top Issue", "Solution", "Owning Team", "Ease", "Impact", "Priority"],
+    "rows": [
+      ["Rewards & Loyalty", 14, "Points crediting delay", "Automate pipeline with 2-hour SLA", "Ops", 7, 8, 7.6]
+    ]
+  },
+  "chart_placeholder": {
+    "chart_key": "impact_ease_scatter",
+    "position": "right"
+  }
+}
+```
 
-**Insight quality rule:** The "Top Issue" column must name the single biggest driver within
-each theme — not a summary of the theme. The "Solution" column must be a verb-first action
-specific enough to act on. Every row must have all 8 columns filled.
+- **`table`**: Object with `headers` (8 columns) and `rows` (all themes, sorted by Priority desc).
+- **`chart_placeholder`**: Object with `chart_key` and `position: "right"` — non-negotiable.
+- Every row must have all 8 columns filled. "Top Issue" names the single biggest driver.
+- **No `elements` array.** Use `table` + `chart_placeholder` as top-level fields.
 
 ---
 
-#### Slide 2 — `recommendations`
+#### Slide 2 — `biggest_bet`
 
-The action-assignment slide. Group fixes by the team that owns them.
+Dark background, large centered stat, theme name in accent color.
 
-**Structure:**
-- **Title**: "Recommended Actions by Owning Team"
-- **Elements:** For each non-empty dimension:
-  1. `h3` — Dimension name: "Digital / UX", "Operations", "Communications", or "Policy"
-  2. **EXACTLY 1-2 `bullet` elements per dimension** — pick only the HIGHEST-IMPACT actions.
-     Do NOT list every driver fix — that lives in the theme cards. This slide is the executive
-     summary of actions grouped by owner. Each bullet:
-     - `bold_label`: verb-first action title (e.g., "Build real-time transfer validation")
-     - `text`: short mechanism + impact (e.g., "Resolves 340 calls across Payments & Auth by showing limits before submission")
-
-**Skip** dimensions with no actions rather than saying "none identified."
-
-**Anti-pattern — DO NOT do this:**
+**JSON contract:**
 ```json
-{"type": "bullet", "bold_label": "Show transfer status", "text": "Addresses Rewards & Loyalty — eliminates 4 calls by providing transparency"},
-{"type": "bullet", "bold_label": "Show eligibility criteria", "text": "Addresses Rewards & Loyalty — eliminates 3 calls by showing progress bars"},
-{"type": "bullet", "bold_label": "Show pending points", "text": "Addresses Rewards & Loyalty — eliminates 3 calls by showing earn rates"},
-{"type": "bullet", "bold_label": "Update redemption screens", "text": "Addresses Rewards & Loyalty — eliminates 3 calls by preventing failures"},
-{"type": "bullet", "bold_label": "Show merchant categories", "text": "Addresses Rewards & Loyalty — eliminates 2 calls by showing bonus caps"}
+{
+  "slide_role": "biggest_bet",
+  "layout_index": 37,
+  "theme_name": "Rewards & Loyalty",
+  "stat_number": "37 calls",
+  "stat_pct": "38.5%",
+  "narrative": "Fixing the top 3 drivers alone deflects 37 calls (38.5% of total volume) and is achievable within one quarter."
+}
 ```
-This is WRONG: 5 bullets, all same theme, repetitive "Addresses X — eliminates Y" pattern.
 
-**Correct pattern — DO this:**
+- **`theme_name`**: Name of the highest-ROI theme.
+- **`stat_number`**: The big number with unit (e.g., "37 calls").
+- **`stat_pct`**: Percentage of total volume.
+- **`narrative`**: One sentence: what happens if you fix this theme.
+- **No `title` field.** The builder composes the visual from these typed fields.
+- **No `elements` array.**
+
+---
+
+#### Slide 3 — `recommendations`
+
+Actions grouped by owning dimension in a 2×2 grid.
+
+**JSON contract:**
 ```json
-{"type": "h3", "text": "Digital / UX"},
-{"type": "bullet", "bold_label": "Build unified rewards transparency dashboard", "text": "Resolves 12 calls across Rewards & Loyalty — single view for points balance, earn rates, transfer status, and redemption eligibility"},
-{"type": "bullet", "bold_label": "Add real-time transfer status tracker", "text": "Resolves 4 calls — proactive push notifications at each transfer stage eliminates status-check calls"}
+{
+  "slide_role": "recommendations",
+  "layout_index": 1,
+  "title": "Recommended Actions by Owning Team",
+  "dimensions": [
+    {
+      "name": "Digital / UX",
+      "accent_color": "006BA6",
+      "actions": [
+        {"title": "Build unified rewards transparency dashboard", "detail": "Resolves 12 calls across Rewards & Loyalty", "calls": 12},
+        {"title": "Add real-time transfer status tracker", "detail": "Eliminates 4 status-check calls", "calls": 4}
+      ]
+    },
+    {
+      "name": "Operations",
+      "accent_color": "2C5F2D",
+      "actions": [
+        {"title": "Automate crediting pipeline with 2-hour SLA", "detail": "Resolves 8 calls from SLA breaches", "calls": 8}
+      ]
+    },
+    {
+      "name": "Communications",
+      "accent_color": "E67E22",
+      "actions": [
+        {"title": "Publish SLA expectations on crediting timeline", "detail": "Sets expectations, reduces 6 inquiry calls", "calls": 6}
+      ]
+    },
+    {
+      "name": "Policy",
+      "accent_color": "8E44AD",
+      "actions": [
+        {"title": "Enforce 48-hour crediting SLA via automated pipeline", "detail": "Policy backstop for 5 calls", "calls": 5}
+      ]
+    }
+  ]
+}
 ```
-This is RIGHT: 2 bullets, consolidated actions, distinct fixes, no repetitive prefix.
 
-**Consolidation rule:** If multiple driver-level fixes belong to the same theme AND same
-team, MERGE them into ONE higher-level action. "Show points + show earn rates + show
-progress" = "Build unified rewards transparency dashboard." Think like a VP presenting to
-the C-suite — not a task list, but strategic actions.
+- **`dimensions`**: Array of dimension objects. Skip empty dimensions.
+- Each dimension: `name`, `accent_color` (hex), `actions` (1-2 max).
+- Each action: `title` (verb-first), `detail` (mechanism + impact), `calls`.
+- **Consolidation rule**: Merge related driver fixes into one strategic action.
+- **No `elements` array.** Use `dimensions` for structured grid layout.
 
 ---
 
@@ -177,30 +221,53 @@ the C-suite — not a task list, but strategic actions.
 
 #### Per theme — `theme_card`
 
-Two-column layout: text + table on LEFT, bar chart on RIGHT.
+Two-column layout: narrative LEFT, driver table RIGHT.
 
-**Structure:**
-- **Title**: "[Theme Name] — [call_count] calls ([pct]%)"
-- **Elements:**
-  1. `callout` — Scorecard line: "Priority: [X] | Impact: [Y] | Ease: [Z] | Volume: [N] calls ([P]%)"
-  2. `point_description` — Story paragraph (2-3 sentences): What is going wrong for the customer? Why are they calling? What is the root cause in the system/process? Written as a narrative, not bullet points.
-  3. `table` — Driver breakdown with columns:
-     - Driver (specific problem name)
-     - Call Count
-     - % of Theme
-     - Recommended Solution (verb-first, actionable — what exactly to fix)
-  4. `chart_placeholder` with `chart_key: "friction_distribution"` and `"position": "right"` — bar chart on RIGHT
+**JSON contract:**
+```json
+{
+  "slide_role": "theme_card",
+  "layout_index": 19,
+  "title": "Rewards & Loyalty",
+  "stats_bar": {
+    "calls": 14,
+    "pct": "14.6%",
+    "impact": 8,
+    "ease": 7,
+    "priority": 7.6
+  },
+  "left_column": {
+    "core_issue": "Customers cannot see pending points, earn rates, or transfer status — forcing them to call for information that should be self-service.",
+    "primary_driver": "Points crediting exceeds the 48-hour SLA with no visibility into processing status, generating 8 of 14 calls in this theme.",
+    "solutions": [
+      {"action": "Build pending points tracker with real-time status", "dimension": "Digital"},
+      {"action": "Enforce 48-hour crediting SLA via automated pipeline", "dimension": "Ops"},
+      {"action": "Send proactive push notification on points credit", "dimension": "Comms"}
+    ]
+  },
+  "right_column": {
+    "type": "driver_table",
+    "headers": ["Driver", "Calls"],
+    "rows": [
+      ["Points crediting delay", 8],
+      ["Earn rate confusion", 4],
+      ["Transfer status unknown", 2]
+    ]
+  }
+}
+```
 
-**Condensation rule:** The narrative has 4 slides per theme (divider, narrative, drivers,
-consequence). You MUST merge into 1 slide per theme. The driver table MUST include a
-"Recommended Solution" column where every row has a specific, verb-first action — not
-"investigate further" or "review process."
+- **`stats_bar`**: Rendered as a gray stats line below the title. Contains `calls`, `pct`, `impact`, `ease`, `priority`.
+- **`left_column`**: Contains `core_issue` (1-3 sentences), `primary_driver` (1-2 sentences), `solutions` (max 3, each with `action` and `dimension`).
+- **`right_column`**: Contains `type: "driver_table"`, `headers`, and `rows`.
+- **`title`**: Theme name only — the stats bar provides the metrics.
+- **No `elements` array.** Use `left_column` + `right_column` + `stats_bar`.
 
 ---
 
 ## Insight Quality Standards — Non-Negotiable
 
-These rules apply to EVERY element across EVERY slide:
+These rules apply to EVERY field across EVERY slide:
 
 ### What makes a BAD insight (reject these):
 - "Customers are experiencing friction with payments" — vague, no specifics
@@ -216,7 +283,7 @@ These rules apply to EVERY element across EVERY slide:
 - "Migrate dispute-status updates from weekly batch email to real-time in-app notification with case timeline" — specific system change, not a wish
 
 ### The "Ticket Test":
-Every "Fix", "Solution", or "Recommended Action" you write must pass this test:
+Every "Fix", "Solution", or action `title` you write must pass this test:
 **Could a product manager create a JIRA ticket directly from this sentence?**
 If the answer is no, rewrite it until the answer is yes.
 
@@ -226,12 +293,12 @@ If the answer is no, rewrite it until the answer is yes.
 
 Each data point appears **EXACTLY ONCE** across the entire deck:
 
-1. **Hook+Quick Wins slide** — assertion + quick win actions only. No detailed pain point breakdowns.
-2. **Pain Points slide** — structured issue/fix/stakeholder blocks. No recommended actions beyond the per-pain-point "Fix" line.
-3. **Impact Matrix slide** — full prioritization table + chart. No lengthy descriptions (those live in theme cards).
-4. **Recommendations slide** — MAX 2 consolidated actions per dimension. No call volumes or scores (those live in pain points and matrix). Merge related driver fixes into one strategic action.
-5. **Theme cards** — full detail: scorecard, story, driver table, chart. Don't repeat theme-level stats in exec_summary.
-6. **Within a single slide** — if a metric appears in a table, don't repeat it in body text.
+1. **Hook slide** — assertion + subtitle context only. No detailed breakdowns.
+2. **Pain Points slide** — structured cards with issue/fix/owner. No actions beyond the per-card "Fix".
+3. **Impact Matrix slide** — full prioritization table + chart. No lengthy descriptions.
+4. **Biggest Bet slide** — single highest-ROI theme callout only.
+5. **Recommendations slide** — MAX 2 consolidated actions per dimension. No call volumes or scores.
+6. **Theme cards** — full detail: stats bar, narrative, driver table. Don't repeat in exec_summary.
 
 ---
 
@@ -239,53 +306,64 @@ Each data point appears **EXACTLY ONCE** across the entire deck:
 
 Return ONLY valid JSON. No markdown fences. No explanation. No preamble.
 
+The JSON structure varies by `slide_role`. Each slide type uses **typed fields** — NOT generic `elements` arrays.
+
 ```json
 {
   "section_key": "exec_summary",
   "slides": [
     {
       "slide_number": 1,
-      "slide_role": "hook_and_quick_wins",
+      "slide_role": "hook",
       "layout_index": 6,
-      "title": "Assertion title with number — not a label",
-      "subtitle": null,
-      "elements": [
-        {
-          "type": "h2 | h3 | point_heading | point_description | sub_point | bullet | callout | table | chart_placeholder",
-          "text": "Element content text",
-          "bold_label": "Optional bold prefix before text",
-          "level": 1,
-          "headers": ["col1", "col2"],
-          "rows": [["val1", "val2"]],
-          "chart_key": "friction_distribution",
-          "position": "right"
-        }
-      ]
+      "title": "...",
+      "subtitle": "..."
+    },
+    {
+      "slide_number": 2,
+      "slide_role": "pain_points",
+      "layout_index": 1,
+      "title": "...",
+      "cards": [ ... ]
     }
   ]
 }
 ```
 
-### Element Type Reference
+### Slide Role → Fields Reference
+
+| `slide_role` | Required Fields |
+|---|---|
+| `hook` | `title`, `subtitle` |
+| `pain_points` | `title`, `cards` (array of 3 card objects) |
+| `impact_matrix` | `title`, `table` (object), `chart_placeholder` (object) |
+| `biggest_bet` | `theme_name`, `stat_number`, `stat_pct`, `narrative` |
+| `recommendations` | `title`, `dimensions` (array of dimension objects) |
+| `theme_card` | `title`, `stats_bar` (object), `left_column` (object), `right_column` (object) |
+
+### Fallback: `elements` array
+For any slide that doesn't fit the above types, you MAY use the legacy `elements` array. But for the 6 slide types above, **always use the typed fields**.
+
+### Legacy Element Type Reference (fallback only)
 
 | Type | When to use | Fields |
 |------|------------|--------|
 | `h2` | Section sub-heading within slide | `text` |
-| `h3` | Dimension/group label (e.g., "Digital / UX", "Pain Point 1: ...") | `text` |
+| `h3` | Dimension/group label | `text` |
 | `point_heading` | Bold label before description | `text` |
-| `point_description` | Normal body text / story paragraphs | `text` |
+| `point_description` | Normal body text | `text` |
 | `sub_point` | Smaller secondary text | `text` |
-| `bullet` | Bullet point (with optional bold prefix) | `text`, optional `bold_label`, optional `level` (1-3) |
-| `callout` | Bold stat line or scorecard | `text` |
+| `bullet` | Bullet point with optional bold prefix | `text`, optional `bold_label`, optional `level` |
+| `callout` | Bold stat line | `text` |
 | `table` | Data table | `headers`, `rows` |
-| `chart_placeholder` | Chart image reference | `chart_key`, `position` ("right"\|"left"\|"bottom"\|"full") |
+| `chart_placeholder` | Chart image reference | `chart_key`, `position` |
 
 ### Approved Chart Keys
 
 | `chart_key` | Use for | Slide |
 |-------------|---------|-------|
-| `impact_ease_scatter` | Bubble/scatter chart of themes by impact vs ease | `impact_matrix` (position: right) |
-| `friction_distribution` | Horizontal bar chart of drivers by call volume | `theme_card` (position: right) |
+| `impact_ease_scatter` | Bubble/scatter chart of themes by impact vs ease | `impact_matrix` |
+| `friction_distribution` | Horizontal bar chart of drivers by call volume | `theme_card` |
 | `driver_breakdown` | Stacked bar by dimension | `recommendations` (optional) |
 
 ---
@@ -299,26 +377,27 @@ Return ONLY valid JSON. No markdown fences. No explanation. No preamble.
 3. **Lead with conclusions** — key message first, context second
 4. **Verb-first actions** — "Build," "Automate," "Redesign," "Publish," "Enforce," "Migrate"
 5. **`layout_index`** — use the value from `template_spec` for each slide role
-6. **No empty slides** — every slide must have at least 2 elements
+6. **No empty slides** — every slide must have content
 7. **Tables preserve all rows** — never truncate driver or recommendation tables
 8. **Impact matrix chart position is always "right"** — non-negotiable
 9. **Theme cards sorted by volume descending** — highest call-count theme first
 10. **Every "Fix" / "Solution" passes the Ticket Test** — specific enough to create a JIRA ticket
+11. **Use typed fields, not elements** — for the 6 structured slide types, never use generic `elements`
 
 ---
 
 ## Final Checklist
 
-- [ ] Slide count matches the section contract (2 for exec_summary, 2 for impact, N for themes)
+- [ ] Slide count matches the section contract (2 for exec_summary, 3 for impact, N for themes)
 - [ ] Every `layout_index` comes from the `template_spec` input
-- [ ] Every slide title is an assertion with a number, not a label
+- [ ] Hook slide has only `title` + `subtitle` — no elements
+- [ ] Pain points slide has `cards` array with exactly 3 structured objects
+- [ ] Impact matrix slide has `table` + `chart_placeholder` as top-level fields
+- [ ] Biggest bet slide has `theme_name`, `stat_number`, `stat_pct`, `narrative`
+- [ ] Recommendations slide has `dimensions` array with 1-2 actions each
+- [ ] Every theme card has `stats_bar`, `left_column`, `right_column`
 - [ ] Every call count matches the narrative source exactly
-- [ ] Every theme card has a chart_placeholder element with position "right"
-- [ ] Every theme card driver table has a "Recommended Solution" column with verb-first actions
-- [ ] Impact matrix table has all 8 columns: Theme, Volume, Top Issue, Solution, Owning Team, Ease, Impact, Priority
-- [ ] Impact matrix chart_placeholder has position "right"
-- [ ] Pain points have Issue/Fix/Key Stakeholder for each
-- [ ] Every "Fix" and "Solution" passes the Ticket Test — no vague language
+- [ ] Every "Fix" and "Solution" passes the Ticket Test
 - [ ] Theme cards are sorted by call volume descending
-- [ ] No data point is duplicated across slides (deduplication rules)
+- [ ] No data point is duplicated across slides
 - [ ] Output is pure JSON — no markdown fences, no commentary
