@@ -119,47 +119,47 @@ def _build_section_map(layouts: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "exec_summary": {
-            "description": "Executive Summary — 2 slides",
+            "description": "Executive Summary \u2014 2 slides",
             "slides": [
                 {
-                    "slide_role": "hook",
+                    "slide_role": "executive_summary",
                     "layout_index": title_idx,
                     "layout_name": layouts.get(str(title_idx), {}).get("name", "Title"),
                     "placeholders_used": ["TITLE", "SUBTITLE"],
-                    "content_guidance": "Single bold assertion — the business problem in one sentence. No methodology.",
-                    "structured_fields": ["title", "subtitle"],
+                    "content_guidance": "Title: 'EXECUTIVE SUMMARY'. Subtitle: context sentence. Quick Wins: 3 action items with call impact.",
+                    "structured_fields": ["title", "subtitle", "quick_wins"],
                 },
                 {
                     "slide_role": "pain_points",
                     "layout_index": content_idx,
                     "layout_name": layouts.get(str(content_idx), {}).get("name", "Content"),
                     "placeholders_used": ["TITLE", "OBJECT"],
-                    "content_guidance": "Title: assertion with numbers. 3 structured pain point cards, each with name/calls/pct/priority/issue/fix/owner.",
+                    "content_guidance": "Title: assertion with numbers. 3 structured pain point cards, each with 2-3 line issue and 1-2 line fix with owner in parens.",
                     "card_count": 3,
                     "structured_fields": ["title", "cards"],
-                    "card_fields": ["name", "calls", "pct", "priority", "issue", "fix", "owner"],
+                    "card_fields": ["name", "calls", "impact_score", "priority", "issue", "fix"],
                 },
             ],
         },
         "impact": {
-            "description": "Impact & Prioritization — 3 slides",
+            "description": "Impact & Prioritization \u2014 3 slides",
             "slides": [
                 {
                     "slide_role": "impact_matrix",
                     "layout_index": title_only_idx,
                     "layout_name": layouts.get(str(title_only_idx), {}).get("name", "Title Only"),
                     "placeholders_used": ["TITLE"],
-                    "content_guidance": "Table LEFT (60%), scatter chart RIGHT (40%). 8 columns: Theme | Volume | Top Issue | Solution | Owning Team | Ease | Impact | Priority.",
-                    "has_table": True,
-                    "structured_fields": ["title", "table", "chart_placeholder"],
+                    "content_guidance": "Theme card list LEFT (~60%), scatter chart RIGHT (~40%). Each theme: name + quadrant, stats, issue. NOT a table.",
+                    "structured_fields": ["title", "themes", "chart_placeholder"],
                 },
                 {
-                    "slide_role": "biggest_bet",
-                    "layout_index": number_large_idx,
-                    "layout_name": layouts.get(str(number_large_idx), {}).get("name", "Number Large"),
+                    "slide_role": "low_hanging_fruit",
+                    "layout_index": content_idx,
+                    "layout_name": layouts.get(str(content_idx), {}).get("name", "Content"),
                     "placeholders_used": ["TITLE", "OBJECT"],
-                    "content_guidance": "Dark background. Large centered stat (60pt), theme name in accent color, deflection narrative below.",
-                    "structured_fields": ["theme_name", "stat_number", "stat_pct", "narrative"],
+                    "content_guidance": "3 easiest-to-implement solutions sorted by ease. Each: title (blue 16pt), detail (12pt elaboration), call_impact.",
+                    "structured_fields": ["title", "solutions"],
+                    "solution_fields": ["title", "detail", "call_impact"],
                 },
                 {
                     "slide_role": "recommendations",
@@ -171,6 +171,7 @@ def _build_section_map(layouts: dict[str, Any]) -> dict[str, Any]:
                     "dimension_fields": ["name", "accent_color", "actions"],
                 },
             ],
+
         },
         "theme_deep_dives": {
             "description": "Theme Deep Dives — 1 slide per theme (max 10)",

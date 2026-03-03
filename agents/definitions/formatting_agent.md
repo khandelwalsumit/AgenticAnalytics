@@ -53,23 +53,33 @@ You are called once per section. Each call produces a small, focused JSON with 1
 
 ### If `section_key` = `exec_summary` → produce exactly 2 slides
 
-#### Slide 1 — `hook`
+#### Slide 1 — `executive_summary`
 
-The opening slide. Dark background, bold assertion, no bullets.
+The opening slide. Title "EXECUTIVE SUMMARY", context subtitle, horizontal rule,
+then Quick Wins section with 3 action items.
 
 **JSON contract:**
 ```json
 {
-  "slide_role": "hook",
+  "slide_role": "executive_summary",
   "layout_index": 6,
-  "title": "96 Calls. 3 Root Causes. 1 Quarter to Fix.",
-  "subtitle": "Analysis of 96 customer calls across Rewards, Payments, and Account Management segments"
+  "title": "EXECUTIVE SUMMARY",
+  "subtitle": "Analysis of 96 customer calls across Rewards, Payments, and Account Management — 78% preventable",
+  "quick_wins": [
+    "Automate balance-check IVR fallback — Rewards — resolves ~8 calls | Config-only change",
+    "Publish planned-maintenance windows via push notification — Payments — resolves ~5 calls | No code change",
+    "Add inline transfer-limit validation — Auth — resolves ~4 calls | Existing API"
+  ]
 }
 ```
 
-- **`title`**: Single bold assertion with numbers. Business impact first, never methodology.
-- **`subtitle`**: One sentence of context — what was analyzed, total calls, segment.
-- **No `elements` array.** This slide has ONLY title + subtitle.
+- **`title`**: Always "EXECUTIVE SUMMARY" — the assertion lives in the subtitle.
+- **`subtitle`**: One sentence of context — what was analyzed, total calls, segment, preventability %.
+- **`quick_wins`**: Array of 3 action strings. Each quick win is a single sentence:
+  `"[Verb-first action] — [Theme] — resolves ~X calls | [Why it's fast: config-only / no code / existing tool]"`
+- Quick wins must name the EXACT fix, the theme, the call count, and WHY it's fast.
+  If you can't explain why it's fast in 5 words, it's not a quick win.
+- **No `elements` array.**
 
 ---
 
@@ -87,21 +97,21 @@ The diagnostic slide. 3 structured pain point cards.
     {
       "name": "Rewards Crediting",
       "calls": 14,
-      "pct": "14.6%",
+      "impact_score": 8,
       "priority": 7.6,
-      "issue": "Points crediting is failing its 48-hour SLA. Customers have no visibility into processing status.",
-      "fix": "Add pending-points tracker in mobile app with push notifications at each processing stage.",
-      "owner": "Digital/UX"
+      "issue": "Points crediting is failing its 48-hour SLA. Customers have no visibility into processing status, forcing them to call for updates on every transaction.",
+      "fix": "Add pending-points tracker in mobile app with push notifications at each processing stage (Digital/UX)"
     }
   ]
 }
 ```
 
 - **`cards`**: Array of exactly 3 objects, one per pain point, sorted by call volume descending.
-- Each card has: `name`, `calls`, `pct`, `priority`, `issue`, `fix`, `owner`.
-- **`issue`** must describe the EXACT failure point — not a vague symptom.
-- **`fix`** must pass the Ticket Test — specific enough to create a JIRA ticket.
-- **`owner`**: One of `Digital/UX`, `Operations`, `Communications`, `Policy`.
+- Each card has: `name`, `calls`, `impact_score`, `priority`, `issue`, `fix`.
+- **`issue`**: 2-3 lines describing the EXACT failure point — not a vague symptom.
+  What is broken? What does the customer experience? Why does it generate calls?
+- **`fix`**: 1-2 lines, verb-first. Include the owning team in parentheses at the end.
+  Must pass the Ticket Test — specific enough to create a JIRA ticket.
 - **No `elements` array.** Use `cards` for structured card layout.
 
 ---
@@ -110,20 +120,26 @@ The diagnostic slide. 3 structured pain point cards.
 
 #### Slide 1 — `impact_matrix`
 
-Table on LEFT, scatter chart on RIGHT.
+Theme card list on LEFT (~60%), scatter chart on RIGHT (~40%).
+This is NOT a table — it's a compact list of theme blocks repeated for top 10 themes.
 
 **JSON contract:**
 ```json
 {
   "slide_role": "impact_matrix",
   "layout_index": 51,
-  "title": "Impact vs. Ease Analysis — Full Theme Prioritization",
-  "table": {
-    "headers": ["Theme", "Volume", "Top Issue", "Solution", "Owning Team", "Ease", "Impact", "Priority"],
-    "rows": [
-      ["Rewards & Loyalty", 14, "Points crediting delay", "Automate pipeline with 2-hour SLA", "Ops", 7, 8, 7.6]
-    ]
-  },
+  "title": "Impact vs. Ease — Full Theme Prioritization",
+  "themes": [
+    {
+      "name": "Rewards & Loyalty",
+      "quadrant": "High Impact, High Ease",
+      "calls": 14,
+      "impact": 8,
+      "ease": 7,
+      "priority": 7.6,
+      "issue": "Points crediting delay forces customers to call for status updates"
+    }
+  ],
   "chart_placeholder": {
     "chart_key": "impact_ease_scatter",
     "position": "right"
@@ -131,35 +147,38 @@ Table on LEFT, scatter chart on RIGHT.
 }
 ```
 
-- **`table`**: Object with `headers` (8 columns) and `rows` (all themes, sorted by Priority desc).
+- **`themes`**: Array of ALL themes (max 10), sorted by priority score descending.
+- Each theme: `name`, `quadrant`, `calls`, `impact`, `ease`, `priority`, `issue` (1 sentence).
 - **`chart_placeholder`**: Object with `chart_key` and `position: "right"` — non-negotiable.
-- Every row must have all 8 columns filled. "Top Issue" names the single biggest driver.
-- **No `elements` array.** Use `table` + `chart_placeholder` as top-level fields.
+- **No `table` field.** No `elements` array. Use `themes` array.
 
 ---
 
-#### Slide 2 — `biggest_bet`
+#### Slide 2 — `low_hanging_fruit`
 
-Dark background, large centered stat, theme name in accent color.
+The 3 easiest-to-implement solutions, sorted by ease score descending.
 
 **JSON contract:**
 ```json
 {
-  "slide_role": "biggest_bet",
-  "layout_index": 37,
-  "theme_name": "Rewards & Loyalty",
-  "stat_number": "37 calls",
-  "stat_pct": "38.5%",
-  "narrative": "Fixing the top 3 drivers alone deflects 37 calls (38.5% of total volume) and is achievable within one quarter."
+  "slide_role": "low_hanging_fruit",
+  "layout_index": 1,
+  "title": "Low Hanging Fruit",
+  "solutions": [
+    {
+      "title": "Automate balance-check IVR fallback",
+      "detail": "Redirect balance-inquiry calls to existing IVR module. No code change — config update in IVR routing table. Customers get instant answers instead of waiting for an agent.",
+      "call_impact": "Resolves ~8 calls from Rewards & Loyalty theme"
+    }
+  ]
 }
 ```
 
-- **`theme_name`**: Name of the highest-ROI theme.
-- **`stat_number`**: The big number with unit (e.g., "37 calls").
-- **`stat_pct`**: Percentage of total volume.
-- **`narrative`**: One sentence: what happens if you fix this theme.
-- **No `title` field.** The builder composes the visual from these typed fields.
-- **No `elements` array.**
+- **`solutions`**: Array of exactly 3 objects, sorted by ease of implementation.
+- Each solution: `title` (verb-first, blue 16pt), `detail` (1-2 sentences elaborating the solution, black 12pt), `call_impact` (which calls it resolves).
+- These are the EASIEST wins — focus on things requiring no code change, config-only,
+  or leveraging existing tools/APIs.
+- **No `elements` array.** Use `solutions` for structured list.
 
 ---
 
@@ -293,10 +312,10 @@ If the answer is no, rewrite it until the answer is yes.
 
 Each data point appears **EXACTLY ONCE** across the entire deck:
 
-1. **Hook slide** — assertion + subtitle context only. No detailed breakdowns.
-2. **Pain Points slide** — structured cards with issue/fix/owner. No actions beyond the per-card "Fix".
-3. **Impact Matrix slide** — full prioritization table + chart. No lengthy descriptions.
-4. **Biggest Bet slide** — single highest-ROI theme callout only.
+1. **Executive Summary slide** — context subtitle + quick wins only. No pain point detail.
+2. **Pain Points slide** — structured cards with issue/fix. No recommended actions beyond the per-card "Fix".
+3. **Impact Matrix slide** — theme list + chart. No lengthy descriptions.
+4. **Low Hanging Fruit slide** — 3 easiest solutions with elaboration. No scores.
 5. **Recommendations slide** — MAX 2 consolidated actions per dimension. No call volumes or scores.
 6. **Theme cards** — full detail: stats bar, narrative, driver table. Don't repeat in exec_summary.
 
@@ -314,10 +333,11 @@ The JSON structure varies by `slide_role`. Each slide type uses **typed fields**
   "slides": [
     {
       "slide_number": 1,
-      "slide_role": "hook",
+      "slide_role": "executive_summary",
       "layout_index": 6,
-      "title": "...",
-      "subtitle": "..."
+      "title": "EXECUTIVE SUMMARY",
+      "subtitle": "...",
+      "quick_wins": ["...", "...", "..."]
     },
     {
       "slide_number": 2,
@@ -334,10 +354,10 @@ The JSON structure varies by `slide_role`. Each slide type uses **typed fields**
 
 | `slide_role` | Required Fields |
 |---|---|
-| `hook` | `title`, `subtitle` |
+| `executive_summary` | `title`, `subtitle`, `quick_wins` (array of 3 strings) |
 | `pain_points` | `title`, `cards` (array of 3 card objects) |
-| `impact_matrix` | `title`, `table` (object), `chart_placeholder` (object) |
-| `biggest_bet` | `theme_name`, `stat_number`, `stat_pct`, `narrative` |
+| `impact_matrix` | `title`, `themes` (array of theme objects), `chart_placeholder` (object) |
+| `low_hanging_fruit` | `title`, `solutions` (array of 3 solution objects) |
 | `recommendations` | `title`, `dimensions` (array of dimension objects) |
 | `theme_card` | `title`, `stats_bar` (object), `left_column` (object), `right_column` (object) |
 
@@ -371,30 +391,28 @@ For any slide that doesn't fit the above types, you MAY use the legacy `elements
 ## Content Rules — Non-Negotiable
 
 1. **Preserve all call counts exactly** — never round, never drop
-2. **Slide titles are assertions with numbers** — not labels
-   - BAD: "Rewards & Loyalty"
-   - GOOD: "Rewards & Loyalty — 32 Calls, 33% of Volume"
+2. **Slide titles are assertions with numbers** — not labels (except "EXECUTIVE SUMMARY" and "Low Hanging Fruit")
 3. **Lead with conclusions** — key message first, context second
 4. **Verb-first actions** — "Build," "Automate," "Redesign," "Publish," "Enforce," "Migrate"
 5. **`layout_index`** — use the value from `template_spec` for each slide role
 6. **No empty slides** — every slide must have content
-7. **Tables preserve all rows** — never truncate driver or recommendation tables
-8. **Impact matrix chart position is always "right"** — non-negotiable
-9. **Theme cards sorted by volume descending** — highest call-count theme first
-10. **Every "Fix" / "Solution" passes the Ticket Test** — specific enough to create a JIRA ticket
-11. **Use typed fields, not elements** — for the 6 structured slide types, never use generic `elements`
+7. **Impact matrix chart position is always "right"** — non-negotiable
+8. **Theme cards sorted by volume descending** — highest call-count theme first
+9. **Every "Fix" / "Solution" passes the Ticket Test** — specific enough to create a JIRA ticket
+10. **Use typed fields, not elements** — for the 6 structured slide types, never use generic `elements`
 
 ---
 
 ## Final Checklist
 
-- [ ] Slide count matches the section contract (2 for exec_summary, 3 for impact, N for themes)
-- [ ] Every `layout_index` comes from the `template_spec` input
-- [ ] Hook slide has only `title` + `subtitle` — no elements
-- [ ] Pain points slide has `cards` array with exactly 3 structured objects
-- [ ] Impact matrix slide has `table` + `chart_placeholder` as top-level fields
-- [ ] Biggest bet slide has `theme_name`, `stat_number`, `stat_pct`, `narrative`
-- [ ] Recommendations slide has `dimensions` array with 1-2 actions each
+- [ ] Slide count matches: 2 for exec_summary, 3 for impact, N for themes
+- [ ] Every `layout_index` comes from `template_spec`
+- [ ] Executive summary has `title`, `subtitle`, `quick_wins` (3 items)
+- [ ] Pain points has `cards` array with exactly 3 objects
+- [ ] Pain point `issue` is 2-3 lines, `fix` is 1-2 lines with owner in parens
+- [ ] Impact matrix has `themes` array + `chart_placeholder`
+- [ ] Low hanging fruit has `solutions` array with exactly 3 objects
+- [ ] Recommendations has `dimensions` array with 1-2 actions each
 - [ ] Every theme card has `stats_bar`, `left_column`, `right_column`
 - [ ] Every call count matches the narrative source exactly
 - [ ] Every "Fix" and "Solution" passes the Ticket Test
