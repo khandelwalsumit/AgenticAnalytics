@@ -588,11 +588,18 @@ async def on_message(message: cl.Message):
 
     # Resume from checkpoint interrupt or start fresh
     snapshot = graph.get_state(config)
-    is_resuming = bool(snapshot and snapshot.next)
+    # Only resume via Command(resume=...) if there's a real interrupt pending,
+    # not just a stale checkpoint from update_state during on_chat_resume.
+    has_real_interrupt = False
+    if snapshot and snapshot.next:
+        for task in (snapshot.tasks or []):
+            if getattr(task, "interrupts", ()):
+                has_real_interrupt = True
+                break
     human_msg = HumanMessage(content=user_text)
     state["messages"].append(human_msg)
 
-    if is_resuming:
+    if has_real_interrupt:
         # interrupt() resume: pass user reply as the resume value AND
         # inject the HumanMessage so conversation history stays intact.
         graph_input = Command(resume=user_text, update={"messages": [human_msg]})
@@ -710,6 +717,13 @@ async def on_message(message: cl.Message):
                     else:
                         state[k] = v
 
+                # Mid-stream checkpoint: persist state after key nodes so
+                # a crash during later stages doesn't lose prior work.
+                if node_name in {"data_analyst", "lens_confirmation", "friction_analysis"}:
+                    cl.user_session.set("state", state)
+                    await save_analysis_state(thread_id, state)
+                    log.info("Mid-stream checkpoint saved after %s", node_name)
+
         reasoning_step.status = "success"
         await reasoning_step.update()
         log.info("Graph stream complete. plan=%d/%d",
@@ -755,6 +769,10 @@ async def on_message(message: cl.Message):
 
     except Exception as exc:
         log.error("Graph error: %s", exc, exc_info=True)
+        # Save whatever state we have so user can resume from last good point
+        cl.user_session.set("state", state)
+        await save_analysis_state(thread_id, state)
+        log.info("State saved on error for recovery (thread=%s)", thread_id)
         reasoning_step.status = "failed"
         await reasoning_step.update()
         active_node_msg.content = "Error occurred."
@@ -842,7 +860,4 @@ async def on_chat_resume(thread: dict):
 
 @cl.on_chat_end
 async def on_chat_end():
-    log.info("Chat end, cleaning up DataStore")
-    data_store: DataStore | None = cl.user_session.get("data_store")
-    if data_store:
-        data_store.cleanup()
+    log.info("Chat end")
