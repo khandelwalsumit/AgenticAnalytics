@@ -11,7 +11,7 @@ from langchain_core.tools import tool
 from langchain.agents import create_agent
 from pydantic import BaseModel, Field
 
-from core.llm import VertexAILLM
+from core.chat_model import VertexAILLM
 
 SEP = "\n" + "=" * 60 + "\n"
 

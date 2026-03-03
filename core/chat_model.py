@@ -41,22 +41,17 @@ try:
 except Exception:
     _RATE_LIMIT_EXCEPTIONS = ()
 
-try:
-    from vertexai.generative_models import (
-        Content,
-        FunctionDeclaration,
-        GenerationConfig,
-        GenerativeModel,
-        Part,
-        Tool as VertexTool,
-    )
+from vertexai.generative_models import (
+    Content,
+    FunctionDeclaration,
+    GenerationConfig,
+    GenerativeModel,
+    Part,
+    Tool as VertexTool,
+)
 
-    _VERTEX_AVAILABLE = True
-    _VERTEX_IMPORT_ERROR: Exception | None = None
-except Exception as exc:  # pragma: no cover - depends on runtime env
-    Content = FunctionDeclaration = GenerationConfig = GenerativeModel = Part = VertexTool = Any
-    _VERTEX_AVAILABLE = False
-    _VERTEX_IMPORT_ERROR = exc
+_VERTEX_AVAILABLE = True
+_VERTEX_IMPORT_ERROR: Exception | None = None
 
 _MODEL_INIT_LOCK = threading.Lock()
 

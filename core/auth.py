@@ -77,8 +77,18 @@ def get_coin_token(timeout_seconds: int = 30) -> str:
     return token
 
 
+# Personal mode: active when R2D2_PROJECT is not set in the environment.
+# In this mode the COIN token flow is skipped entirely and Vertex AI is
+# initialised with Application Default Credentials (ADC).
+# Run once locally:  gcloud auth application-default login
+_PERSONAL_MODE: bool = not bool(os.getenv("R2D2_PROJECT", "").strip())
+
+
 def authenticate_vertexai(force: bool = False) -> None:
-    """Initialize Vertex AI with R2D2 auth metadata.
+    """Initialize Vertex AI.
+
+    Personal mode (no USERNAME in env): uses Application Default Credentials.
+    Corporate mode (USERNAME set):       uses COIN token + R2D2 endpoint.
 
     This is safe for concurrent callers and no-ops after first successful init,
     unless force=True.
@@ -95,6 +105,23 @@ def authenticate_vertexai(force: bool = False) -> None:
         if _AUTH_INITIALIZED and not force:
             return
 
+        if _PERSONAL_MODE:
+            # ADC path — no COIN token needed.
+            # Requires GOOGLE_CLOUD_PROJECT to be set (or gcloud project configured).
+            vertexai.init(
+                project=config.GOOGLE_CLOUD_PROJECT or None,
+                location=config.GOOGLE_CLOUD_LOCATION,
+            )
+            _AUTH_INITIALIZED = True
+            logger.info(
+                "[personal mode] Initialized Vertex AI with Application Default Credentials "
+                "(project=%s, location=%s).",
+                config.GOOGLE_CLOUD_PROJECT or "<gcloud default>",
+                config.GOOGLE_CLOUD_LOCATION,
+            )
+            return
+
+        # Corporate path — COIN token + R2D2 metadata.
         if not config.R2D2_PROJECT or not config.R2D2_ENDPOINT or not config.USERNAME:
             raise RuntimeError(
                 "Missing R2D2 settings. Set R2D2_PROJECT, R2D2_ENDPOINT, and USERNAME."
