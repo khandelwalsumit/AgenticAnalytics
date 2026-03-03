@@ -168,9 +168,8 @@ def build_graph(
                 "message": msg,
                 "prompt": prompt,
             })
-            # Graph resumes here with user's reply — inject it so the
-            # next supervisor invocation sees it in conversation history.
-            base["messages"] = [HumanMessage(content=str(user_reply))]
+            # Graph resumes here with user's reply.
+            # Do NOT inject HumanMessage — Command.update in on_message already does it.
             base["next_agent"] = "supervisor"
             base["requires_user_input"] = False
 
@@ -326,17 +325,20 @@ def build_graph(
         # ── Graph resumes here with user's reply ──
         logger.info("lens_confirmation: user replied %r", str(user_reply)[:120])
 
+        # Do NOT inject HumanMessage here — Command(update={"messages": [human_msg]})
+        # in on_message already delivers the user's reply into graph state.
+        # Adding it again causes duplicate messages that confuse the supervisor.
         updates: dict[str, Any] = {
             "analysis_scope_confirmed": True,
             "pending_input_for": "",
-            "messages": [HumanMessage(content=str(user_reply))],
+            "next_agent": "planner",
         }
         # Lazy import — avoids any graph.py↔nodes.py load-time circular dep.
         # Build a temporary state snapshot with the user's reply so the
         # parser can find it as the last human message.
         from agents.nodes import _parse_dimension_preferences  # noqa: PLC0415
         tmp_state = dict(state)
-        tmp_state["messages"] = list(state.get("messages", [])) + updates["messages"]
+        tmp_state["messages"] = list(state.get("messages", [])) + [HumanMessage(content=str(user_reply))]
         _parse_dimension_preferences(tmp_state, updates)
 
         if "expected_friction_lenses" not in updates:
@@ -1088,12 +1090,24 @@ def build_graph(
         END:                 END,
     })
 
-    # data_analyst → lens_confirmation (mandatory interrupt gate)
-    # → supervisor.  The lens_confirmation node uses interrupt() to
-    # pause the graph when bucketed data exists but the user hasn't
-    # yet confirmed which friction dimensions to run.
-    graph.add_edge("data_analyst",      "lens_confirmation")
-    graph.add_edge("lens_confirmation", "supervisor")
+    # data_analyst → lens_confirmation (mandatory interrupt gate).
+    # When scope is freshly confirmed (no analysis plan yet), skip the
+    # supervisor and go straight to planner — the supervisor would
+    # redundantly present data insights and ask for confirmation again.
+    graph.add_edge("data_analyst", "lens_confirmation")
+
+    def route_from_lens_confirmation(state: AnalyticsState) -> str:
+        # lens_confirmation_node sets next_agent="planner" when it
+        # actively confirms scope.  Pass-through (no buckets, or
+        # already confirmed) returns {} so next_agent keeps its old value.
+        if state.get("next_agent") == "planner":
+            return "planner"
+        return "supervisor"
+
+    graph.add_conditional_edges("lens_confirmation", route_from_lens_confirmation, {
+        "planner": "planner",
+        "supervisor": "supervisor",
+    })
 
     graph.add_edge("friction_analysis", "supervisor")
     graph.add_edge("report_generation", "supervisor")

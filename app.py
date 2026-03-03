@@ -141,7 +141,9 @@ def _should_surface_message(node_name: str, text: str) -> bool:
         return False
 
     # Report analyst is a delivery checkpoint; download elements already convey output.
-    if node_name in {"report_analyst"}:
+    # Data analyst summary is shown via lens_confirmation interrupt; surfacing it
+    # separately causes the supervisor to re-present the same information.
+    if node_name in {"report_analyst", "data_analyst"}:
         return False
 
     t = text.lower()
@@ -597,14 +599,16 @@ async def on_message(message: cl.Message):
                 has_real_interrupt = True
                 break
     human_msg = HumanMessage(content=user_text)
-    state["messages"].append(human_msg)
 
     if has_real_interrupt:
         # interrupt() resume: pass user reply as the resume value AND
         # inject the HumanMessage so conversation history stays intact.
+        # Do NOT also append to state["messages"] — Command.update handles it,
+        # and double-injecting causes the supervisor to process the message twice.
         graph_input = Command(resume=user_text, update={"messages": [human_msg]})
         log.info("Resuming from interrupt() with Command(resume=...) (next=%s)", snapshot.next)
     else:
+        state["messages"].append(human_msg)
         graph_input = state
         log.info("Fresh graph run (messages=%d)", len(state["messages"]))
 

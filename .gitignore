@@ -18,9 +18,13 @@ core/auth.py
 .files/
 
 # Data artifacts (keep .gitkeep)
-data/*.csv
-data/*.pptx
-data/*.parquet
+data/.cache/*
+data/output/*/*.csv
+data/output/*/*.pptx
+data/output/*/*.parquet
+data/output/*/*.json
+data/output/*/*.md
+data/output/*/*.png    
 
 # Chainlit
 .chainlit/translations/
