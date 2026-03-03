@@ -1,14 +1,46 @@
-# Welcome to Chainlit! 🚀🤖
+# Agentic Analytics — Customer Friction Intelligence 🔍
 
-Hi there, Developer! 👋 We're excited to have you on board. Chainlit is a powerful tool designed to help you prototype, debug and share applications built on top of LLMs.
+Welcome! This system turns **raw customer call data** into **actionable friction insights** and a ready-to-present **PowerPoint report** — all through a simple chat conversation.
 
-## Useful Links 🔗
+### How it Works
 
-- **Documentation:** Get started with our comprehensive [Chainlit Documentation](https://docs.chainlit.io) 📚
-- **Discord Community:** Join our friendly [Chainlit Discord](https://discord.gg/k73SQ3FyUh) to ask questions, share your projects, and connect with other developers! 💬
+1. **You describe the data you want to explore** — e.g. a product, call reason, or customer segment.
+2. The system **filters & buckets** your dataset, then shows you the key themes it found.
+3. You pick which **friction dimensions** to analyze (or run all four):
+   - 🖥️ **Digital** — UX gaps, app/web issues, self-service failures
+   - ⚙️ **Operations** — Process breakdowns, SLA issues, handoff failures
+   - 💬 **Communication** — Notification gaps, unclear messaging
+   - 📜 **Policy** — Regulatory constraints, fee disputes
+4. Four specialist AI agents analyze the data **in parallel**, then a Synthesizer merges their findings into a ranked, scored report.
+5. A **Narrative + Formatting** pipeline auto-generates an executive slide deck (`.pptx`) you can download instantly.
 
-We can't wait to see what you create with Chainlit! Happy coding! 💻😊
+---
 
-## Welcome screen
+# Agent Graph Flow 🔄
 
-To modify the welcome screen, edit the `chainlit.md` file at the root of your project. If you do not want a welcome screen, just leave this file empty.
+Every conversation is orchestrated by a **Supervisor** that acts as the central hub. It reads your message, decides the next step, and routes to the right agent — then gets control back after each agent finishes.
+
+```
+START → Supervisor ─┬─→ Planner ──────────────────→ Supervisor
+                    ├─→ Data Analyst → Lens Confirmation → Supervisor
+                    ├─→ Friction Analysis (subgraph) ──→ Supervisor
+                    ├─→ Report Generation (subgraph) ──→ Supervisor
+                    ├─→ Report Analyst ────────────────→ Supervisor
+                    ├─→ Critique ──────────────────────→ Supervisor
+                    └─→ END
+```
+
+### Node-by-Node Breakdown
+
+| # | Agent | What it does |
+|---|-------|-------------|
+| 1 | **Supervisor** | Understands your intent → routes to the right agent. Loops back after every step. |
+| 2 | **Planner** | Creates an ordered execution plan (extract → analyse → report → deliver). |
+| 3 | **Data Analyst** | Loads dataset, applies filters (product / call_reason), buckets themes. |
+| 4 | **Lens Confirmation** | Pauses the graph — asks you which friction dimensions to run before proceeding. |
+| 5 | **Friction Analysis** *(subgraph)* | Fans out to 4 lens agents **in parallel** (Digital, Operations, Communication, Policy) × each data bucket, then feeds all outputs into the **Synthesizer** which merges findings, ranks them, and scores preventability. |
+| 6 | **Report Generation** *(subgraph)* | Runs **Narrative Agent** (writes executive story, theme dives, recommendations) → **Formatting Agent** (builds slide-by-slide blueprint) → **Artifact Writer** (renders `.pptx`, `.md`, `.csv` files). |
+| 7 | **Report Analyst** | Verifies all artifacts exist, presents download links. |
+| 8 | **Critique** *(optional)* | QA pass — grades synthesis quality, flags gaps, can trigger revisions. |
+
+> 💡 After every agent finishes, control returns to the **Supervisor**, which reads the updated state and decides the next move — until the full plan is complete and you have your report.

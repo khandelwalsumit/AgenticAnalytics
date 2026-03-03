@@ -204,13 +204,33 @@ For each theme, open with a divider slide showing:
 why they're calling, and what the business cost is. This is NOT a summary of the table — 
 it's the context that makes the data meaningful.
 
+Within the narrative, use these explicit sub-headings to give the downstream formatter 
+clean extraction boundaries:
+
+#### Core Issue
+State the single core issue driving calls in this theme. 1–3 sentences. Ground it in the 
+customer experience — what exactly is broken, missing, or unclear.
+
+#### Primary Driver
+Name the single biggest driver of calls within this theme. Include the call count and 
+why this driver dominates. 1–2 sentences.
+
+#### Solutions
+List **at most 3 solutions** per theme, prioritized by impact. Do not pad with weak solutions.
+Each solution must include a `[Dimension]` tag inline: `[Digital]`, `[Ops]`, `[Comms]`, or `[Policy]`.
+
+Format:
+1. Solution description `[Digital]`
+2. Solution description `[Ops]`
+3. Solution description `[Comms]`
+
 ---
 
 **Slide 4.X.2 — Driver Breakdown**
 Full driver table — include ALL drivers, primary AND secondary, no exceptions:
 
-| Driver | Call Count | % of Theme | Type | Owning Dimension |
-|--------|-----------|------------|------|-----------------|
+| Driver | Call Count | % of Theme | Type | Owning Dimension | Recommended Solution |
+|--------|-----------|------------|------|-----------------|---------------------|
 
 Immediately follow with mapped solutions per driver. Each solution anchors to its 
 specific driver — no generic lists.
@@ -440,6 +460,21 @@ Each action is sequenced by priority score — highest first.
 
 [2–3 sentences. What customers are experiencing, why they're calling, 
 what the business cost is. Human context — not a table summary.]
+
+#### Core Issue
+
+[1–3 sentences. The single core issue driving calls. Specific, grounded in 
+customer experience — what is broken, missing, or unclear.]
+
+#### Primary Driver
+
+[1–2 sentences. The single biggest driver, with call count and why it dominates.]
+
+#### Solutions
+
+1. [Verb-first solution] `[Digital]`
+2. [Verb-first solution] `[Ops]`
+3. [Verb-first solution] `[Comms]`
 
 ---
 

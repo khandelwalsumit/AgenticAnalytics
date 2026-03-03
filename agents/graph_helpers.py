@@ -1323,7 +1323,7 @@ def _validate_section_blueprint(result: dict[str, Any]) -> list[str]:
         return ["Section formatting output must include at least 1 slide."]
 
     section_key = data.get("section_key", "")
-    expected_counts = {"exec_summary": 2, "impact": 2}
+    expected_counts = {"exec_summary": 2, "impact": 3}
     expected = expected_counts.get(section_key)
     if expected and len(slides) != expected:
         return [f"Section '{section_key}' expected {expected} slides but got {len(slides)}."]
@@ -1351,44 +1351,52 @@ def _build_fallback_section_blueprint(
     result_slides: list[dict[str, Any]] = []
 
     if section_key == "exec_summary":
-        # 2 slides: hook+quick wins (lead with value), then pain points
         hook_blocks = [b for b in slide_blocks if "executive" in b.get("section_type", "").lower()]
         pain_blocks = [b for b in slide_blocks if "pain" in b.get("section_type", "").lower()]
         wins_blocks = [b for b in slide_blocks if "quick" in b.get("section_type", "").lower()]
 
         spec_slides = template_spec.get("slides", [])
 
-        # Slide 1: Hook assertion + quick wins merged
-        hook_title = hook_blocks[0].get("title", "Friction Analysis") if hook_blocks else "Friction Analysis"
-        hook_text = hook_blocks[0].get("body", "")[:300] if hook_blocks else ""
-        wins_text = wins_blocks[0].get("body", "")[:500] if wins_blocks else "Quick wins to be identified."
+        # Slide 1: Executive Summary with quick wins
+        hook_title = "EXECUTIVE SUMMARY"
+        hook_subtitle = hook_blocks[0].get("body", "")[:300] if hook_blocks else ""
+        quick_wins: list[dict[str, str]] = []
+        if wins_blocks:
+            body = wins_blocks[0].get("body", "")
+            for line in body.split("\n"):
+                line = line.strip().lstrip("- ").strip()
+                if line and len(quick_wins) < 3:
+                    quick_wins.append({"action": line[:200], "detail": ""})
         result_slides.append({
             "slide_number": 1,
-            "slide_role": "hook_and_quick_wins",
+            "slide_role": "executive_summary",
             "layout_index": spec_slides[0].get("layout_index", 6) if spec_slides else 6,
             "title": hook_title,
-            "elements": [
-                {"type": "point_description", "text": hook_text},
-                {"type": "h3", "text": "Quick Wins: Start Monday"},
-                {"type": "point_description", "text": wins_text},
-            ],
+            "subtitle_lines": [{"text": hook_subtitle, "bold_part": None}] if hook_subtitle else [],
+            "quick_wins": quick_wins,
         })
 
-        # Slide 2: Pain points with structured blocks
-        pain_elements: list[dict[str, Any]] = []
+        # Slide 2: Pain points (structured — cards array)
+        cards: list[dict[str, Any]] = []
         for i, b in enumerate(pain_blocks[:3], start=1):
             title = b.get("title", f"Pain Point {i}")
             body = b.get("body", "")[:300]
-            pain_elements.append({"type": "h3", "text": f"Pain Point {i}: {title}"})
-            pain_elements.append({"type": "bullet", "bold_label": "Issue", "text": body})
+            cards.append({
+                "name": title,
+                "calls": 0,
+                "pct": "",
+                "impact": 0,
+                "priority": 0,
+                "issue": body,
+                "fix": "To be determined",
+                "owner": "Digital/UX",
+            })
         result_slides.append({
             "slide_number": 2,
             "slide_role": "pain_points",
             "layout_index": spec_slides[1].get("layout_index", 1) if len(spec_slides) > 1 else 1,
             "title": "Key Pain Points",
-            "elements": pain_elements if pain_elements else [
-                {"type": "point_description", "text": "Pain points to be identified."},
-            ],
+            "cards": cards if cards else [{"name": "No pain points", "calls": 0, "pct": "", "impact": 0, "priority": 0, "issue": "Pain points to be identified.", "fix": "TBD", "owner": "TBD"}],
         })
 
     elif section_key == "impact":
@@ -1397,33 +1405,32 @@ def _build_fallback_section_blueprint(
 
         spec_slides = template_spec.get("slides", [])
 
-        # Slide 1: Impact matrix (table LEFT, chart RIGHT)
-        matrix_elements: list[dict[str, Any]] = []
-        matrix_elements.append({
-            "type": "point_description",
-            "text": matrix_blocks[0].get("body", "")[:500] if matrix_blocks else "",
-        })
-        matrix_elements.append({
-            "type": "chart_placeholder",
-            "chart_key": "impact_ease_scatter",
-            "position": "right",
-        })
+        # Slide 1: Impact ease with themes array
         result_slides.append({
             "slide_number": 1,
-            "slide_role": "impact_matrix",
+            "slide_role": "impact_ease",
             "layout_index": spec_slides[0].get("layout_index", 51) if spec_slides else 51,
             "title": matrix_blocks[0].get("title", "Impact vs. Ease Analysis") if matrix_blocks else "Impact vs. Ease Analysis",
-            "elements": matrix_elements,
+            "themes": [],  # filled by LLM; fallback empty
+            "chart_placeholder": {"chart_key": "impact_ease_scatter", "position": "right"},
         })
 
-        # Slide 2: Recommendations grouped by owning team
-        rec_text = "\n".join([b.get("body", "") for b in rec_blocks])[:800]
+        # Slide 2: Low hanging fruit
         result_slides.append({
             "slide_number": 2,
-            "slide_role": "recommendations",
+            "slide_role": "low_hanging_fruit",
             "layout_index": spec_slides[1].get("layout_index", 1) if len(spec_slides) > 1 else 1,
+            "title": "Low Hanging Fruit",
+            "items": [],  # filled by LLM; fallback empty
+        })
+
+        # Slide 3: Recommendations (structured — dimensions array)
+        result_slides.append({
+            "slide_number": 3,
+            "slide_role": "recommendations",
+            "layout_index": spec_slides[2].get("layout_index", 1) if len(spec_slides) > 2 else 1,
             "title": "Recommended Actions by Owning Team",
-            "elements": [{"type": "point_description", "text": rec_text}],
+            "dimensions": [],  # filled by LLM; fallback empty
         })
 
     else:  # theme_deep_dives
@@ -1440,17 +1447,31 @@ def _build_fallback_section_blueprint(
 
         max_themes = template_spec.get("max_themes", 10)
         for idx, (theme_name, blocks) in enumerate(list(themes.items())[:max_themes], start=1):
-            body_parts = [b.get("body", "")[:200] for b in blocks]
+            # Extract body text from narrative blocks
+            narrative_body = ""
+            for b in blocks:
+                if b.get("section_type", "").lower() == "theme_narrative":
+                    narrative_body = b.get("body", "")[:500]
+                    break
+            if not narrative_body:
+                narrative_body = " ".join(b.get("body", "")[:100] for b in blocks[:2])
+
             result_slides.append({
                 "slide_number": idx,
                 "slide_role": "theme_card",
                 "layout_index": theme_layout,
                 "title": theme_name,
-                "elements": [
-                    {"type": "point_description", "text": t} for t in body_parts if t
-                ] + [
-                    {"type": "chart_placeholder", "chart_key": "friction_distribution", "position": "right"},
-                ],
+                "stats_bar": {"calls": 0, "pct": "", "impact": 0, "ease": 0, "priority": 0},
+                "left_column": {
+                    "core_issue": narrative_body,
+                    "primary_driver": "",
+                    "solutions": [],
+                },
+                "right_column": {
+                    "type": "driver_table",
+                    "headers": ["Driver", "Calls"],
+                    "rows": [],
+                },
             })
 
     return {
@@ -1568,158 +1589,108 @@ def _build_fixed_deck_blueprint(
                     "recommended_action": "; ".join(str(qw) for qw in (t.get("quick_wins", []) or [])[:2]) or "Action to be determined",
                 })
 
-    # Build top theme names for exec summary fallback
-    top_theme_names = [_s(t.get("theme", "")) for t in themes[:3] if isinstance(t, dict) and t.get("theme")]
 
     # ================================================================
     # SECTION 1: EXECUTIVE SUMMARY (2 slides)
     # ================================================================
 
-    # -- Slide 1: Executive Hook + Quick Wins --
-    hook_elements: list[dict[str, Any]] = [
-        {"type": "h2", "text": exec_narrative[:400]},
-    ]
-    # Stats line
-    stats_parts: list[str] = []
-    if total_calls > 0:
-        stats_parts.append(f"{total_calls:,} customer calls analyzed")
-    if total_themes > 0:
-        stats_parts.append(f"{total_themes} friction themes identified")
-    if preventability > 0:
-        stats_parts.append(f"{preventability:.0%} preventable")
-    if stats_parts:
-        hook_elements.append({"type": "point_description", "text": " | ".join(stats_parts)})
-
-    # Top themes overview
-    if top_theme_names:
-        hook_elements.append({"type": "h3", "text": "Top Friction Themes"})
-        for tn in top_theme_names:
-            hook_elements.append({"type": "bullet", "text": tn, "level": 1})
-
-    # Quick wins
-    if all_quick_wins:
-        hook_elements.append(
-            {"type": "h3", "text": f"Quick Wins ({len(all_quick_wins)} identified)"}
-        )
-        for qw in all_quick_wins[:4]:
-            hook_elements.append({"type": "bullet", "text": qw, "level": 1})
-
-    # -- Slide 2: Top 3 Pain Points --
-    pain_elements: list[dict[str, Any]] = []
+    pain_cards: list[dict[str, Any]] = []
     for i, f in enumerate(sorted_findings, 1):
         finding_text = _s(f.get("finding", ""), f"Finding {i}")
         impact = _f(f.get("impact_score", 0))
         driver = _s(f.get("dominant_driver", ""), "unknown")
         action = _s(f.get("recommended_action", ""), "To be determined")
-        volume_text = _call_text(f)
-
-        pain_elements.append({"type": "h3", "text": f"#{i}: {finding_text}"})
-        pain_elements.append({
-            "type": "bullet",
-            "bold_label": "Impact:",
-            "text": f"Score {impact}/10 — {volume_text}",
-            "level": 1,
-        })
-        pain_elements.append({
-            "type": "bullet",
-            "bold_label": "Driver:",
-            "text": driver.replace("_", " ").title(),
-            "level": 1,
-        })
-        pain_elements.append({
-            "type": "bullet",
-            "bold_label": "Fix:",
-            "text": action[:200],
-            "level": 1,
+        cc = _n(f.get("call_count", 0))
+        cp = _f(f.get("call_percentage", 0))
+        pain_cards.append({
+            "name": finding_text,
+            "calls": cc,
+            "pct": f"{cp}%" if cp > 0 else "",
+            "impact": impact,
+            "priority": impact,
+            "issue": finding_text,
+            "fix": action[:200],
+            "owner": driver.replace("_", " ").title(),
         })
 
-    if not pain_elements:
-        pain_elements.append({
-            "type": "point_description",
-            "text": "No significant pain points identified.",
-        })
+    # Build subtitle lines for executive summary
+    subtitle_lines: list[dict[str, Any]] = []
+    if total_calls > 0:
+        subtitle_lines.append({"text": f"Analysis of {total_calls:,} friction-related customer calls across {total_themes} themes.", "bold_part": None})
+    if preventability > 0:
+        pct_text = f"{preventability:.0%}"
+        subtitle_lines.append({"text": f"{pct_text} of total volume is deflectable with easy implementations.", "bold_part": pct_text})
+
+    # Build quick wins as {action, detail} objects
+    qw_objects: list[dict[str, str]] = []
+    for qw in all_quick_wins[:3]:
+        # Try to split "action — theme — detail" format
+        parts = str(qw).split(" — ", 1)
+        if len(parts) == 2:
+            qw_objects.append({"action": parts[0].strip(), "detail": parts[1].strip()})
+        else:
+            qw_objects.append({"action": str(qw)[:200], "detail": ""})
 
     exec_section = {
         "section_key": "exec_summary",
         "slides": [
             {
                 "slide_number": 1,
-                "slide_role": "hook_and_quick_wins",
+                "slide_role": "executive_summary",
                 "layout_index": 1,
-                "title": "Friction Analysis: Executive Summary",
-                "elements": hook_elements,
+                "title": "EXECUTIVE SUMMARY",
+                "subtitle_lines": subtitle_lines,
+                "quick_wins": qw_objects,
             },
             {
                 "slide_number": 2,
                 "slide_role": "pain_points",
                 "layout_index": 1,
                 "title": "Critical Pain Points",
-                "elements": pain_elements,
+                "cards": pain_cards if pain_cards else [{"name": "No significant pain points", "calls": 0, "pct": "", "impact": 0, "priority": 0, "issue": "No significant pain points identified.", "fix": "TBD", "owner": "TBD"}],
             },
         ],
     }
 
     # ================================================================
-    # SECTION 2: IMPACT (2 impact slides + 1 recommendation = 3 slides)
+    # SECTION 2: IMPACT (3 slides: matrix + low-hanging fruit + recs)
     # ================================================================
 
-    # -- Slide 3: Impact vs Ease Matrix (table LEFT, scatter chart RIGHT) --
-    matrix_headers = ["Theme", "Calls", "Impact", "Ease", "Priority", "Quadrant"]
-    matrix_rows: list[list[str]] = []
+    # Build impact matrix themes array
+    impact_themes: list[dict[str, Any]] = []
     for t in themes[:10]:
         if not isinstance(t, dict):
             continue
-        matrix_rows.append([
-            _s(t.get("theme", ""), "?")[:40],
-            _call_text(t),
-            str(_f(t.get("impact_score", 0))),
-            str(_f(t.get("ease_score", 0))),
-            str(_f(t.get("priority_score", 0))),
-            _s(t.get("priority_quadrant", ""), "?").replace("_", " ").title(),
-        ])
-
-    matrix_elements: list[dict[str, Any]] = []
-    if matrix_rows:
-        matrix_elements.append({
-            "type": "table",
-            "headers": matrix_headers,
-            "rows": matrix_rows,
+        impact_themes.append({
+            "name": _s(t.get("theme", ""), "?")[:40],
+            "calls": _n(t.get("call_count", 0)),
+            "impact": _f(t.get("impact_score", 0)),
+            "ease": _f(t.get("ease_score", 0)),
+            "priority": _f(t.get("priority_score", 0)),
+            "quadrant": _s(t.get("priority_quadrant", ""), "?").replace("_", " ").title(),
         })
-    matrix_elements.append({
-        "type": "chart_placeholder",
-        "chart_key": "impact_ease_scatter",
-        "position": "right",
-    })
 
-    # -- Slide 4: Biggest Bet / Impact Statement --
-    biggest = themes[0] if themes and isinstance(themes[0], dict) else {}
-    bet_theme = _s(biggest.get("theme", ""), "N/A")
-    bet_volume = _call_text(biggest) if biggest else "N/A"
-    bet_impact = _f(biggest.get("impact_score", 0))
-    bet_ease = _f(biggest.get("ease_score", 0))
-    bet_quadrant = _s(biggest.get("priority_quadrant", ""), "N/A").replace("_", " ").title()
-    bet_driver = _s(biggest.get("dominant_driver", ""), "N/A").replace("_", " ").title()
+    # Build low hanging fruit: pick 3 themes with highest ease score
+    ease_sorted = sorted(
+        [t for t in themes if isinstance(t, dict)],
+        key=lambda x: _f(x.get("ease_score", 0)),
+        reverse=True,
+    )[:3]
+    lhf_items: list[dict[str, Any]] = []
+    for t in ease_sorted:
+        theme_name_s = _s(t.get("theme", ""))
+        t_qw = (t.get("quick_wins", []) or [])
+        sol_action = str(t_qw[0])[:200] if t_qw else f"Fix {theme_name_s} friction"
+        sol_detail = "; ".join(str(qw)[:80] for qw in t_qw[1:3]) if len(t_qw) > 1 else f"Ease score: {_f(t.get('ease_score', 0))}/10"
+        lhf_items.append({
+            "action": sol_action,
+            "detail": sol_detail,
+            "impact": f"Resolves ~{_n(t.get('call_count', 0))} calls from {theme_name_s}",
+            "ease": _f(t.get("ease_score", 0)),
+            "theme": theme_name_s,
+        })
 
-    bet_elements: list[dict[str, Any]] = [
-        {"type": "callout", "text": bet_theme},
-        {"type": "point_description", "text": f"Impact {bet_impact}/10 · Ease {bet_ease}/10 · {bet_volume}"},
-        {"type": "bullet", "bold_label": "Quadrant:", "text": bet_quadrant, "level": 1},
-        {"type": "bullet", "bold_label": "Primary Driver:", "text": bet_driver, "level": 1},
-    ]
-    # Add contributing factors for biggest bet
-    bet_factors = biggest.get("contributing_factors", []) if biggest else []
-    if isinstance(bet_factors, list) and bet_factors:
-        bet_elements.append({"type": "h3", "text": "Contributing Factors"})
-        for cf in bet_factors[:3]:
-            bet_elements.append({"type": "bullet", "text": str(cf)[:150], "level": 1})
-    # Add quick wins for biggest bet
-    bet_qw = biggest.get("quick_wins", []) if biggest else []
-    if isinstance(bet_qw, list) and bet_qw:
-        bet_elements.append({"type": "h3", "text": "Quick Wins"})
-        for qw in bet_qw[:3]:
-            bet_elements.append({"type": "bullet", "text": str(qw)[:150], "level": 1})
-
-    # -- Slide 5: Recommendations by Owning Team --
+    # Build recommendations grouped by owning team
     driver_groups: dict[str, list[dict[str, Any]]] = {
         "digital": [],
         "operations": [],
@@ -1746,29 +1717,26 @@ def _build_fixed_deck_blueprint(
             for qw in (t.get("quick_wins", []) or [])[:2]:
                 driver_groups[driver].append({"recommended_action": str(qw)})
 
-    rec_elements: list[dict[str, Any]] = []
-    driver_labels = {
-        "digital": "Digital / UX Team",
-        "operations": "Operations Team",
-        "communication": "Communications Team",
-        "policy": "Policy & Governance Team",
+    rec_dimensions: list[dict[str, Any]] = []
+    dim_color_map = {
+        "digital": ("Digital / UX", "006BA6"),
+        "operations": ("Operations", "2C5F2D"),
+        "communication": ("Communications", "E67E22"),
+        "policy": ("Policy", "8E44AD"),
     }
-    for driver_key, label in driver_labels.items():
+    for driver_key, (dim_name, dim_color) in dim_color_map.items():
         items = driver_groups.get(driver_key, [])
         if not items:
             continue
-        rec_elements.append({"type": "h3", "text": label})
+        dim_actions: list[dict[str, Any]] = []
         for item in items[:2]:
-            rec_elements.append({
-                "type": "bullet",
-                "text": _s(item.get("recommended_action", ""), "TBD")[:200],
-                "level": 1,
-            })
-
-    if not rec_elements:
-        rec_elements.append({
-            "type": "point_description",
-            "text": "Recommendations to be determined.",
+            action_text = _s(item.get("recommended_action", ""), "TBD")[:200]
+            cc = _n(item.get("call_count", 0))
+            detail = f"Resolves {cc} calls" if cc > 0 else ""
+            dim_actions.append({"title": action_text, "detail": detail})
+        rec_dimensions.append({
+            "name": dim_name,
+            "actions": dim_actions,
         })
 
     impact_section = {
@@ -1776,24 +1744,28 @@ def _build_fixed_deck_blueprint(
         "slides": [
             {
                 "slide_number": 3,
-                "slide_role": "impact_matrix",
+                "slide_role": "impact_ease",
                 "layout_index": 1,
-                "title": "Impact vs. Ease Prioritization",
-                "elements": matrix_elements,
+                "title": "Impact vs. Ease \u2014 Full Theme Prioritization",
+                "themes": impact_themes,
+                "chart_placeholder": {
+                    "chart_key": "impact_ease_scatter",
+                    "position": "right",
+                },
             },
             {
                 "slide_number": 4,
-                "slide_role": "callout",
+                "slide_role": "low_hanging_fruit",
                 "layout_index": 1,
-                "title": "The Biggest Bet",
-                "elements": bet_elements,
+                "title": "Low Hanging Fruit",
+                "items": lhf_items,
             },
             {
                 "slide_number": 5,
                 "slide_role": "recommendations",
                 "layout_index": 1,
                 "title": "Recommended Actions by Owning Team",
-                "elements": rec_elements,
+                "dimensions": rec_dimensions if rec_dimensions else [],
             },
         ],
     }
@@ -1847,28 +1819,58 @@ def _build_fixed_deck_blueprint(
                     _s(d.get("recommended_solution", ""), "-")[:60],
                 ])
 
-        elements: list[dict[str, Any]] = [
-            {
-                "type": "table",
-                "headers": ["Metric", "Value"],
-                "rows": metrics_rows,
-                "position": "left",
-            },
-        ]
-        if driver_rows:
-            elements.append({
-                "type": "table",
-                "headers": ["Driver", "Volume", "Type", "Dimension", "Solution"],
-                "rows": driver_rows,
-                "position": "right",
-            })
+        # Build structured theme card
+        impact_score = _f(t.get("impact_score", 0))
+        ease_score = _f(t.get("ease_score", 0))
+        priority_score = _f(t.get("priority_score", 0))
+        call_count = _n(t.get("call_count", 0))
+        call_pct = _f(t.get("call_percentage", 0))
+
+        # Build solutions from quick_wins
+        solutions: list[dict[str, Any]] = []
+        for qw in (t.get("quick_wins", []) or [])[:3]:
+            dim = _s(t.get("dominant_driver", "Digital")).replace("_", " ").title()
+            solutions.append({"action": str(qw)[:200], "dimension": dim})
+
+        # Build driver table rows (simplified: Driver + Calls)
+        simple_driver_rows: list[list[Any]] = []
+        for d in (drivers if isinstance(drivers, list) else [])[:8]:
+            if not isinstance(d, dict):
+                continue
+            d_calls = _n(d.get("call_count", 0))
+            d_pct = _f(d.get("contribution_pct", 0))
+            simple_driver_rows.append([
+                _s(d.get("driver", ""), "?")[:50],
+                d_calls if d_calls > 0 else f"{d_pct}%",
+            ])
+
+        # Contributing factors as core issue
+        factors = t.get("contributing_factors", [])
+        core_issue = "; ".join(str(cf)[:80] for cf in (factors if isinstance(factors, list) else [])[:3]) or f"{theme_name} friction analysis"
+        primary_driver = _s(t.get("dominant_driver", ""), "").replace("_", " ").title()
 
         theme_slides.append({
             "slide_number": idx,
             "slide_role": "theme_card",
             "layout_index": 1,
             "title": theme_name,
-            "elements": elements,
+            "stats_bar": {
+                "calls": call_count,
+                "pct": f"{call_pct}%" if call_pct > 0 else "",
+                "impact": impact_score,
+                "ease": ease_score,
+                "priority": priority_score,
+            },
+            "left_column": {
+                "core_issue": core_issue,
+                "primary_driver": primary_driver,
+                "solutions": solutions,
+            },
+            "right_column": {
+                "type": "driver_table",
+                "headers": ["Driver", "Calls"],
+                "rows": simple_driver_rows,
+            },
         })
 
     theme_section = {
