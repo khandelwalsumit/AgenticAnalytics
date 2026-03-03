@@ -6,91 +6,86 @@ chart images and produces the final report.pptx.
 No LLM involved — placement, fonts, and structure are fully deterministic.
 
 Slide types supported:
-  1. executive_summary — title + subtitle + quick wins
+  1. executive_summary — title + subtitle_lines + quick wins
   2. pain_points — 3-column card layout
-  3. impact_matrix — theme card list LEFT + scatter chart RIGHT
+  3. impact_ease — theme card list LEFT + scatter chart RIGHT
   4. low_hanging_fruit — 3 easiest solutions
   5. recommendations — 2x2 dimension grid
   6. theme_card — stats bar + two-column narrative/table
+
+Canvas: 10 x 5.625 inches (standard 16:9)
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from pathlib import Path
 from typing import Any
 
 from pptx import Presentation
-from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
-from pptx.util import Emu, Inches, Pt
+from pptx.enum.text import PP_ALIGN
+from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
 
 logger = logging.getLogger("agenticanalytics.pptx_builder")
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Global constants — from slide_improvement_plan.md
+# ═══════════════════════════════════════════════════════════════════════════
 
-# ---------------------------------------------------------------------------
-# Visual design constants
-# ---------------------------------------------------------------------------
+SLIDE_W = 10.0
+SLIDE_H = 5.625
+MARGIN_L = 0.5
+MARGIN_R = 0.5
+CONTENT_W = 9.0  # 10 - 0.5 - 0.5
 
-COLOR_PRIMARY = RGBColor(0x00, 0x3B, 0x70)    # Navy
-COLOR_SECONDARY = RGBColor(0x00, 0x6B, 0xA6)  # Blue accent
-COLOR_LIGHT_BG = RGBColor(0xF5, 0xF7, 0xFA)   # Off-white
-COLOR_TEXT = RGBColor(0x33, 0x33, 0x33)         # Body text
-COLOR_MUTED = RGBColor(0x88, 0x88, 0x88)       # Stats, secondary
-COLOR_WHITE = RGBColor(0xFF, 0xFF, 0xFF)
-COLOR_RED = RGBColor(0xC0, 0x39, 0x2B)
-COLOR_AMBER = RGBColor(0xE6, 0x7E, 0x22)
-COLOR_GREEN = RGBColor(0x27, 0xAE, 0x60)
+# -- Color palette --
+NAVY        = RGBColor(0x00, 0x3B, 0x70)
+BLUE_ACCENT = RGBColor(0x00, 0x6B, 0xA6)
+BLACK       = RGBColor(0x22, 0x22, 0x22)
+DARK_GRAY   = RGBColor(0x44, 0x44, 0x44)
+MID_GRAY    = RGBColor(0x88, 0x88, 0x88)
+LIGHT_GRAY  = RGBColor(0xD0, 0xD0, 0xD0)
+BG_LIGHT    = RGBColor(0xF5, 0xF7, 0xFA)
+WHITE       = RGBColor(0xFF, 0xFF, 0xFF)
 
-_HEADER_BG = COLOR_PRIMARY
-_ALT_ROW_BG = RGBColor(0xF5, 0xF7, 0xFA)
+ACCENT_RED    = RGBColor(0xC0, 0x39, 0x2B)
+ACCENT_AMBER  = RGBColor(0xE6, 0x7E, 0x22)
+ACCENT_GREEN  = RGBColor(0x27, 0xAE, 0x60)
+ACCENT_PURPLE = RGBColor(0x8E, 0x44, 0xAD)
 
-
-# ---------------------------------------------------------------------------
-# Visual hierarchy defaults
-# ---------------------------------------------------------------------------
-
-_DEFAULT_HIERARCHY = {
-    "h1":             {"size": Pt(28), "bold": True,  "color": COLOR_PRIMARY, "font": "Calibri"},
-    "h2":             {"size": Pt(20), "bold": True,  "color": COLOR_PRIMARY, "font": "Calibri"},
-    "h3":             {"size": Pt(16), "bold": True,  "color": COLOR_TEXT, "font": "Calibri"},
-    "point_heading":  {"size": Pt(14), "bold": True,  "color": COLOR_TEXT, "font": "Calibri"},
-    "point_description": {"size": Pt(13), "bold": False, "color": COLOR_TEXT, "font": "Calibri"},
-    "sub_point":      {"size": Pt(12), "bold": False, "color": RGBColor(0x66, 0x66, 0x66), "font": "Calibri"},
-    "callout":        {"size": Pt(24), "bold": True,  "color": COLOR_SECONDARY, "font": "Calibri"},
-    "big_stat":       {"size": Pt(60), "bold": True,  "color": COLOR_WHITE, "font": "Calibri"},
-    "stats_bar":      {"size": Pt(11), "bold": False, "color": COLOR_MUTED, "font": "Calibri"},
-    "table_header":   {"size": Pt(11), "bold": True,  "color": COLOR_WHITE, "font": "Calibri"},
-    "table_cell":     {"size": Pt(10), "bold": False, "color": COLOR_TEXT, "font": "Calibri"},
+DIMENSION_COLORS = {
+    "Digital / UX":   BLUE_ACCENT,
+    "Digital/UX":     BLUE_ACCENT,
+    "Operations":     ACCENT_GREEN,
+    "Communications": ACCENT_AMBER,
+    "Policy":         ACCENT_PURPLE,
 }
 
-
-def _hex_to_rgb(hex_str: str) -> RGBColor:
-    hex_str = hex_str.lstrip("#")
-    return RGBColor(int(hex_str[0:2], 16), int(hex_str[2:4], 16), int(hex_str[4:6], 16))
+FONT = "Calibri"
 
 
-def _load_hierarchy(visual_hierarchy: dict[str, Any] | None) -> dict[str, Any]:
-    if not visual_hierarchy:
-        return dict(_DEFAULT_HIERARCHY)
-    merged = dict(_DEFAULT_HIERARCHY)
-    for key, spec in visual_hierarchy.items():
-        if key in merged and isinstance(spec, dict):
-            merged[key] = {
-                "size": Pt(spec.get("font_size_pt", 13)),
-                "bold": spec.get("bold", False),
-                "color": _hex_to_rgb(spec.get("color_hex", "333333")),
-                "font": spec.get("font_name", "Calibri"),
-            }
-    return merged
+# -- Typography presets --
+def _style(size, bold=False, color=BLACK):
+    return {"size": Pt(size), "bold": bold, "color": color, "font": FONT}
+
+SLIDE_TITLE  = _style(22, bold=True,  color=NAVY)
+SUBTITLE_TEXT = _style(13, bold=False, color=DARK_GRAY)
+H3_LABEL     = _style(14, bold=True,  color=BLUE_ACCENT)
+BODY_TEXT     = _style(11, bold=False, color=BLACK)
+BOLD_BODY    = _style(11, bold=True,  color=BLACK)
+STATS_TEXT   = _style(10, bold=False, color=MID_GRAY)
+SMALL_MUTED  = _style(9,  bold=False, color=MID_GRAY)
+TABLE_HEADER = _style(10, bold=True,  color=WHITE)
+TABLE_CELL   = _style(9,  bold=False, color=BLACK)
+BULLET_TITLE = _style(12, bold=True,  color=BLUE_ACCENT)
+BULLET_BODY  = _style(11, bold=False, color=BLACK)
 
 
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
 # Utility helpers
-# ---------------------------------------------------------------------------
-
+# ═══════════════════════════════════════════════════════════════════════════
 
 def _strip_md(text: str) -> str:
     text = re.sub(r"\*\*\*(.*?)\*\*\*", r"\1", text)
@@ -100,645 +95,561 @@ def _strip_md(text: str) -> str:
     return text.strip()
 
 
-def _apply_font(run, style: dict[str, Any]) -> None:
+def _apply(run, style: dict):
     run.font.size = style["size"]
     run.font.bold = style["bold"]
     run.font.color.rgb = style["color"]
     run.font.name = style["font"]
 
 
-def _set_slide_bg(slide, color: RGBColor) -> None:
-    bg = slide.background
-    fill = bg.fill
-    fill.solid()
-    fill.fore_color.rgb = color
+def _hex_to_rgb(hex_str: str) -> RGBColor:
+    hex_str = hex_str.lstrip("#")
+    return RGBColor(int(hex_str[0:2], 16), int(hex_str[2:4], 16), int(hex_str[4:6], 16))
 
 
-def _add_textbox(slide, left, top, width, height, text, style,
-                 alignment=PP_ALIGN.LEFT, word_wrap=True):
-    txBox = slide.shapes.add_textbox(Inches(left), Inches(top),
-                                     Inches(width), Inches(height))
-    tf = txBox.text_frame
-    tf.word_wrap = word_wrap
+def _tb(slide, x, y, w, h, text, style, align=PP_ALIGN.LEFT, wrap=True):
+    """Add a textbox with a single styled run."""
+    box = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
+    tf = box.text_frame
+    tf.word_wrap = wrap
     p = tf.paragraphs[0]
-    p.alignment = alignment
+    p.alignment = align
     run = p.add_run()
     run.text = _strip_md(str(text))
-    _apply_font(run, style)
-    return txBox
+    _apply(run, style)
+    return box
 
 
-def _add_separator_line(slide, left, top, width, color=COLOR_MUTED):
-    connector = slide.shapes.add_connector(
-        1, Inches(left), Inches(top), Inches(left + width), Inches(top),
-    )
-    connector.line.color.rgb = color
-    connector.line.width = Pt(0.75)
+def _rule(slide, x, y, w, color=LIGHT_GRAY):
+    """Add a thin horizontal rectangle rule."""
+    shape = slide.shapes.add_shape(1, Inches(x), Inches(y), Inches(w), Inches(0.01))
+    shape.fill.solid()
+    shape.fill.fore_color.rgb = color
+    shape.line.fill.background()
 
 
-# ---------------------------------------------------------------------------
-# Table rendering
-# ---------------------------------------------------------------------------
+def _rect(slide, x, y, w, h, color):
+    """Add a filled rectangle with no border."""
+    shape = slide.shapes.add_shape(1, Inches(x), Inches(y), Inches(w), Inches(h))
+    shape.fill.solid()
+    shape.fill.fore_color.rgb = color
+    shape.line.fill.background()
+    return shape
 
 
-def _add_table_to_slide(slide, headers, rows, hierarchy,
-                        left=0.6, top=2.2, width=12.0, row_height=0.35):
+def _title_block(slide, title_text):
+    """Shared title block: title at y=0.3, rule at y=0.72. Content starts at y=0.85."""
+    _tb(slide, 0.5, 0.3, 9.0, 0.4, title_text, SLIDE_TITLE)
+    _rule(slide, 0.5, 0.72, 9.0)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Table helper
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _add_table(slide, headers, rows, x=0.5, y=1.0, w=9.0, col_widths=None, row_h=0.28):
     if not headers:
         return
+    n_rows = len(rows) + 1
+    n_cols = len(headers)
+    tbl = slide.shapes.add_table(n_rows, n_cols, Inches(x), Inches(y), Inches(w), Inches(row_h * n_rows)).table
 
-    num_rows = len(rows) + 1
-    num_cols = len(headers)
-    table_height = row_height * num_rows
+    # Column widths
+    if col_widths and len(col_widths) == n_cols:
+        for i, cw in enumerate(col_widths):
+            tbl.columns[i].width = Inches(cw)
 
-    tbl_shape = slide.shapes.add_table(
-        num_rows, num_cols,
-        Inches(left), Inches(top), Inches(width), Inches(table_height),
-    )
-    table = tbl_shape.table
-
-    header_style = hierarchy.get("table_header", _DEFAULT_HIERARCHY["table_header"])
-    for col_idx, header_text in enumerate(headers):
-        cell = table.cell(0, col_idx)
-        cell.text = _strip_md(str(header_text))
-        for p in cell.text_frame.paragraphs:
-            p.alignment = PP_ALIGN.CENTER
-            for run in p.runs:
-                _apply_font(run, header_style)
+    # Header
+    for ci, h in enumerate(headers):
+        cell = tbl.cell(0, ci)
+        cell.text = _strip_md(str(h))
         cell.fill.solid()
-        cell.fill.fore_color.rgb = _HEADER_BG
+        cell.fill.fore_color.rgb = NAVY
+        for p in cell.text_frame.paragraphs:
+            p.alignment = PP_ALIGN.LEFT if ci == 0 else PP_ALIGN.CENTER
+            for r in p.runs:
+                _apply(r, TABLE_HEADER)
 
-    cell_style = hierarchy.get("table_cell", _DEFAULT_HIERARCHY["table_cell"])
-    for row_idx, row_data in enumerate(rows):
-        for col_idx in range(num_cols):
-            cell_text = _strip_md(str(row_data[col_idx])) if col_idx < len(row_data) else ""
-            cell = table.cell(row_idx + 1, col_idx)
-            cell.text = cell_text
-            for p in cell.text_frame.paragraphs:
-                p.alignment = PP_ALIGN.LEFT
-                for run in p.runs:
-                    _apply_font(run, cell_style)
-            if row_idx % 2 == 1:
+    # Body
+    for ri, row in enumerate(rows):
+        for ci in range(n_cols):
+            val = _strip_md(str(row[ci])) if ci < len(row) else ""
+            cell = tbl.cell(ri + 1, ci)
+            cell.text = val
+            if ri % 2 == 1:
                 cell.fill.solid()
-                cell.fill.fore_color.rgb = _ALT_ROW_BG
-
-    if num_cols > 1:
-        first_col_pct = 0.30
-        remaining_pct = (1.0 - first_col_pct) / (num_cols - 1)
-        table.columns[0].width = Inches(width * first_col_pct)
-        for i in range(1, num_cols):
-            table.columns[i].width = Inches(width * remaining_pct)
+                cell.fill.fore_color.rgb = BG_LIGHT
+            for p in cell.text_frame.paragraphs:
+                p.alignment = PP_ALIGN.LEFT if ci == 0 else PP_ALIGN.CENTER
+                for r in p.runs:
+                    _apply(r, TABLE_CELL)
 
 
-def _add_chart_image(slide, chart_key, chart_paths, position="right"):
+def _add_chart_image(slide, chart_key, chart_paths, x=6.2, y=0.85, w=3.5):
     clean_key = chart_key
     m = re.search(r"\{\{\s*chart\.([a-zA-Z0-9_-]+)\s*\}\}", chart_key)
     if m:
         clean_key = m.group(1)
-
-    chart_path = chart_paths.get(clean_key, "")
-    if not chart_path or not Path(chart_path).exists():
-        return
-
-    positions = {
-        "right":  (Inches(8.0),  Inches(1.8), Inches(4.8)),
-        "left":   (Inches(0.6),  Inches(1.8), Inches(4.8)),
-        "bottom": (Inches(0.6),  Inches(4.5), Inches(11.5)),
-        "full":   (Inches(0.6),  Inches(1.8), Inches(11.5)),
-    }
-    left, top, width = positions.get(position, positions["right"])
-    slide.shapes.add_picture(str(chart_path), left, top, width=width)
-
-
-# ---------------------------------------------------------------------------
-# Legacy element renderer (backward compat)
-# ---------------------------------------------------------------------------
-
-
-def _add_text_elements(tf, elements, hierarchy):
-    tf.clear()
-    first = True
-    for elem in elements:
-        etype = elem.get("type", "point_description")
-        text = _strip_md(elem.get("text", ""))
-        if not text and etype not in ("table", "chart_placeholder"):
-            continue
-        if etype in ("table", "chart_placeholder"):
-            continue
-        if first:
-            p = tf.paragraphs[0]
-            first = False
-        else:
-            p = tf.add_paragraph()
-        style_key = etype if etype in hierarchy else "point_description"
-        style = hierarchy[style_key]
-        bold_label = elem.get("bold_label", "")
-        if bold_label:
-            run_label = p.add_run()
-            run_label.text = _strip_md(bold_label) + " "
-            _apply_font(run_label, hierarchy.get("point_heading", style))
-            run_body = p.add_run()
-            run_body.text = text
-            _apply_font(run_body, hierarchy.get("point_description", style))
-        else:
-            run = p.add_run()
-            run.text = text
-            _apply_font(run, style)
-        level = elem.get("level", 0)
-        if level and level > 0:
-            p.level = min(level - 1, 3)
-        p.alignment = PP_ALIGN.LEFT
+    path = chart_paths.get(clean_key, "")
+    if path and Path(path).exists():
+        slide.shapes.add_picture(str(path), Inches(x), Inches(y), width=Inches(w))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Slide type renderers
+# Slide renderers
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def _render_executive_summary(prs, slide_data, hierarchy, layout_idx):
-    """Slide 1: Title + context subtitle + horizontal rule + Quick Wins."""
-    layout = prs.slide_layouts[min(layout_idx, len(prs.slide_layouts) - 1)]
-    slide = prs.slides.add_slide(layout)
+def _render_executive_summary(prs, slide_data, layout_idx):
+    """Slide 1: EXECUTIVE SUMMARY — title + subtitle_lines + quick wins."""
+    slide = prs.slides.add_slide(prs.slide_layouts[min(layout_idx, len(prs.slide_layouts) - 1)])
 
-    title_text = _strip_md(slide_data.get("title", "EXECUTIVE SUMMARY"))
-    subtitle_text = _strip_md(slide_data.get("subtitle", ""))
+    # 1. Title
+    _tb(slide, 0.5, 0.3, 9.0, 0.4, slide_data.get("title", "EXECUTIVE SUMMARY"), SLIDE_TITLE)
+
+    # 2. Rule below title
+    _rule(slide, 0.5, 0.72, 9.0)
+
+    # 3. Subtitle block — supports subtitle_lines (rich) or subtitle (plain string)
+    subtitle_lines = slide_data.get("subtitle_lines", [])
+    subtitle_plain = slide_data.get("subtitle", "")
+
+    y = 0.85
+    if subtitle_lines:
+        box = slide.shapes.add_textbox(Inches(0.5), Inches(y), Inches(9.0), Inches(0.85))
+        tf = box.text_frame
+        tf.word_wrap = True
+        for li, line_obj in enumerate(subtitle_lines):
+            line_text = _strip_md(str(line_obj.get("text", "") if isinstance(line_obj, dict) else line_obj))
+            bold_part = line_obj.get("bold_part") if isinstance(line_obj, dict) else None
+            p = tf.paragraphs[0] if li == 0 else tf.add_paragraph()
+            p.space_after = Pt(2)
+            if bold_part and bold_part in line_text:
+                before, after = line_text.split(bold_part, 1)
+                if before:
+                    r = p.add_run()
+                    r.text = before
+                    _apply(r, SUBTITLE_TEXT)
+                r_bold = p.add_run()
+                r_bold.text = bold_part
+                _apply(r_bold, _style(13, bold=True, color=BLUE_ACCENT))
+                if after:
+                    r_after = p.add_run()
+                    r_after.text = after
+                    _apply(r_after, SUBTITLE_TEXT)
+            else:
+                r = p.add_run()
+                r.text = line_text
+                _apply(r, SUBTITLE_TEXT)
+    elif subtitle_plain:
+        _tb(slide, 0.5, y, 9.0, 0.85, subtitle_plain, SUBTITLE_TEXT)
+
+    # 4. Rule below subtitle
+    _rule(slide, 0.5, 1.72, 9.0)
+
+    # 5. "Quick Wins:" label
     quick_wins = slide_data.get("quick_wins", [])
-
-    # Title (28pt, bold, navy)
-    _add_textbox(slide, 0.6, 0.4, 12.0, 0.7, title_text,
-                 {"size": Pt(28), "bold": True, "color": COLOR_PRIMARY, "font": "Calibri"})
-
-    # Subtitle context (13pt, black)
-    y = 1.2
-    if subtitle_text:
-        _add_textbox(slide, 0.6, y, 12.0, 0.6, subtitle_text,
-                     {"size": Pt(13), "bold": False, "color": COLOR_TEXT, "font": "Calibri"})
-        y += 0.7
-
-    # Thin horizontal rule (grey, 80% width)
-    _add_separator_line(slide, 0.6, y, 10.5, color=COLOR_MUTED)
-    y += 0.4
-
-    # "Quick Wins:" label (16pt, blue)
     if quick_wins:
-        _add_textbox(slide, 0.6, y, 12.0, 0.4, "Quick Wins:",
-                     {"size": Pt(16), "bold": True, "color": COLOR_SECONDARY, "font": "Calibri"})
-        y += 0.5
+        _tb(slide, 0.5, 1.88, 9.0, 0.3, "Quick Wins:", H3_LABEL)
 
-        # Quick win bullet items (12pt, black)
-        for qw in quick_wins[:5]:
-            qw_text = _strip_md(str(qw))
-            txBox = slide.shapes.add_textbox(Inches(0.8), Inches(y), Inches(11.5), Inches(0.4))
-            tf = txBox.text_frame
-            tf.word_wrap = True
-            p = tf.paragraphs[0]
-            bullet_run = p.add_run()
-            bullet_run.text = "\u2022  "
-            _apply_font(bullet_run, {"size": Pt(12), "bold": False, "color": COLOR_SECONDARY, "font": "Calibri"})
-            text_run = p.add_run()
-            text_run.text = qw_text
-            _apply_font(text_run, {"size": Pt(12), "bold": False, "color": COLOR_TEXT, "font": "Calibri"})
-            y += 0.45
+        # 6. Quick win items as rich text
+        box = slide.shapes.add_textbox(Inches(0.5), Inches(2.20), Inches(9.0), Inches(2.8))
+        tf = box.text_frame
+        tf.word_wrap = True
+        for qi, qw in enumerate(quick_wins[:5]):
+            if isinstance(qw, dict):
+                action = _strip_md(str(qw.get("action", "")))
+                detail = _strip_md(str(qw.get("detail", "")))
+            else:
+                # Plain string: split at " — " or use whole string
+                action = _strip_md(str(qw))
+                detail = ""
+
+            p = tf.paragraphs[0] if qi == 0 else tf.add_paragraph()
+            p.space_after = Pt(10)
+            # Bold action title
+            r_title = p.add_run()
+            r_title.text = action
+            _apply(r_title, BULLET_TITLE)
+            # Detail on next line
+            if detail:
+                p_detail = tf.add_paragraph()
+                r_det = p_detail.add_run()
+                r_det.text = f"    {detail}"
+                _apply(r_det, BODY_TEXT)
 
 
-def _render_pain_point_cards(prs, slide_data, hierarchy, layout_idx):
-    """Slide 2: 3-column card layout with accent bars."""
-    layout = prs.slide_layouts[min(layout_idx, len(prs.slide_layouts) - 1)]
-    slide = prs.slides.add_slide(layout)
+def _render_pain_points(prs, slide_data, layout_idx):
+    """Slide 2: 3 pain point cards with accent bars."""
+    slide = prs.slides.add_slide(prs.slide_layouts[min(layout_idx, len(prs.slide_layouts) - 1)])
 
-    title_text = _strip_md(slide_data.get("title", "Key Pain Points"))
-    _add_textbox(slide, 0.6, 0.4, 12.0, 0.7, title_text, hierarchy.get("h1", _DEFAULT_HIERARCHY["h1"]))
+    _title_block(slide, slide_data.get("title", "Key Pain Points"))
 
     cards = slide_data.get("cards", [])
-    if not cards:
-        return
+    accent_colors = [ACCENT_RED, ACCENT_AMBER, ACCENT_GREEN]
 
-    accent_colors = [COLOR_RED, COLOR_AMBER, COLOR_SECONDARY]
-    card_width = 3.8
-    card_gap = 0.3
-    start_left = 0.6
+    # Card layout: 3 cards, each 2.75" wide, 0.25 gap, centered
+    CARD_W = 2.75
+    CARD_H = 4.0
+    CARD_GAP = 0.25
+    CARD_Y = 0.95
+    CARD_X_START = 0.625  # (10 - 3*2.75 - 2*0.25) / 2
+    ACCENT_BAR_W = 0.06
 
     for i, card in enumerate(cards[:3]):
-        card_left = start_left + i * (card_width + card_gap)
-        card_top = 1.4
-        accent_color = accent_colors[i % len(accent_colors)]
+        card_x = CARD_X_START + i * (CARD_W + CARD_GAP)
+        accent = accent_colors[i % 3]
+        inner_x = card_x + 0.22
+        inner_w = 2.38
 
-        # Accent bar (left edge)
-        bar = slide.shapes.add_shape(1, Inches(card_left), Inches(card_top),
-                                     Inches(0.08), Inches(5.2))
-        bar.fill.solid()
-        bar.fill.fore_color.rgb = accent_color
-        bar.line.fill.background()
-
+        # Accent bar
+        _rect(slide, card_x, CARD_Y, ACCENT_BAR_W, CARD_H, accent)
         # Card background
-        card_bg = slide.shapes.add_shape(1, Inches(card_left + 0.08), Inches(card_top),
-                                         Inches(card_width - 0.08), Inches(5.2))
-        card_bg.fill.solid()
-        card_bg.fill.fore_color.rgb = COLOR_LIGHT_BG
-        card_bg.line.fill.background()
+        _rect(slide, card_x + ACCENT_BAR_W, CARD_Y, CARD_W - ACCENT_BAR_W, CARD_H, BG_LIGHT)
 
-        content_left = card_left + 0.25
-        content_width = card_width - 0.4
-        y = card_top + 0.2
-
-        # Card title + call count
+        # Card title: "Theme Name (X calls)"
         name = _strip_md(str(card.get("name", f"Pain Point {i+1}")))
         calls = card.get("calls", 0)
-        title_with_calls = f"{name} ({calls} calls)" if calls else name
-        _add_textbox(slide, content_left, y, content_width, 0.4, title_with_calls,
-                     {"size": Pt(14), "bold": True, "color": COLOR_TEXT, "font": "Calibri"})
-        y += 0.5
+        box = slide.shapes.add_textbox(Inches(inner_x), Inches(1.05), Inches(inner_w), Inches(0.35))
+        tf = box.text_frame
+        tf.word_wrap = True
+        r1 = tf.paragraphs[0].add_run()
+        r1.text = name
+        _apply(r1, _style(12, bold=True, color=NAVY))
+        r2 = tf.paragraphs[0].add_run()
+        r2.text = f" ({calls} calls)" if calls else ""
+        _apply(r2, _style(12, bold=False, color=NAVY))
 
-        # Impact + Priority scores (grey, 10pt)
-        impact_score = card.get("impact_score", card.get("impact", 0))
+        # Stats line
+        impact = card.get("impact", card.get("impact_score", 0))
         priority = card.get("priority", 0)
-        stats_text = f"Impact: {impact_score} | Priority: {priority}"
-        _add_textbox(slide, content_left, y, content_width, 0.25, stats_text,
-                     {"size": Pt(10), "bold": False, "color": COLOR_MUTED, "font": "Calibri"})
-        y += 0.45
+        _tb(slide, inner_x, 1.40, inner_w, 0.25, f"Impact: {impact} | Priority: {priority}", _style(9, color=MID_GRAY))
 
-        # Issue label + text (bold label, 12pt body)
-        _add_textbox(slide, content_left, y, content_width, 0.25, "Issue:",
-                     {"size": Pt(12), "bold": True, "color": COLOR_TEXT, "font": "Calibri"})
-        y += 0.3
-        issue = _strip_md(str(card.get("issue", "")))
-        _add_textbox(slide, content_left, y, content_width, 1.2, issue,
-                     {"size": Pt(11), "bold": False, "color": COLOR_TEXT, "font": "Calibri"})
-        y += 1.4
+        # Separator
+        _rule(slide, inner_x, 1.65, inner_w)
 
-        # Fix label + text (bold label, green, includes owner in parens)
-        _add_textbox(slide, content_left, y, content_width, 0.25, "Fix:",
-                     {"size": Pt(12), "bold": True, "color": COLOR_GREEN, "font": "Calibri"})
-        y += 0.3
-        fix = _strip_md(str(card.get("fix", "")))
-        # If there's a separate owner field, append it
+        # Issue: label + text
+        box = slide.shapes.add_textbox(Inches(inner_x), Inches(1.75), Inches(inner_w), Inches(1.05))
+        tf = box.text_frame
+        tf.word_wrap = True
+        r_lbl = tf.paragraphs[0].add_run()
+        r_lbl.text = "Issue: "
+        _apply(r_lbl, _style(11, bold=True, color=BLACK))
+        r_txt = tf.paragraphs[0].add_run()
+        r_txt.text = _strip_md(str(card.get("issue", "")))
+        _apply(r_txt, _style(10, color=BLACK))
+
+        # Fix: label + text + (owner)
+        box = slide.shapes.add_textbox(Inches(inner_x), Inches(2.85), Inches(inner_w), Inches(0.95))
+        tf = box.text_frame
+        tf.word_wrap = True
+        r_fix_lbl = tf.paragraphs[0].add_run()
+        r_fix_lbl.text = "Fix: "
+        _apply(r_fix_lbl, _style(11, bold=True, color=BLACK))
+        fix_text = _strip_md(str(card.get("fix", "")))
+        r_fix = tf.paragraphs[0].add_run()
+        r_fix.text = fix_text + " "
+        _apply(r_fix, _style(10, color=BLACK))
         owner = card.get("owner", "")
-        if owner and f"({owner})" not in fix and owner not in fix:
-            fix = f"{fix} ({owner})"
-        _add_textbox(slide, content_left, y, content_width, 1.0, fix,
-                     {"size": Pt(11), "bold": False, "color": COLOR_TEXT, "font": "Calibri"})
+        if owner and f"({owner})" not in fix_text:
+            r_own = tf.paragraphs[0].add_run()
+            r_own.text = f"({owner})"
+            _apply(r_own, _style(9, bold=True, color=BLUE_ACCENT))
 
 
-def _render_impact_matrix(prs, slide_data, hierarchy, layout_idx, chart_paths):
-    """Slide 3: Theme card list LEFT (~60%), scatter chart RIGHT (~40%)."""
-    layout = prs.slide_layouts[min(layout_idx, len(prs.slide_layouts) - 1)]
-    slide = prs.slides.add_slide(layout)
+def _render_impact_ease(prs, slide_data, layout_idx, chart_paths):
+    """Slide 3: Theme card list LEFT (58%) + scatter chart RIGHT (38%)."""
+    slide = prs.slides.add_slide(prs.slide_layouts[min(layout_idx, len(prs.slide_layouts) - 1)])
 
-    title_text = _strip_md(slide_data.get("title", "Impact vs. Ease \u2014 Full Theme Prioritization"))
-    _add_textbox(slide, 0.4, 0.3, 12.5, 0.6, title_text, hierarchy.get("h1", _DEFAULT_HIERARCHY["h1"]))
+    _title_block(slide, slide_data.get("title", "Impact vs. Ease \u2014 Full Theme Prioritization"))
 
-    # Themes list on LEFT
     themes = slide_data.get("themes", [])
 
-    # Fallback: if no themes but there's a legacy table, use the table approach
-    if not themes:
+    # LEFT SIDE — theme summary list
+    if themes:
+        box = slide.shapes.add_textbox(Inches(0.5), Inches(0.95), Inches(5.5), Inches(4.2))
+        tf = box.text_frame
+        tf.word_wrap = True
+
+        for ti, t in enumerate(themes[:10]):
+            t_name = _strip_md(str(t.get("name", "")))
+            quadrant = _strip_md(str(t.get("quadrant", "")))
+            # Derive quadrant if not provided
+            if not quadrant:
+                imp = float(t.get("impact", 0))
+                ease = float(t.get("ease", 0))
+                if imp >= 7 and ease >= 7:
+                    quadrant = "Quick Win"
+                elif imp >= 7:
+                    quadrant = "Strategic Bet"
+                elif ease >= 7:
+                    quadrant = "Easy Fix"
+                else:
+                    quadrant = "Deprioritize"
+
+            # Line 1: Bold theme name + quadrant
+            p = tf.paragraphs[0] if ti == 0 else tf.add_paragraph()
+            p.space_after = Pt(1)
+            r_name = p.add_run()
+            r_name.text = t_name
+            _apply(r_name, _style(11, bold=True, color=NAVY))
+            r_sep = p.add_run()
+            r_sep.text = f" \u2014 {quadrant}"
+            _apply(r_sep, _style(11, bold=False, color=MID_GRAY))
+
+            # Line 2: Stats
+            p2 = tf.add_paragraph()
+            p2.space_after = Pt(6)
+            r_stats = p2.add_run()
+            r_stats.text = f"Calls: {t.get('calls', 0)} | Impact: {t.get('impact', 0)} | Ease: {t.get('ease', 0)} | Priority: {t.get('priority', 0)}"
+            _apply(r_stats, _style(9, color=MID_GRAY))
+    else:
+        # Fallback: legacy table if present
         table_data = slide_data.get("table", {})
         if table_data and table_data.get("headers"):
-            _add_table_to_slide(slide, table_data["headers"], table_data.get("rows", []),
-                                hierarchy, left=0.4, top=1.2, width=7.0, row_height=0.30)
-        chart_ph = slide_data.get("chart_placeholder", {})
-        if chart_ph:
-            _add_chart_image(slide, chart_ph.get("chart_key", "impact_ease_scatter"),
-                             chart_paths, position=chart_ph.get("position", "right"))
-        return
+            _add_table(slide, table_data["headers"], table_data.get("rows", []),
+                       x=0.5, y=0.95, w=5.5, row_h=0.28)
 
-    y = 1.1
-    left_width = 7.2
-
-    for t_idx, theme in enumerate(themes[:10]):
-        t_name = _strip_md(str(theme.get("name", "")))
-        quadrant = _strip_md(str(theme.get("quadrant", "")))
-        t_calls = theme.get("calls", 0)
-        t_impact = theme.get("impact", 0)
-        t_ease = theme.get("ease", 0)
-        t_priority = theme.get("priority", 0)
-        t_issue = _strip_md(str(theme.get("issue", "")))
-
-        # Theme name (bold, blue) + quadrant
-        header_text = f"{t_name}" + (f" \u2014 {quadrant}" if quadrant else "")
-        _add_textbox(slide, 0.4, y, left_width, 0.3, header_text,
-                     {"size": Pt(12), "bold": True, "color": COLOR_SECONDARY, "font": "Calibri"})
-        y += 0.28
-
-        # Stats line (grey, 10pt)
-        stats = f"Calls: {t_calls} | Impact: {t_impact} | Ease: {t_ease} | Priority: {t_priority}"
-        _add_textbox(slide, 0.6, y, left_width - 0.2, 0.2, stats,
-                     {"size": Pt(9), "bold": False, "color": COLOR_MUTED, "font": "Calibri"})
-        y += 0.22
-
-        # Issue (black, 10pt)
-        if t_issue:
-            _add_textbox(slide, 0.6, y, left_width - 0.2, 0.3, t_issue,
-                         {"size": Pt(9), "bold": False, "color": COLOR_TEXT, "font": "Calibri"})
-            y += 0.28
-
-        # Subtle separator between themes
-        if t_idx < min(len(themes), 10) - 1:
-            _add_separator_line(slide, 0.6, y, 6.5, color=RGBColor(0xDD, 0xDD, 0xDD))
-            y += 0.12
-
-    # Chart on RIGHT
+    # RIGHT SIDE — chart image
     chart_ph = slide_data.get("chart_placeholder", {})
     if chart_ph:
         _add_chart_image(slide, chart_ph.get("chart_key", "impact_ease_scatter"),
-                         chart_paths, position=chart_ph.get("position", "right"))
+                         chart_paths, x=6.2, y=0.85, w=3.5)
 
 
-def _render_low_hanging_fruit(prs, slide_data, hierarchy, layout_idx):
-    """Slide 4: 3 easiest solutions with blue title + black elaboration."""
-    layout = prs.slide_layouts[min(layout_idx, len(prs.slide_layouts) - 1)]
-    slide = prs.slides.add_slide(layout)
+def _render_low_hanging_fruit(prs, slide_data, layout_idx):
+    """Slide 4: 3 easiest solutions — numbered blue titles + detail."""
+    slide = prs.slides.add_slide(prs.slide_layouts[min(layout_idx, len(prs.slide_layouts) - 1)])
 
-    title_text = _strip_md(slide_data.get("title", "Low Hanging Fruit"))
-    _add_textbox(slide, 0.6, 0.4, 12.0, 0.7, title_text, hierarchy.get("h1", _DEFAULT_HIERARCHY["h1"]))
+    _title_block(slide, slide_data.get("title", "Low Hanging Fruit"))
 
-    solutions = slide_data.get("solutions", [])
-    y = 1.5
+    # Support both 'items' (new plan) and 'solutions' (legacy)
+    items = slide_data.get("items", slide_data.get("solutions", []))
 
-    for sol in solutions[:3]:
-        sol_title = _strip_md(str(sol.get("title", "")))
-        sol_detail = _strip_md(str(sol.get("detail", "")))
-        sol_impact = _strip_md(str(sol.get("call_impact", "")))
+    box = slide.shapes.add_textbox(Inches(0.5), Inches(0.95), Inches(9.0), Inches(4.0))
+    tf = box.text_frame
+    tf.word_wrap = True
 
-        # Solution title (16pt, blue, bold)
-        _add_textbox(slide, 0.8, y, 11.5, 0.4, f"\u2022  {sol_title}",
-                     {"size": Pt(16), "bold": True, "color": COLOR_SECONDARY, "font": "Calibri"})
-        y += 0.5
+    for idx, item in enumerate(items[:3], start=1):
+        if isinstance(item, dict):
+            action = _strip_md(str(item.get("action", item.get("title", ""))))
+            detail = _strip_md(str(item.get("detail", "")))
+            impact = _strip_md(str(item.get("impact", item.get("call_impact", ""))))
+        else:
+            action = _strip_md(str(item))
+            detail = ""
+            impact = ""
 
-        # Elaboration (12pt, black, indented)
-        if sol_detail:
-            _add_textbox(slide, 1.3, y, 11.0, 0.7, sol_detail,
-                         {"size": Pt(12), "bold": False, "color": COLOR_TEXT, "font": "Calibri"})
-            y += 0.6
+        # Numbered title (13pt, blue, bold)
+        p = tf.paragraphs[0] if idx == 1 else tf.add_paragraph()
+        r_title = p.add_run()
+        r_title.text = f"{idx}. {action}"
+        _apply(r_title, _style(13, bold=True, color=BLUE_ACCENT))
 
-        # Call impact (12pt, muted, indented)
-        if sol_impact:
-            _add_textbox(slide, 1.3, y, 11.0, 0.3, sol_impact,
-                         {"size": Pt(12), "bold": False, "color": COLOR_MUTED, "font": "Calibri"})
-            y += 0.4
+        # Detail line (11pt, black)
+        if detail:
+            p_det = tf.add_paragraph()
+            r_det = p_det.add_run()
+            r_det.text = f"    {detail}"
+            _apply(r_det, _style(11, color=BLACK))
 
-        y += 0.3  # gap between solutions
+        # Impact line (10pt, muted)
+        if impact:
+            p_imp = tf.add_paragraph()
+            r_imp = p_imp.add_run()
+            r_imp.text = f"    {impact}"
+            _apply(r_imp, _style(10, color=MID_GRAY))
+
+        # Spacer
+        if idx < min(len(items), 3):
+            tf.add_paragraph()
 
 
-def _render_recommendations(prs, slide_data, hierarchy, layout_idx):
-    """Slide 5: 2x2 card grid with per-dimension accent colors."""
-    layout = prs.slide_layouts[min(layout_idx, len(prs.slide_layouts) - 1)]
-    slide = prs.slides.add_slide(layout)
+def _render_recommendations(prs, slide_data, layout_idx):
+    """Slide 5: 2x2 card grid with dimension accent bars."""
+    slide = prs.slides.add_slide(prs.slide_layouts[min(layout_idx, len(prs.slide_layouts) - 1)])
 
-    title_text = _strip_md(slide_data.get("title", "Recommended Actions by Owning Team"))
-    _add_textbox(slide, 0.6, 0.4, 12.0, 0.7, title_text, hierarchy.get("h1", _DEFAULT_HIERARCHY["h1"]))
+    _title_block(slide, slide_data.get("title", "Recommended Actions by Owning Team"))
 
     dimensions = slide_data.get("dimensions", [])
     if not dimensions:
-        # Fallback to legacy elements
-        _render_legacy_content(prs, slide, slide_data, hierarchy, {})
         return
 
-    default_colors = {
-        "Digital / UX": "006BA6", "Digital/UX": "006BA6",
-        "Operations": "2C5F2D",
-        "Communications": "E67E22",
-        "Policy": "8E44AD",
-    }
-
+    CARD_W = 4.15
+    CARD_H = 2.05
     positions = [
-        (0.6, 1.6),   # top-left
-        (6.8, 1.6),   # top-right
-        (0.6, 4.4),   # bottom-left
-        (6.8, 4.4),   # bottom-right
+        (0.75, 0.95),   # top-left
+        (5.10, 0.95),   # top-right
+        (0.75, 3.15),   # bottom-left
+        (5.10, 3.15),   # bottom-right
     ]
-    card_width = 5.8
 
     for i, dim in enumerate(dimensions[:4]):
         if i >= len(positions):
             break
-
-        card_left, card_top = positions[i]
+        cx, cy = positions[i]
         dim_name = str(dim.get("name", f"Dimension {i+1}"))
-        accent_hex = dim.get("accent_color", default_colors.get(dim_name, "006BA6"))
-        accent_color = _hex_to_rgb(accent_hex)
+        accent = DIMENSION_COLORS.get(dim_name, BLUE_ACCENT)
+        # Also check accent_color field if dimension name doesn't match
+        if dim.get("accent_color"):
+            accent = _hex_to_rgb(dim["accent_color"])
 
-        # Colored square icon
-        icon = slide.shapes.add_shape(1, Inches(card_left), Inches(card_top),
-                                      Inches(0.25), Inches(0.25))
-        icon.fill.solid()
-        icon.fill.fore_color.rgb = accent_color
-        icon.line.fill.background()
+        # Card background
+        _rect(slide, cx, cy, CARD_W, CARD_H, BG_LIGHT)
+        # Left accent bar
+        _rect(slide, cx, cy, 0.05, CARD_H, accent)
 
-        # Dimension name
-        _add_textbox(slide, card_left + 0.35, card_top - 0.05, card_width - 0.35, 0.35,
-                     dim_name,
-                     {"size": Pt(14), "bold": True, "color": COLOR_TEXT, "font": "Calibri"})
+        # Dimension title: ■ Name
+        box = slide.shapes.add_textbox(Inches(cx + 0.2), Inches(cy + 0.1), Inches(3.75), Inches(0.3))
+        tf = box.text_frame
+        tf.word_wrap = True
+        r_sq = tf.paragraphs[0].add_run()
+        r_sq.text = "\u25A0 "
+        _apply(r_sq, _style(13, bold=True, color=accent))
+        r_nm = tf.paragraphs[0].add_run()
+        r_nm.text = dim_name
+        _apply(r_nm, _style(13, bold=True, color=NAVY))
 
-        # Actions
-        y = card_top + 0.45
-        for action in dim.get("actions", [])[:2]:
-            action_title = _strip_md(str(action.get("title", "")))
-            action_detail = _strip_md(str(action.get("detail", "")))
-            calls = action.get("calls", 0)
+        # Action bullets
+        actions = dim.get("actions", [])
+        box = slide.shapes.add_textbox(Inches(cx + 0.2), Inches(cy + 0.5), Inches(3.75), Inches(1.45))
+        tf = box.text_frame
+        tf.word_wrap = True
+        for ai, act in enumerate(actions[:2]):
+            act_title = _strip_md(str(act.get("title", "")))
+            act_detail = _strip_md(str(act.get("detail", "")))
 
-            txBox = slide.shapes.add_textbox(Inches(card_left + 0.3), Inches(y),
-                                             Inches(card_width - 0.3), Inches(0.7))
-            tf = txBox.text_frame
-            tf.word_wrap = True
-            p = tf.paragraphs[0]
+            p = tf.paragraphs[0] if ai == 0 else tf.add_paragraph()
+            p.space_after = Pt(6)
+            r_bullet = p.add_run()
+            r_bullet.text = f"\u2022 {act_title}"
+            _apply(r_bullet, _style(10.5, bold=True, color=BLACK))
 
-            bullet_run = p.add_run()
-            bullet_run.text = "\u2022 "
-            _apply_font(bullet_run, {"size": Pt(12), "bold": True, "color": accent_color, "font": "Calibri"})
-
-            title_run = p.add_run()
-            title_run.text = action_title
-            _apply_font(title_run, {"size": Pt(12), "bold": True, "color": COLOR_TEXT, "font": "Calibri"})
-
-            if action_detail:
-                detail_p = tf.add_paragraph()
-                detail_run = detail_p.add_run()
-                detail_text = f"   \u2192 {action_detail}"
-                if calls:
-                    detail_text += f" ({calls} calls)"
-                detail_run.text = detail_text
-                _apply_font(detail_run, {"size": Pt(10), "bold": False, "color": COLOR_MUTED, "font": "Calibri"})
-
-            y += 0.9
+            if act_detail:
+                p2 = tf.add_paragraph()
+                r_d = p2.add_run()
+                r_d.text = f"   \u2192 {act_detail}"
+                _apply(r_d, _style(9.5, color=MID_GRAY))
 
 
-def _render_theme_card(prs, slide_data, hierarchy, layout_idx, chart_paths):
+def _render_theme_card(prs, slide_data, layout_idx, chart_paths):
     """Slide 6+: Stats bar + LEFT narrative (60%) + RIGHT driver table (40%)."""
-    layout = prs.slide_layouts[min(layout_idx, len(prs.slide_layouts) - 1)]
-    slide = prs.slides.add_slide(layout)
+    slide = prs.slides.add_slide(prs.slide_layouts[min(layout_idx, len(prs.slide_layouts) - 1)])
 
-    title_text = _strip_md(slide_data.get("title", ""))
+    title = _strip_md(slide_data.get("title", ""))
     stats_bar = slide_data.get("stats_bar", {})
-    left_column = slide_data.get("left_column", {})
-    right_column = slide_data.get("right_column", {})
+    left_col = slide_data.get("left_column", {})
+    right_col = slide_data.get("right_column", {})
 
-    # Fallback to legacy rendering
-    if not stats_bar and not left_column and not right_column:
-        _render_legacy_theme_card(prs, slide, slide_data, hierarchy, chart_paths)
-        return
+    # 1. Theme title (22pt, NAVY)
+    _tb(slide, 0.5, 0.3, 9.0, 0.35, title, SLIDE_TITLE)
 
-    # Title (24pt, bold)
-    _add_textbox(slide, 0.5, 0.3, 12.0, 0.6, title_text,
-                 {"size": Pt(24), "bold": True, "color": COLOR_PRIMARY, "font": "Calibri"})
-
-    # Stats bar (11pt, muted gray)
+    # 2. Stats bar (10pt, MID_GRAY)
     if stats_bar:
-        calls = stats_bar.get("calls", 0)
-        pct = stats_bar.get("pct", "")
-        impact = stats_bar.get("impact", 0)
-        ease = stats_bar.get("ease", 0)
-        priority = stats_bar.get("priority", 0)
-        stats_text = f"Calls: {calls} | {pct} | Impact: {impact} | Ease: {ease} | Priority: {priority}"
-        _add_textbox(slide, 0.5, 0.95, 12.0, 0.3, stats_text,
-                     hierarchy.get("stats_bar", _DEFAULT_HIERARCHY["stats_bar"]))
+        parts = []
+        if stats_bar.get("calls"):
+            parts.append(f"Calls: {stats_bar['calls']}")
+        if stats_bar.get("pct"):
+            parts.append(stats_bar["pct"])
+        if stats_bar.get("impact"):
+            parts.append(f"Impact: {stats_bar['impact']}")
+        if stats_bar.get("ease"):
+            parts.append(f"Ease: {stats_bar['ease']}")
+        if stats_bar.get("priority"):
+            parts.append(f"Priority: {stats_bar['priority']}")
+        _tb(slide, 0.5, 0.62, 9.0, 0.2, "  |  ".join(parts), STATS_TEXT)
 
-    # LEFT COLUMN (60%)
-    left_x = 0.5
-    left_width = 7.2
-    y = 1.5
+    # 3. Rule
+    _rule(slide, 0.5, 0.82, 9.0)
 
-    if left_column:
+    # LEFT COLUMN (5.3" wide)
+    if left_col:
         # CORE ISSUE
-        _add_textbox(slide, left_x, y, left_width, 0.3, "CORE ISSUE",
-                     {"size": Pt(13), "bold": True, "color": COLOR_PRIMARY, "font": "Calibri"})
-        y += 0.35
-        core_issue = _strip_md(str(left_column.get("core_issue", "")))
+        _tb(slide, 0.5, 0.95, 5.3, 0.25, "CORE ISSUE", H3_LABEL)
+        core_issue = _strip_md(str(left_col.get("core_issue", "")))
         if core_issue:
-            _add_textbox(slide, left_x, y, left_width, 1.0, core_issue,
-                         {"size": Pt(11), "bold": False, "color": COLOR_TEXT, "font": "Calibri"})
-        y += 1.1
+            _tb(slide, 0.5, 1.22, 5.3, 0.65, core_issue, BODY_TEXT)
 
         # PRIMARY DRIVER
-        _add_textbox(slide, left_x, y, left_width, 0.3, "PRIMARY DRIVER",
-                     {"size": Pt(13), "bold": True, "color": COLOR_PRIMARY, "font": "Calibri"})
-        y += 0.35
-        primary_driver = _strip_md(str(left_column.get("primary_driver", "")))
-        if primary_driver:
-            _add_textbox(slide, left_x, y, left_width, 0.8, primary_driver,
-                         {"size": Pt(11), "bold": False, "color": COLOR_TEXT, "font": "Calibri"})
-        y += 0.9
+        _tb(slide, 0.5, 1.95, 5.3, 0.25, "PRIMARY DRIVER", H3_LABEL)
+        driver = _strip_md(str(left_col.get("primary_driver", "")))
+        if driver:
+            _tb(slide, 0.5, 2.22, 5.3, 0.55, driver, BODY_TEXT)
 
         # SOLUTIONS
-        solutions = left_column.get("solutions", [])
+        solutions = left_col.get("solutions", [])
         if solutions:
-            _add_textbox(slide, left_x, y, left_width, 0.3, "SOLUTIONS",
-                         {"size": Pt(13), "bold": True, "color": COLOR_PRIMARY, "font": "Calibri"})
-            y += 0.35
-            for idx, sol in enumerate(solutions[:3], start=1):
+            _tb(slide, 0.5, 2.85, 5.3, 0.25, "SOLUTIONS", H3_LABEL)
+
+            box = slide.shapes.add_textbox(Inches(0.5), Inches(3.12), Inches(5.3), Inches(1.8))
+            tf = box.text_frame
+            tf.word_wrap = True
+            for si, sol in enumerate(solutions[:3]):
                 action = _strip_md(str(sol.get("action", "")))
-                dimension = sol.get("dimension", "")
-                sol_text = f"{idx}. {action}"
-                if dimension:
-                    sol_text += f" [{dimension}]"
-                _add_textbox(slide, left_x, y, left_width, 0.3, sol_text,
-                             {"size": Pt(11), "bold": False, "color": COLOR_TEXT, "font": "Calibri"})
-                y += 0.35
+                dim = sol.get("dimension", "")
+                p = tf.paragraphs[0] if si == 0 else tf.add_paragraph()
+                p.space_after = Pt(4)
+                r_num = p.add_run()
+                r_num.text = f"{si + 1}. "
+                _apply(r_num, _style(11, bold=True, color=BLACK))
+                r_act = p.add_run()
+                r_act.text = f"{action} "
+                _apply(r_act, _style(11, color=BLACK))
+                if dim:
+                    r_dim = p.add_run()
+                    r_dim.text = f"[{dim}]"
+                    _apply(r_dim, _style(9, bold=True, color=BLUE_ACCENT))
 
-    # RIGHT COLUMN (40%)
-    right_x = 8.0
-    right_width = 5.0
-    right_top = 1.5
-
-    if right_column:
-        headers = right_column.get("headers", ["Driver", "Calls"])
-        rows = right_column.get("rows", [])
+    # RIGHT COLUMN — driver table (3.6" wide at x=6.1)
+    if right_col:
+        headers = right_col.get("headers", ["Driver", "Calls"])
+        rows = right_col.get("rows", [])
         if headers and rows:
-            _add_table_to_slide(slide, headers, rows, hierarchy,
-                                left=right_x, top=right_top, width=right_width, row_height=0.28)
+            _add_table(slide, headers, rows, x=6.1, y=0.95, w=3.6,
+                       col_widths=[2.5, 1.1], row_h=0.28)
 
 
-def _render_legacy_theme_card(prs, slide, slide_data, hierarchy, chart_paths):
-    """Legacy theme card rendering using elements array."""
+# ═══════════════════════════════════════════════════════════════════════════
+# Legacy fallback renderer
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _build_fallback_slide(prs, slide_data, layout_idx, chart_paths):
+    """Generic fallback for slides with legacy `elements` arrays."""
+    slide = prs.slides.add_slide(prs.slide_layouts[min(layout_idx, len(prs.slide_layouts) - 1)])
+    title = _strip_md(slide_data.get("title", ""))
     elements = slide_data.get("elements", [])
-    title_text = _strip_md(slide_data.get("title", ""))
+
     if slide.shapes.title:
-        slide.shapes.title.text = title_text
-        for p in slide.shapes.title.text_frame.paragraphs:
-            for run in p.runs:
-                _apply_font(run, hierarchy["h1"])
-    body_ph = None
-    for ph in slide.placeholders:
-        if ph.placeholder_format.type in (2, 7):
-            body_ph = ph
-            break
-    if body_ph:
-        text_elems = [e for e in elements if e.get("type") not in ("table", "chart_placeholder")]
-        _add_text_elements(body_ph.text_frame, text_elems, hierarchy)
-    for t_elem in elements:
-        if t_elem.get("type") == "table":
-            _add_table_to_slide(slide, t_elem.get("headers", []), t_elem.get("rows", []),
-                                hierarchy, left=0.6, top=4.0, width=7.5, row_height=0.30)
-    for elem in elements:
-        if elem.get("type") == "chart_placeholder":
-            _add_chart_image(slide, elem.get("chart_key", ""), chart_paths,
-                             position=elem.get("position", "right"))
-            break
+        slide.shapes.title.text = title
 
-
-def _render_legacy_content(prs, slide, slide_data, hierarchy, chart_paths):
-    """Legacy content rendering using elements array."""
-    elements = slide_data.get("elements", [])
     body_ph = None
     for ph in slide.placeholders:
         if ph.placeholder_format.type in (2, 7):
             body_ph = ph
             break
     if body_ph and elements:
-        text_elems = [e for e in elements if e.get("type") not in ("table", "chart_placeholder")]
-        _add_text_elements(body_ph.text_frame, text_elems, hierarchy)
-    for elem in elements:
-        if elem.get("type") == "table":
-            _add_table_to_slide(slide, elem.get("headers", []), elem.get("rows", []), hierarchy)
-    for elem in elements:
-        if elem.get("type") == "chart_placeholder":
-            _add_chart_image(slide, elem.get("chart_key", ""), chart_paths,
-                             position=elem.get("position", "right"))
+        tf = body_ph.text_frame
+        tf.clear()
+        first = True
+        for elem in elements:
+            etype = elem.get("type", "point_description")
+            text = _strip_md(elem.get("text", ""))
+            if not text or etype in ("table", "chart_placeholder"):
+                continue
+            p = tf.paragraphs[0] if first else tf.add_paragraph()
+            first = False
+            r = p.add_run()
+            r.text = text
+            _apply(r, BODY_TEXT)
 
-
-# ---------------------------------------------------------------------------
-# Generic slide builders (legacy fallback)
-# ---------------------------------------------------------------------------
-
-
-def _build_content_slide(prs, slide_data, hierarchy, layout_idx, chart_paths):
-    layout = prs.slide_layouts[min(layout_idx, len(prs.slide_layouts) - 1)]
-    slide = prs.slides.add_slide(layout)
-    title_text = _strip_md(slide_data.get("title", ""))
-    elements = slide_data.get("elements", [])
-    if slide.shapes.title:
-        slide.shapes.title.text = title_text
-        for p in slide.shapes.title.text_frame.paragraphs:
-            for run in p.runs:
-                _apply_font(run, hierarchy["h1"])
-    body_ph = None
-    for ph in slide.placeholders:
-        if ph.placeholder_format.type in (2, 7):
-            body_ph = ph
-            break
-    if body_ph and elements:
-        text_elems = [e for e in elements if e.get("type") not in ("table", "chart_placeholder")]
-        _add_text_elements(body_ph.text_frame, text_elems, hierarchy)
-    for elem in elements:
-        if elem.get("type") == "table":
-            _add_table_to_slide(slide, elem.get("headers", []), elem.get("rows", []), hierarchy)
     for elem in elements:
         if elem.get("type") == "chart_placeholder":
-            _add_chart_image(slide, elem.get("chart_key", ""), chart_paths,
-                             position=elem.get("position", "right"))
+            _add_chart_image(slide, elem.get("chart_key", ""), chart_paths)
 
 
-# ---------------------------------------------------------------------------
-# Slide role dispatcher
-# ---------------------------------------------------------------------------
-
-_STRUCTURED_ROLES = {"executive_summary", "pain_points", "impact_matrix",
-                     "low_hanging_fruit", "recommendations", "theme_card"}
-
-
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
 # Public API
-# ---------------------------------------------------------------------------
-
+# ═══════════════════════════════════════════════════════════════════════════
 
 def build_pptx_from_sections(
     section_blueprints: list[dict[str, Any]],
@@ -747,69 +658,46 @@ def build_pptx_from_sections(
     template_path: str = "",
     visual_hierarchy: dict[str, Any] | None = None,
 ) -> str:
-    """Build a PPTX from per-section formatting blueprints.
-
-    Args:
-        section_blueprints: List of section dicts, each with ``section_key`` and ``slides``.
-        chart_paths: Map of chart_key -> image file path.
-        output_path: Where to save the .pptx.
-        template_path: Path to .pptx template file.
-        visual_hierarchy: Optional visual hierarchy from template catalog.
-
-    Returns:
-        The output path.
-    """
     if template_path and Path(template_path).exists():
         prs = Presentation(template_path)
     else:
         prs = Presentation()
 
-    prs.slide_width = Inches(13.33)
-    prs.slide_height = Inches(7.5)
+    # Canvas: 10 x 5.625 (standard 16:9)
+    prs.slide_width = Inches(SLIDE_W)
+    prs.slide_height = Inches(SLIDE_H)
 
-    hierarchy = _load_hierarchy(visual_hierarchy)
-    num_layouts = len(prs.slide_layouts)
+    n_layouts = len(prs.slide_layouts)
 
     for section in section_blueprints:
-        for slide_data in section.get("slides", []):
-            layout_idx = slide_data.get("layout_index", 1)
-            if layout_idx >= num_layouts:
-                layout_idx = 1
+        for sd in section.get("slides", []):
+            li = min(sd.get("layout_index", 1), n_layouts - 1)
+            role = sd.get("slide_role", "content")
 
-            slide_role = slide_data.get("slide_role", "content")
+            if role in ("executive_summary", "hook", "hook_and_quick_wins"):
+                _render_executive_summary(prs, sd, li)
 
-            if slide_role == "executive_summary":
-                _render_executive_summary(prs, slide_data, hierarchy, layout_idx)
+            elif role == "pain_points" and sd.get("cards"):
+                _render_pain_points(prs, sd, li)
 
-            elif slide_role == "hook":
-                # Legacy hook — render as executive_summary
-                _render_executive_summary(prs, slide_data, hierarchy, layout_idx)
+            elif role in ("impact_ease", "impact_matrix"):
+                _render_impact_ease(prs, sd, li, chart_paths)
 
-            elif slide_role == "hook_and_quick_wins":
-                # Legacy hook+quick_wins — render as executive_summary
-                _render_executive_summary(prs, slide_data, hierarchy, layout_idx)
+            elif role == "low_hanging_fruit":
+                _render_low_hanging_fruit(prs, sd, li)
 
-            elif slide_role == "pain_points" and slide_data.get("cards"):
-                _render_pain_point_cards(prs, slide_data, hierarchy, layout_idx)
+            elif role == "biggest_bet":
+                # Legacy: render as low hanging fruit fallback
+                _render_low_hanging_fruit(prs, sd, li)
 
-            elif slide_role == "impact_matrix":
-                _render_impact_matrix(prs, slide_data, hierarchy, layout_idx, chart_paths)
+            elif role == "recommendations" and sd.get("dimensions"):
+                _render_recommendations(prs, sd, li)
 
-            elif slide_role == "low_hanging_fruit":
-                _render_low_hanging_fruit(prs, slide_data, hierarchy, layout_idx)
-
-            elif slide_role == "biggest_bet":
-                # Legacy biggest_bet — render as low_hanging_fruit fallback
-                _render_low_hanging_fruit(prs, slide_data, hierarchy, layout_idx)
-
-            elif slide_role == "recommendations" and slide_data.get("dimensions"):
-                _render_recommendations(prs, slide_data, hierarchy, layout_idx)
-
-            elif slide_role == "theme_card":
-                _render_theme_card(prs, slide_data, hierarchy, layout_idx, chart_paths)
+            elif role == "theme_card":
+                _render_theme_card(prs, sd, li, chart_paths)
 
             else:
-                _build_content_slide(prs, slide_data, hierarchy, layout_idx, chart_paths)
+                _build_fallback_slide(prs, sd, li, chart_paths)
 
     prs.save(output_path)
     logger.info("PPTX built: %d slides -> %s",

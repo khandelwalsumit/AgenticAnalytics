@@ -1360,19 +1360,19 @@ def _build_fallback_section_blueprint(
         # Slide 1: Executive Summary with quick wins
         hook_title = "EXECUTIVE SUMMARY"
         hook_subtitle = hook_blocks[0].get("body", "")[:300] if hook_blocks else ""
-        quick_wins = []
+        quick_wins: list[dict[str, str]] = []
         if wins_blocks:
             body = wins_blocks[0].get("body", "")
             for line in body.split("\n"):
                 line = line.strip().lstrip("- ").strip()
                 if line and len(quick_wins) < 3:
-                    quick_wins.append(line[:200])
+                    quick_wins.append({"action": line[:200], "detail": ""})
         result_slides.append({
             "slide_number": 1,
             "slide_role": "executive_summary",
             "layout_index": spec_slides[0].get("layout_index", 6) if spec_slides else 6,
             "title": hook_title,
-            "subtitle": hook_subtitle,
+            "subtitle_lines": [{"text": hook_subtitle, "bold_part": None}] if hook_subtitle else [],
             "quick_wins": quick_wins,
         })
 
@@ -1384,17 +1384,19 @@ def _build_fallback_section_blueprint(
             cards.append({
                 "name": title,
                 "calls": 0,
-                "impact_score": 0,
+                "pct": "",
+                "impact": 0,
                 "priority": 0,
                 "issue": body,
                 "fix": "To be determined",
+                "owner": "Digital/UX",
             })
         result_slides.append({
             "slide_number": 2,
             "slide_role": "pain_points",
             "layout_index": spec_slides[1].get("layout_index", 1) if len(spec_slides) > 1 else 1,
             "title": "Key Pain Points",
-            "cards": cards if cards else [{"name": "No pain points", "calls": 0, "impact_score": 0, "priority": 0, "issue": "Pain points to be identified.", "fix": "TBD"}],
+            "cards": cards if cards else [{"name": "No pain points", "calls": 0, "pct": "", "impact": 0, "priority": 0, "issue": "Pain points to be identified.", "fix": "TBD", "owner": "TBD"}],
         })
 
     elif section_key == "impact":
@@ -1403,10 +1405,10 @@ def _build_fallback_section_blueprint(
 
         spec_slides = template_spec.get("slides", [])
 
-        # Slide 1: Impact matrix with themes array
+        # Slide 1: Impact ease with themes array
         result_slides.append({
             "slide_number": 1,
-            "slide_role": "impact_matrix",
+            "slide_role": "impact_ease",
             "layout_index": spec_slides[0].get("layout_index", 51) if spec_slides else 51,
             "title": matrix_blocks[0].get("title", "Impact vs. Ease Analysis") if matrix_blocks else "Impact vs. Ease Analysis",
             "themes": [],  # filled by LLM; fallback empty
@@ -1419,7 +1421,7 @@ def _build_fallback_section_blueprint(
             "slide_role": "low_hanging_fruit",
             "layout_index": spec_slides[1].get("layout_index", 1) if len(spec_slides) > 1 else 1,
             "title": "Low Hanging Fruit",
-            "solutions": [],  # filled by LLM; fallback empty
+            "items": [],  # filled by LLM; fallback empty
         })
 
         # Slide 3: Recommendations (structured — dimensions array)
@@ -1592,7 +1594,6 @@ def _build_fixed_deck_blueprint(
     # SECTION 1: EXECUTIVE SUMMARY (2 slides)
     # ================================================================
 
-    # Build structured pain point cards from sorted_findings
     pain_cards: list[dict[str, Any]] = []
     for i, f in enumerate(sorted_findings, 1):
         finding_text = _s(f.get("finding", ""), f"Finding {i}")
@@ -1600,24 +1601,35 @@ def _build_fixed_deck_blueprint(
         driver = _s(f.get("dominant_driver", ""), "unknown")
         action = _s(f.get("recommended_action", ""), "To be determined")
         cc = _n(f.get("call_count", 0))
+        cp = _f(f.get("call_percentage", 0))
         pain_cards.append({
             "name": finding_text,
             "calls": cc,
-            "impact_score": impact,
+            "pct": f"{cp}%" if cp > 0 else "",
+            "impact": impact,
             "priority": impact,
             "issue": finding_text,
-            "fix": f"{action[:180]} ({driver.replace('_', ' ').title()})",
+            "fix": action[:200],
+            "owner": driver.replace("_", " ").title(),
         })
 
-    # Build hook subtitle from stats
-    hook_subtitle_parts: list[str] = []
+    # Build subtitle lines for executive summary
+    subtitle_lines: list[dict[str, Any]] = []
     if total_calls > 0:
-        hook_subtitle_parts.append(f"{total_calls:,} customer calls analyzed")
-    if total_themes > 0:
-        hook_subtitle_parts.append(f"{total_themes} friction themes identified")
+        subtitle_lines.append({"text": f"Analysis of {total_calls:,} friction-related customer calls across {total_themes} themes.", "bold_part": None})
     if preventability > 0:
-        hook_subtitle_parts.append(f"{preventability:.0%} preventable")
-    hook_subtitle = " | ".join(hook_subtitle_parts) if hook_subtitle_parts else "Friction analysis complete."
+        pct_text = f"{preventability:.0%}"
+        subtitle_lines.append({"text": f"{pct_text} of total volume is deflectable with easy implementations.", "bold_part": pct_text})
+
+    # Build quick wins as {action, detail} objects
+    qw_objects: list[dict[str, str]] = []
+    for qw in all_quick_wins[:3]:
+        # Try to split "action — theme — detail" format
+        parts = str(qw).split(" — ", 1)
+        if len(parts) == 2:
+            qw_objects.append({"action": parts[0].strip(), "detail": parts[1].strip()})
+        else:
+            qw_objects.append({"action": str(qw)[:200], "detail": ""})
 
     exec_section = {
         "section_key": "exec_summary",
@@ -1627,15 +1639,15 @@ def _build_fixed_deck_blueprint(
                 "slide_role": "executive_summary",
                 "layout_index": 1,
                 "title": "EXECUTIVE SUMMARY",
-                "subtitle": hook_subtitle,
-                "quick_wins": all_quick_wins[:3],
+                "subtitle_lines": subtitle_lines,
+                "quick_wins": qw_objects,
             },
             {
                 "slide_number": 2,
                 "slide_role": "pain_points",
                 "layout_index": 1,
                 "title": "Critical Pain Points",
-                "cards": pain_cards if pain_cards else [{"name": "No significant pain points", "calls": 0, "impact_score": 0, "priority": 0, "issue": "No significant pain points identified.", "fix": "TBD"}],
+                "cards": pain_cards if pain_cards else [{"name": "No significant pain points", "calls": 0, "pct": "", "impact": 0, "priority": 0, "issue": "No significant pain points identified.", "fix": "TBD", "owner": "TBD"}],
             },
         ],
     }
@@ -1651,12 +1663,11 @@ def _build_fixed_deck_blueprint(
             continue
         impact_themes.append({
             "name": _s(t.get("theme", ""), "?")[:40],
-            "quadrant": _s(t.get("priority_quadrant", ""), "?").replace("_", " ").title(),
             "calls": _n(t.get("call_count", 0)),
             "impact": _f(t.get("impact_score", 0)),
             "ease": _f(t.get("ease_score", 0)),
             "priority": _f(t.get("priority_score", 0)),
-            "issue": "; ".join(str(cf)[:60] for cf in (t.get("contributing_factors", []) or [])[:2]) or _s(t.get("theme", "")),
+            "quadrant": _s(t.get("priority_quadrant", ""), "?").replace("_", " ").title(),
         })
 
     # Build low hanging fruit: pick 3 themes with highest ease score
@@ -1665,16 +1676,18 @@ def _build_fixed_deck_blueprint(
         key=lambda x: _f(x.get("ease_score", 0)),
         reverse=True,
     )[:3]
-    lhf_solutions: list[dict[str, Any]] = []
+    lhf_items: list[dict[str, Any]] = []
     for t in ease_sorted:
         theme_name_s = _s(t.get("theme", ""))
         t_qw = (t.get("quick_wins", []) or [])
-        sol_title = str(t_qw[0])[:200] if t_qw else f"Fix {theme_name_s} friction"
+        sol_action = str(t_qw[0])[:200] if t_qw else f"Fix {theme_name_s} friction"
         sol_detail = "; ".join(str(qw)[:80] for qw in t_qw[1:3]) if len(t_qw) > 1 else f"Ease score: {_f(t.get('ease_score', 0))}/10"
-        lhf_solutions.append({
-            "title": sol_title,
+        lhf_items.append({
+            "action": sol_action,
             "detail": sol_detail,
-            "call_impact": f"Resolves ~{_n(t.get('call_count', 0))} calls from {theme_name_s}",
+            "impact": f"Resolves ~{_n(t.get('call_count', 0))} calls from {theme_name_s}",
+            "ease": _f(t.get("ease_score", 0)),
+            "theme": theme_name_s,
         })
 
     # Build recommendations grouped by owning team
@@ -1718,10 +1731,11 @@ def _build_fixed_deck_blueprint(
         dim_actions: list[dict[str, Any]] = []
         for item in items[:2]:
             action_text = _s(item.get("recommended_action", ""), "TBD")[:200]
-            dim_actions.append({"title": action_text, "detail": "", "calls": _n(item.get("call_count", 0))})
+            cc = _n(item.get("call_count", 0))
+            detail = f"Resolves {cc} calls" if cc > 0 else ""
+            dim_actions.append({"title": action_text, "detail": detail})
         rec_dimensions.append({
             "name": dim_name,
-            "accent_color": dim_color,
             "actions": dim_actions,
         })
 
@@ -1730,7 +1744,7 @@ def _build_fixed_deck_blueprint(
         "slides": [
             {
                 "slide_number": 3,
-                "slide_role": "impact_matrix",
+                "slide_role": "impact_ease",
                 "layout_index": 1,
                 "title": "Impact vs. Ease \u2014 Full Theme Prioritization",
                 "themes": impact_themes,
@@ -1744,7 +1758,7 @@ def _build_fixed_deck_blueprint(
                 "slide_role": "low_hanging_fruit",
                 "layout_index": 1,
                 "title": "Low Hanging Fruit",
-                "solutions": lhf_solutions,
+                "items": lhf_items,
             },
             {
                 "slide_number": 5,

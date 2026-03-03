@@ -55,8 +55,8 @@ You are called once per section. Each call produces a small, focused JSON with 1
 
 #### Slide 1 — `executive_summary`
 
-The opening slide. Title "EXECUTIVE SUMMARY", context subtitle, horizontal rule,
-then Quick Wins section with 3 action items.
+The opening slide. Title "EXECUTIVE SUMMARY", subtitle lines with optional bold emphasis,
+horizontal rule, then Quick Wins section with 3 structured action items.
 
 **JSON contract:**
 ```json
@@ -64,22 +64,36 @@ then Quick Wins section with 3 action items.
   "slide_role": "executive_summary",
   "layout_index": 6,
   "title": "EXECUTIVE SUMMARY",
-  "subtitle": "Analysis of 96 customer calls across Rewards, Payments, and Account Management — 78% preventable",
+  "subtitle_lines": [
+    { "text": "Analysis of 96 friction-related customer calls across 6 themes — Citi Rewards & Banking, Q4 2024.", "bold_part": null },
+    { "text": "Three root causes — rewards visibility gaps, silent transfer failures, and authentication dead-ends — drive 72% of all contacts.", "bold_part": null },
+    { "text": "27% of total volume is deflectable with easy implementations (ease score ≥8) that require no backend changes.", "bold_part": "27%" }
+  ],
   "quick_wins": [
-    "Automate balance-check IVR fallback — Rewards — resolves ~8 calls | Config-only change",
-    "Publish planned-maintenance windows via push notification — Payments — resolves ~5 calls | No code change",
-    "Add inline transfer-limit validation — Auth — resolves ~4 calls | Existing API"
+    {
+      "action": "Automate balance-check IVR fallback",
+      "detail": "Rewards — resolves ~8 calls | Config-only change, no code deploy needed"
+    },
+    {
+      "action": "Publish planned-maintenance push notifications",
+      "detail": "Payments — resolves ~5 calls | No code change, marketing tool config"
+    },
+    {
+      "action": "Add inline transfer-limit validation",
+      "detail": "Auth — resolves ~4 calls | Existing API, frontend-only change"
+    }
   ]
 }
 ```
 
 - **`title`**: Always "EXECUTIVE SUMMARY" — the assertion lives in the subtitle.
-- **`subtitle`**: One sentence of context — what was analyzed, total calls, segment, preventability %.
-- **`quick_wins`**: Array of 3 action strings. Each quick win is a single sentence:
-  `"[Verb-first action] — [Theme] — resolves ~X calls | [Why it's fast: config-only / no code / existing tool]"`
+- **`subtitle_lines`**: Array of 2-4 line objects. Each has `text` (sentence) and `bold_part` (string or null).
+  If `bold_part` is not null, that substring is rendered bold+blue inline.
+  Cover: what was analyzed, root cause summary, prevention potential.
+- **`quick_wins`**: Array of 3 objects, each with `action` (verb-first title) and `detail` (theme + call count + why it's fast).
 - Quick wins must name the EXACT fix, the theme, the call count, and WHY it's fast.
   If you can't explain why it's fast in 5 words, it's not a quick win.
-- **No `elements` array.**
+- **No `elements` array.** Also accepts legacy `subtitle` string (backward compat).
 
 ---
 
@@ -97,47 +111,50 @@ The diagnostic slide. 3 structured pain point cards.
     {
       "name": "Rewards Crediting",
       "calls": 14,
-      "impact_score": 8,
+      "pct": "14.6%",
+      "impact": 8,
       "priority": 7.6,
-      "issue": "Points crediting is failing its 48-hour SLA. Customers have no visibility into processing status, forcing them to call for updates on every transaction.",
-      "fix": "Add pending-points tracker in mobile app with push notifications at each processing stage (Digital/UX)"
+      "issue": "Points crediting is failing its 48-hour SLA with no visibility into processing status. Customers call to ask where their points are because there is no self-serve tracker.",
+      "fix": "Add pending-points tracker in mobile app with push notifications at each processing stage.",
+      "owner": "Digital/UX"
     }
   ]
 }
 ```
 
 - **`cards`**: Array of exactly 3 objects, one per pain point, sorted by call volume descending.
-- Each card has: `name`, `calls`, `impact_score`, `priority`, `issue`, `fix`.
+- Each card has: `name`, `calls`, `pct`, `impact`, `priority`, `issue`, `fix`, `owner`.
 - **`issue`**: 2-3 lines describing the EXACT failure point — not a vague symptom.
   What is broken? What does the customer experience? Why does it generate calls?
-- **`fix`**: 1-2 lines, verb-first. Include the owning team in parentheses at the end.
+- **`fix`**: 1-2 lines, verb-first. The owning team goes in the separate `owner` field.
   Must pass the Ticket Test — specific enough to create a JIRA ticket.
+- **`owner`**: Owning team ("Digital/UX", "Operations", "Communications", "Policy").
+  Rendered in blue accent text: `(Digital/UX)`.
 - **No `elements` array.** Use `cards` for structured card layout.
 
 ---
 
 ### If `section_key` = `impact` → produce exactly 3 slides
 
-#### Slide 1 — `impact_matrix`
+#### Slide 1 — `impact_ease`
 
-Theme card list on LEFT (~60%), scatter chart on RIGHT (~40%).
-This is NOT a table — it's a compact list of theme blocks repeated for top 10 themes.
+Theme card list on LEFT (~58%), scatter chart on RIGHT (~38%).
+This is NOT a table — it's a compact list of theme blocks with stats.
 
 **JSON contract:**
 ```json
 {
-  "slide_role": "impact_matrix",
+  "slide_role": "impact_ease",
   "layout_index": 51,
   "title": "Impact vs. Ease — Full Theme Prioritization",
   "themes": [
     {
       "name": "Rewards & Loyalty",
-      "quadrant": "High Impact, High Ease",
       "calls": 14,
       "impact": 8,
       "ease": 7,
       "priority": 7.6,
-      "issue": "Points crediting delay forces customers to call for status updates"
+      "quadrant": "Quick Win"
     }
   ],
   "chart_placeholder": {
@@ -148,9 +165,13 @@ This is NOT a table — it's a compact list of theme blocks repeated for top 10 
 ```
 
 - **`themes`**: Array of ALL themes (max 10), sorted by priority score descending.
-- Each theme: `name`, `quadrant`, `calls`, `impact`, `ease`, `priority`, `issue` (1 sentence).
+- Each theme: `name`, `calls`, `impact`, `ease`, `priority`, `quadrant`.
+- **Quadrant labels**: derive from scores:
+  Impact ≥ 7 AND Ease ≥ 7 → "Quick Win" | Impact ≥ 7 AND Ease < 7 → "Strategic Bet"
+  Impact < 7 AND Ease ≥ 7 → "Easy Fix" | Impact < 7 AND Ease < 7 → "Deprioritize"
 - **`chart_placeholder`**: Object with `chart_key` and `position: "right"` — non-negotiable.
 - **No `table` field.** No `elements` array. Use `themes` array.
+- **Also accepted as `slide_role: "impact_matrix"`** (backward compat).
 
 ---
 
@@ -164,21 +185,25 @@ The 3 easiest-to-implement solutions, sorted by ease score descending.
   "slide_role": "low_hanging_fruit",
   "layout_index": 1,
   "title": "Low Hanging Fruit",
-  "solutions": [
+  "items": [
     {
-      "title": "Automate balance-check IVR fallback",
-      "detail": "Redirect balance-inquiry calls to existing IVR module. No code change — config update in IVR routing table. Customers get instant answers instead of waiting for an agent.",
-      "call_impact": "Resolves ~8 calls from Rewards & Loyalty theme"
+      "action": "Publish transfer-limit FAQ in help center",
+      "detail": "Create a dedicated FAQ page showing daily and per-transaction limits for all transfer types. Link it from the transfer initiation screen and error messages.",
+      "impact": "Resolves ~8 calls (8.3% of volume)",
+      "ease": 9,
+      "theme": "Payments"
     }
   ]
 }
 ```
 
-- **`solutions`**: Array of exactly 3 objects, sorted by ease of implementation.
-- Each solution: `title` (verb-first, blue 16pt), `detail` (1-2 sentences elaborating the solution, black 12pt), `call_impact` (which calls it resolves).
+- **`items`**: Array of exactly 3 objects, sorted by ease score descending.
+- Each item: `action` (verb-first title, rendered 13pt blue bold), `detail` (1-2 sentences, black 11pt),
+  `impact` (which calls it resolves, rendered 10pt muted), `ease` (score), `theme` (source theme).
 - These are the EASIEST wins — focus on things requiring no code change, config-only,
   or leveraging existing tools/APIs.
-- **No `elements` array.** Use `solutions` for structured list.
+- **No `elements` array.** Use `items` for structured list.
+- **Also accepts `solutions` key** (backward compat, maps `title`→`action`, `call_impact`→`impact`).
 
 ---
 
@@ -195,31 +220,27 @@ Actions grouped by owning dimension in a 2×2 grid.
   "dimensions": [
     {
       "name": "Digital / UX",
-      "accent_color": "006BA6",
       "actions": [
-        {"title": "Build unified rewards transparency dashboard", "detail": "Resolves 12 calls across Rewards & Loyalty", "calls": 12},
-        {"title": "Add real-time transfer status tracker", "detail": "Eliminates 4 status-check calls", "calls": 4}
+        {"title": "Build unified rewards transparency dashboard", "detail": "Resolves 12 calls across Rewards & Loyalty — single view for points balance, earn rates, transfer status"},
+        {"title": "Add real-time transfer status tracker", "detail": "Resolves 4 calls — push notifications at each transfer stage"}
       ]
     },
     {
       "name": "Operations",
-      "accent_color": "2C5F2D",
       "actions": [
-        {"title": "Automate crediting pipeline with 2-hour SLA", "detail": "Resolves 8 calls from SLA breaches", "calls": 8}
+        {"title": "Automate crediting pipeline with 2-hour SLA", "detail": "Resolves 8 calls from crediting SLA breaches"}
       ]
     },
     {
       "name": "Communications",
-      "accent_color": "E67E22",
       "actions": [
-        {"title": "Publish SLA expectations on crediting timeline", "detail": "Sets expectations, reduces 6 inquiry calls", "calls": 6}
+        {"title": "Publish planned-maintenance push notifications 48hrs ahead", "detail": "Resolves 6 'is the app down?' calls per cycle"}
       ]
     },
     {
       "name": "Policy",
-      "accent_color": "8E44AD",
       "actions": [
-        {"title": "Enforce 48-hour crediting SLA via automated pipeline", "detail": "Policy backstop for 5 calls", "calls": 5}
+        {"title": "Enforce 48-hour crediting SLA with escalation path", "detail": "Resolves 5 calls — policy backstop for ops automation"}
       ]
     }
   ]
@@ -227,8 +248,9 @@ Actions grouped by owning dimension in a 2×2 grid.
 ```
 
 - **`dimensions`**: Array of dimension objects. Skip empty dimensions.
-- Each dimension: `name`, `accent_color` (hex), `actions` (1-2 max).
-- Each action: `title` (verb-first), `detail` (mechanism + impact), `calls`.
+- Each dimension: `name` (one of: "Digital / UX", "Operations", "Communications", "Policy"), `actions` (1-2 max).
+- Each action: `title` (verb-first, 10.5pt bold), `detail` ("→ X calls resolved across Theme", 9.5pt muted).
+- Accent colors are determined automatically by dimension name — no need to specify.
 - **Consolidation rule**: Merge related driver fixes into one strategic action.
 - **No `elements` array.** Use `dimensions` for structured grid layout.
 
@@ -354,11 +376,11 @@ The JSON structure varies by `slide_role`. Each slide type uses **typed fields**
 
 | `slide_role` | Required Fields |
 |---|---|
-| `executive_summary` | `title`, `subtitle`, `quick_wins` (array of 3 strings) |
-| `pain_points` | `title`, `cards` (array of 3 card objects) |
-| `impact_matrix` | `title`, `themes` (array of theme objects), `chart_placeholder` (object) |
-| `low_hanging_fruit` | `title`, `solutions` (array of 3 solution objects) |
-| `recommendations` | `title`, `dimensions` (array of dimension objects) |
+| `executive_summary` | `title`, `subtitle_lines` (array of `{text, bold_part}` objects), `quick_wins` (array of `{action, detail}` objects) |
+| `pain_points` | `title`, `cards` (array of 3 card objects: `name`, `calls`, `pct`, `impact`, `priority`, `issue`, `fix`, `owner`) |
+| `impact_ease` | `title`, `themes` (array of theme objects: `name`, `calls`, `impact`, `ease`, `priority`, `quadrant`), `chart_placeholder` |
+| `low_hanging_fruit` | `title`, `items` (array of 3 objects: `action`, `detail`, `impact`, `ease`, `theme`) |
+| `recommendations` | `title`, `dimensions` (array of objects: `name`, `actions[]` with `title` + `detail`) |
 | `theme_card` | `title`, `stats_bar` (object), `left_column` (object), `right_column` (object) |
 
 ### Fallback: `elements` array
@@ -382,7 +404,7 @@ For any slide that doesn't fit the above types, you MAY use the legacy `elements
 
 | `chart_key` | Use for | Slide |
 |-------------|---------|-------|
-| `impact_ease_scatter` | Bubble/scatter chart of themes by impact vs ease | `impact_matrix` |
+| `impact_ease_scatter` | Bubble/scatter chart of themes by impact vs ease | `impact_ease` |
 | `friction_distribution` | Horizontal bar chart of drivers by call volume | `theme_card` |
 | `driver_breakdown` | Stacked bar by dimension | `recommendations` (optional) |
 
@@ -396,7 +418,7 @@ For any slide that doesn't fit the above types, you MAY use the legacy `elements
 4. **Verb-first actions** — "Build," "Automate," "Redesign," "Publish," "Enforce," "Migrate"
 5. **`layout_index`** — use the value from `template_spec` for each slide role
 6. **No empty slides** — every slide must have content
-7. **Impact matrix chart position is always "right"** — non-negotiable
+7. **Impact ease chart position is always "right"** — non-negotiable
 8. **Theme cards sorted by volume descending** — highest call-count theme first
 9. **Every "Fix" / "Solution" passes the Ticket Test** — specific enough to create a JIRA ticket
 10. **Use typed fields, not elements** — for the 6 structured slide types, never use generic `elements`
@@ -407,15 +429,16 @@ For any slide that doesn't fit the above types, you MAY use the legacy `elements
 
 - [ ] Slide count matches: 2 for exec_summary, 3 for impact, N for themes
 - [ ] Every `layout_index` comes from `template_spec`
-- [ ] Executive summary has `title`, `subtitle`, `quick_wins` (3 items)
-- [ ] Pain points has `cards` array with exactly 3 objects
-- [ ] Pain point `issue` is 2-3 lines, `fix` is 1-2 lines with owner in parens
-- [ ] Impact matrix has `themes` array + `chart_placeholder`
-- [ ] Low hanging fruit has `solutions` array with exactly 3 objects
-- [ ] Recommendations has `dimensions` array with 1-2 actions each
+- [ ] Executive summary has `title`, `subtitle_lines` (2-4 objects), `quick_wins` (3 `{action, detail}` objects)
+- [ ] Pain points has `cards` array with exactly 3 objects (each with `pct`, `impact`, `owner`)
+- [ ] Pain point `issue` is 2-3 lines, `fix` is 1-2 lines, `owner` is separate field
+- [ ] Impact ease has `themes` array + `chart_placeholder` (role: `impact_ease`)
+- [ ] Low hanging fruit has `items` array with exactly 3 objects (each with `action`, `detail`, `impact`, `ease`, `theme`)
+- [ ] Recommendations has `dimensions` array with 1-2 actions each (title + detail only)
 - [ ] Every theme card has `stats_bar`, `left_column`, `right_column`
 - [ ] Every call count matches the narrative source exactly
-- [ ] Every "Fix" and "Solution" passes the Ticket Test
+- [ ] Every "Fix" and action passes the Ticket Test
 - [ ] Theme cards are sorted by call volume descending
 - [ ] No data point is duplicated across slides
 - [ ] Output is pure JSON — no markdown fences, no commentary
+

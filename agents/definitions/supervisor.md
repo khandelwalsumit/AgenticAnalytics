@@ -3,7 +3,7 @@ name: supervisor
 model: gemini-2.5-flash
 temperature: 0.4
 top_p: 0.95
-max_tokens: 8192
+max_tokens: 20000
 description: "Supervisor that routes requests based on user intent, manages analysis scope, and executes planned pipeline steps"
 tools:
 handoffs:

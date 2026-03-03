@@ -1,291 +1,659 @@
-# Slide Formatting Improvement Plan
+# PPTX Slide Renderer — Full Implementation Spec
 
-## Problem Summary
+## Global Constants
 
-Your current pipeline (Narrative Agent → Formatting Agent → PPTX Builder) produces slides that are **data-complete but visually flat**. The formatting agent outputs a JSON blueprint, but the PPTX builder renders it as generic bullet lists with no visual hierarchy, no spatial design, and no distinction between slide types. Every slide looks the same regardless of whether it's a hook, a matrix, or a theme card.
+```
+SLIDE_WIDTH:  10 inches
+SLIDE_HEIGHT: 5.625 inches (16:9)
+
+MARGIN_LEFT:   0.5
+MARGIN_RIGHT:  0.5
+MARGIN_TOP:    0.4
+MARGIN_BOTTOM: 0.3
+
+CONTENT_WIDTH: 9.0  (10 - 0.5 - 0.5)
+```
+
+### Color Palette
+
+```
+NAVY:         "003B70"    — slide titles, dark backgrounds
+BLUE_ACCENT:  "006BA6"    — h3 labels, accent text, links
+LIGHT_BLUE:   "E8F0FE"    — subtle highlight backgrounds
+BLACK:        "222222"    — body text
+DARK_GRAY:    "444444"    — secondary body text
+MID_GRAY:     "888888"    — stats bar, muted metadata
+LIGHT_GRAY:   "D0D0D0"    — horizontal rules, table borders
+BG_LIGHT:     "F5F7FA"    — alternating table rows, card fills
+WHITE:        "FFFFFF"    — white text on dark, card backgrounds
+
+ACCENT_RED:    "C0392B"   — high priority accent bars
+ACCENT_AMBER:  "E67E22"   — medium priority accent bars
+ACCENT_GREEN:  "27AE60"   — low priority / quick win accent bars
+ACCENT_PURPLE: "8E44AD"   — policy dimension accent
+
+DIMENSION_COLORS:
+  "Digital / UX":    "006BA6"  (blue)
+  "Operations":      "27AE60"  (green)
+  "Communications":  "E67E22"  (orange)
+  "Policy":          "8E44AD"  (purple)
+```
+
+### Typography
+
+```
+FONT: "Calibri"  — used everywhere, no exceptions
+
+SLIDE_TITLE:    { fontSize: 22, bold: true,  color: NAVY,       fontFace: "Calibri" }
+SUBTITLE_TEXT:  { fontSize: 13, bold: false, color: DARK_GRAY,  fontFace: "Calibri" }
+H3_LABEL:       { fontSize: 14, bold: true,  color: BLUE_ACCENT,fontFace: "Calibri" }
+BODY_TEXT:      { fontSize: 11, bold: false, color: BLACK,       fontFace: "Calibri" }
+BOLD_BODY:      { fontSize: 11, bold: true,  color: BLACK,       fontFace: "Calibri" }
+STATS_TEXT:     { fontSize: 10, bold: false, color: MID_GRAY,    fontFace: "Calibri" }
+SMALL_MUTED:    { fontSize: 9,  bold: false, color: MID_GRAY,    fontFace: "Calibri" }
+BIG_NUMBER:     { fontSize: 48, bold: true,  color: NAVY,        fontFace: "Calibri" }
+
+TABLE_HEADER:   { fontSize: 10, bold: true,  color: WHITE,      fontFace: "Calibri" }
+TABLE_CELL:     { fontSize: 9,  bold: false, color: BLACK,      fontFace: "Calibri" }
+
+BULLET_TITLE:   { fontSize: 12, bold: true,  color: BLUE_ACCENT,fontFace: "Calibri" }
+BULLET_BODY:    { fontSize: 11, bold: false, color: BLACK,       fontFace: "Calibri" }
+```
+
+### Shared Element Helpers
+
+**Horizontal rule:** A thin rectangle shape used as a visual separator.
+```
+Shape: RECTANGLE
+Height: 0.01 inches
+Color: LIGHT_GRAY
+Transparency: 20%
+Full content width (MARGIN_LEFT to MARGIN_LEFT + CONTENT_WIDTH)
+```
+
+**Slide title block:** Every content slide (not the hook) starts with:
+```
+Title text:  x=0.5, y=0.3, w=9.0, h=0.4
+             SLIDE_TITLE style
+Rule below:  x=0.5, y=0.72, w=9.0, h=0.01
+             LIGHT_GRAY fill
+```
+This leaves content area starting at y=0.85.
 
 ---
 
-## The Root Cause: Missing "Rendering Layer"
+## Slide Type 1: Executive Summary
 
-Your pipeline has a gap between the **Formatting Agent's JSON** and the **PPTX Builder's rendering logic**. The Formatting Agent defines *what* goes on each slide (content + element types), but nobody defines *how* it should look spatially. The `template_extractor.py` maps placeholder indices, but it doesn't control visual design — it just says "put text in placeholder 1."
+**`slide_role: "executive_summary"`**
 
-**The fix is a two-part intervention:**
+**Background:** WHITE
 
-1. **Redesign the PPTX builder** to use `pptxgenjs` with hand-crafted slide master layouts (not template placeholders) — giving you pixel-level control over fonts, colors, spacing, tables, and two-column layouts.
-2. **Tighten the Formatting Agent's output contract** so each slide type emits a predictable, render-ready JSON structure that the builder can map 1:1 to a visual layout.
+**Layout:**
+```
+┌─────────────────────────────────────────────────────────┐
+│ y=0.3   TITLE: "EXECUTIVE SUMMARY"                      │
+│ y=0.72  ──────────────────────────── (gray rule)         │
+│ y=0.90  subtitle text (1-2 sentences, what was analyzed) │
+│ y=1.35  ──────────────────────────── (gray rule)         │
+│                                                         │
+│ y=1.55  "Quick Wins:" (blue, h3)                        │
+│ y=1.85  • Quick win 1 (bold title + detail)             │
+│ y=2.35  • Quick win 2                                   │
+│ y=2.85  • Quick win 3                                   │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Elements to render:**
+
+1. **Title** — `"EXECUTIVE SUMMARY"` in SLIDE_TITLE style
+   - `x: 0.5, y: 0.3, w: 9.0, h: 0.4`
+   - All caps
+
+2. **Rule 1** — gray line below title
+   - `x: 0.5, y: 0.72, w: 9.0, h: 0.01`
+
+3. **Subtitle block** — 3-4 lines covering: what was analyzed, key issues summary, and prevention potential
+   - Render as a single text box with rich text array:
+     - For each line in `subtitle_lines`, create text runs separated by `breakLine: true`
+     - If `bold_part` is not null, split the line text around the `bold_part` string and render that substring as `{ bold: true, color: BLUE_ACCENT }` inline within the sentence
+     - All other text renders as SUBTITLE_TEXT (12pt, DARK_GRAY)
+   - `x: 0.5, y: 0.85, w: 9.0, h: 0.85`
+   - `valign: "top"`, `paraSpaceAfter: 2`
+
+4. **Rule 2** — gray line below subtitle
+   - `x: 0.5, y: 1.72, w: 9.0, h: 0.01`
+
+5. **"Quick Wins:" label**
+   - `x: 0.5, y: 1.88, w: 9.0, h: 0.3`
+   - H3_LABEL style (blue, bold, 14pt)
+
+6. **Quick win items** — render as rich text array, each item is:
+   - Bold title (BULLET_TITLE style) + line break + detail text (BODY_TEXT style)
+   - Use `bullet: true` for each item
+   - `x: 0.5, y: 2.20, w: 9.0, h: 2.8`
+   - `paraSpaceAfter: 10` between items
+   - Each item format: **"Verb-first action title"** \n "Theme — resolves ~X calls | reason it's fast"
+
+**Input JSON shape:**
+```json
+{
+  "slide_role": "executive_summary",
+  "title": "EXECUTIVE SUMMARY",
+  "subtitle_lines": [
+    { "text": "Analysis of 96 friction-related customer calls across 6 themes — Citi Rewards & Banking, Q4 2024.", "bold_part": null },
+    { "text": "Three root causes — rewards visibility gaps, silent transfer failures, and authentication dead-ends — drive 72% of all contacts. These are system-created calls: the product generates the friction it then has to service.", "bold_part": null },
+    { "text": "27% of total volume is deflectable with easy implementations (ease score ≥8) that require no backend changes and can ship within 2-3 weeks.", "bold_part": "27%" }
+  ],
+  "quick_wins": [
+    {
+      "action": "Automate balance-check IVR fallback",
+      "detail": "Account Access — resolves ~18 calls | Config-only change, no code deploy needed"
+    }
+  ]
+}
+```
 
 ---
 
-## Slide-by-Slide Redesign Spec
+## Slide Type 2: Critical Pain Points
 
-### 1. Executive Summary — "Hook" Slide
+**`slide_role: "pain_points"`**
 
-**Current problem:** Generic title + subtitle. No urgency. Looks like a chapter heading.
+**Background:** WHITE
 
-**Target layout:**
+**Layout — 3 equal-width cards side by side:**
 ```
-┌─────────────────────────────────────────────────┐
-│  [Dark navy background: 003B70]                 │
-│                                                 │
-│  [Large white text, 36pt, bold]                 │
-│  "96 Calls. 3 Root Causes. 1 Quarter to Fix."   │
-│                                                 │
-│  [Thin horizontal rule — white, 50% opacity]    │
-│                                                 │
-│  [Light gray text, 14pt]                        │
-│  "Analysis of 96 customer calls across Rewards, │
-│   Payments, and Account Management segments"     │
-│                                                 │
-└─────────────────────────────────────────────────┘
+CARD_WIDTH:   2.75 inches
+CARD_HEIGHT:  4.0 inches
+CARD_GAP:     0.25 inches between cards
+CARD_START_X: 0.625  (centered: (10 - 3*2.75 - 2*0.25) / 2)
+CARD_START_Y: 0.95
+ACCENT_BAR_W: 0.06 inches (thin left border on each card)
 ```
 
-**Changes needed:**
+**Per card positions (card index 0, 1, 2):**
+```
+card_x = 0.625 + (index * (2.75 + 0.25))
 
-| Component | Change |
-|-----------|--------|
-| `narrative_agent.md` | No change — hook content is already good |
-| `formatting_agent.md` | Emit `slide_role: "hook"` with `title` + `subtitle` only — no bullets |
-| PPTX Builder | New `renderHook()` function: dark bg, centered white title 36pt, separator line, gray subtitle 14pt |
+Accent bar:   x=card_x, y=0.95, w=0.06, h=4.0
+Card bg:      x=card_x+0.06, y=0.95, w=2.69, h=4.0  (BG_LIGHT fill)
+
+Inside card (relative to card_x + 0.06, padded 0.15 from edges):
+  inner_x = card_x + 0.22
+  inner_w = 2.38
+
+  Title:       y=1.05, h=0.35   — theme name + "(X calls)" — BOLD_BODY 12pt bold, NAVY color
+  Stats line:  y=1.40, h=0.25   — "Impact: X | Priority: X.X" — STATS_TEXT 9pt, MID_GRAY
+  Separator:   y=1.65, w=inner_w, h=0.005 — LIGHT_GRAY
+  Issue label: y=1.75, h=0.2    — "Issue:" — BOLD_BODY, BLACK
+  Issue text:  y=1.95, h=0.85   — 2-3 line description — BODY_TEXT 10pt
+  Fix label:   y=2.85, h=0.2    — "Fix:" — BOLD_BODY, BLACK
+  Fix text:    y=3.05, h=0.75   — 1-2 line fix + "(Owner)" — BODY_TEXT 10pt
+```
+
+**Accent bar colors by card position:**
+- Card 1 (highest volume): `ACCENT_RED` ("C0392B")
+- Card 2: `ACCENT_AMBER` ("E67E22")
+- Card 3: `ACCENT_GREEN` ("27AE60")
+
+**Elements to render per card:**
+
+1. **Accent bar** — tall thin RECTANGLE on the left edge
+   - Fill: accent color based on position
+   - `x: card_x, y: 0.95, w: 0.06, h: 4.0`
+
+2. **Card background** — RECTANGLE
+   - Fill: BG_LIGHT
+   - `x: card_x + 0.06, y: 0.95, w: 2.69, h: 4.0`
+
+3. **Card title** — theme name with call count
+   - Rich text: `[{text: "Theme Name", bold: true}, {text: " (14 calls)", bold: false}]`
+   - fontSize: 12, color: NAVY
+   - `x: inner_x, y: 1.05, w: inner_w, h: 0.35`
+
+4. **Stats line** — impact + priority scores
+   - `"Impact: 8 | Priority: 7.6"`
+   - STATS_TEXT style (9pt, MID_GRAY)
+   - `x: inner_x, y: 1.40, w: inner_w, h: 0.25`
+
+5. **Separator** — thin line
+   - `x: inner_x, y: 1.65, w: inner_w, h: 0.005, fill: LIGHT_GRAY`
+
+6. **"Issue:" label + text** — as rich text array
+   - `[{text: "Issue: ", bold: true, fontSize: 11}, {text: "description...", bold: false, fontSize: 10}]`
+   - color: BLACK
+   - `x: inner_x, y: 1.75, w: inner_w, h: 1.05`
+
+7. **"Fix:" label + text** — as rich text array
+   - `[{text: "Fix: ", bold: true, fontSize: 11}, {text: "action... ", bold: false, fontSize: 10}, {text: "(Digital/UX)", bold: true, fontSize: 9, color: BLUE_ACCENT}]`
+   - `x: inner_x, y: 2.85, w: inner_w, h: 0.95`
+
+**Input JSON shape:**
+```json
+{
+  "slide_role": "pain_points",
+  "title": "3 Pain Points Drive 78% of Call Volume",
+  "cards": [
+    {
+      "name": "Rewards Crediting",
+      "calls": 14,
+      "pct": "14.6%",
+      "impact": 8,
+      "priority": 7.6,
+      "issue": "Points crediting is failing its 48-hour SLA with no visibility into processing status. Customers call to ask where their points are because there is no self-serve tracker.",
+      "fix": "Add pending-points tracker in mobile app with push notifications at each processing stage.",
+      "owner": "Digital/UX"
+    }
+  ]
+}
+```
 
 ---
 
-### 2. Critical Pain Points Slide
+## Slide Type 3: Impact vs. Ease
 
-**Current problem:** 3 pain points crammed into one slide as a wall of bullets. No visual separation between pain points.
+**`slide_role: "impact_ease"`**
 
-**Target layout:**
+**Background:** WHITE
+
+**Layout — left text list (58%) + right scatter chart (38%):**
 ```
-┌────────────────────────────────────────────────────┐
-│  Title: "3 Pain Points Drive 78% of Call Volume"   │
-│                                                    │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐         │
-│  │ [accent  │  │ [accent  │  │ [accent  │         │
-│  │  bar     │  │  bar     │  │  bar     │         │
-│  │  left]   │  │  left]   │  │  left]   │         │
-│  │          │  │          │  │          │         │
-│  │ PP#1     │  │ PP#2     │  │ PP#3     │         │
-│  │ Title    │  │ Title    │  │ Title    │         │
-│  │ 14 calls │  │ 12 calls │  │ 8 calls  │         │
-│  │          │  │          │  │          │         │
-│  │ Issue:   │  │ Issue:   │  │ Issue:   │         │
-│  │ ...      │  │ ...      │  │ ...      │         │
-│  │ Fix:     │  │ Fix:     │  │ Fix:     │         │
-│  │ ...      │  │ ...      │  │ ...      │         │
-│  └──────────┘  └──────────┘  └──────────┘         │
-└────────────────────────────────────────────────────┘
+LEFT_X:      0.5
+LEFT_W:      5.5
+RIGHT_X:     6.2
+RIGHT_W:     3.5
+RIGHT_H:     4.2
+CONTENT_Y:   0.95
 ```
 
-**Three equal-width cards** with a left accent bar (colored by priority: red/amber/blue). Each card:
-- Pain point name (bold, 16pt)
-- Call count + % badge (small, muted)
-- "Issue:" label + 1-2 sentence description
-- "Fix:" label + verb-first action
-- "Owner:" Digital/Ops/Comms tag at bottom
+**Left side — theme summary list (repeat for up to 10 themes, sorted by priority desc):**
 
-**Changes needed:**
+For each theme (stacked vertically, ~0.40 inches per theme):
+```
+theme_y = 0.95 + (index * 0.42)
 
-| Component | Change |
-|-----------|--------|
-| `formatting_agent.md` | Emit `pain_points` as an array of 3 objects, each with `{name, calls, pct, issue, fix, owner}` — NOT as flat bullets |
-| PPTX Builder | New `renderPainPointCards()`: 3-column card layout with accent bars, structured text per card |
+Line 1: Bold theme name + " — " + quadrant label
+         fontSize: 11, bold: true, color: NAVY
+         Followed by non-bold quadrant text in MID_GRAY
+         
+Line 2: "Calls: X | Impact: X | Ease: X | Priority: X.X"
+         fontSize: 9, color: MID_GRAY
+```
+
+Render as a single text box with rich text array:
+- Each theme = 2 text runs with `breakLine: true`
+- `x: 0.5, y: 0.95, w: 5.5, h: 4.2`
+- `paraSpaceAfter: 6`
+- `valign: "top"`
+
+**Quadrant labels** (derive from scores):
+- Impact ≥ 7 AND Ease ≥ 7 → "Quick Win"
+- Impact ≥ 7 AND Ease < 7 → "Strategic Bet"
+- Impact < 7 AND Ease ≥ 7 → "Easy Fix"
+- Impact < 7 AND Ease < 7 → "Deprioritize"
+
+**Right side — Scatter/Bubble chart:**
+
+Use `pptxgenjs` built-in chart:
+```javascript
+slide.addChart(pres.charts.SCATTER, chartData, {
+  x: 6.2, y: 0.85, w: 3.5, h: 4.2,
+  showTitle: false,
+  catAxisTitle: "Ease →",
+  valAxisTitle: "Impact →",
+  catAxisMinVal: 0, catAxisMaxVal: 10,
+  valAxisMinVal: 0, valAxisMaxVal: 10,
+  catAxisLabelColor: "888888",
+  valAxisLabelColor: "888888",
+  catAxisLabelFontSize: 8,
+  valAxisLabelFontSize: 8,
+  catGridLine: { color: "E8E8E8", size: 0.5 },
+  valGridLine: { color: "E8E8E8", size: 0.5 },
+  chartColors: ["006BA6", "27AE60", "E67E22", "C0392B", "8E44AD", "2C5F2D", "D4A017", "4A90D9", "C06090", "607D8B"],
+  dataLabelPosition: "t",
+  showSerName: true,
+  dataLabelFontSize: 7,
+  dataLabelColor: "444444",
+  lineSize: 0,
+  showMarker: true,
+  markerSize: 12
+});
+```
+
+Chart data: each theme is a separate series (so each dot gets its own color + label):
+```javascript
+const chartData = themes.map((t, i) => ({
+  name: t.name,
+  values: [{ x: t.ease, y: t.impact }]
+}));
+```
+
+**Input JSON shape:**
+```json
+{
+  "slide_role": "impact_ease",
+  "title": "Impact vs. Ease — Full Theme Prioritization",
+  "themes": [
+    {
+      "name": "Rewards & Loyalty",
+      "calls": 14,
+      "impact": 8,
+      "ease": 7,
+      "priority": 7.6,
+      "quadrant": "Quick Win"
+    }
+  ]
+}
+```
 
 ---
 
-### 3. Impact vs Ease Matrix Slide
+## Slide Type 4: Low Hanging Fruit
 
-**Current problem:** Markdown table converted to a basic PPTX table. No visual prioritization. No chart.
+**`slide_role: "low_hanging_fruit"`**
 
-**Target layout:**
+**Background:** WHITE
+
+**Layout:**
 ```
 ┌─────────────────────────────────────────────────────┐
-│  Title: "Impact vs. Ease — Full Theme Prioritization"│
+│ y=0.3   TITLE: "Low Hanging Fruit"                   │
+│ y=0.72  ──────────────────────────── (gray rule)     │
 │                                                     │
-│  ┌─────────────────────────┐  ┌──────────────────┐  │
-│  │  TABLE (left ~60%)      │  │  SCATTER CHART   │  │
-│  │                         │  │  (right ~40%)    │  │
-│  │  Theme | Vol | Top      │  │                  │  │
-│  │        |     | Issue    │  │  x=Ease y=Impact │  │
-│  │  ------+-----+-----    │  │  bubble=volume   │  │
-│  │  row 1 (dark header,   │  │                  │  │
-│  │   alternating rows)    │  │  color-coded per │  │
-│  │  row 2                 │  │  theme            │  │
-│  │  row 3                 │  │                  │  │
-│  │                         │  │                  │  │
-│  └─────────────────────────┘  └──────────────────┘  │
+│ y=0.95  Item 1: bold blue title (14pt)              │
+│ y=1.20  - Elaborated solution (11pt, black)         │
+│ y=1.45  - Resolves ~X calls (Y%) (11pt, MID_GRAY)  │
+│                                                     │
+│ y=1.85  Item 2: bold blue title                     │
+│ y=2.10  - Elaborated solution                       │
+│ y=2.35  - Resolves ~X calls                         │
+│                                                     │
+│ y=2.75  Item 3: bold blue title                     │
+│ y=3.00  - Elaborated solution                       │
+│ y=3.25  - Resolves ~X calls                         │
+│                                                     │
 └─────────────────────────────────────────────────────┘
 ```
 
-**Table styling:**
-- Header row: navy bg `003B70`, white text, 11pt bold
-- Body rows: alternating white / light gray `F5F7FA`
-- Priority score column: color-coded (green >7, amber 5-7, red <5)
-- Columns: Theme | Volume | Top Issue | Solution | Ease | Impact | Priority
+Render as a single text box with rich text runs:
 
-**Changes needed:**
+For each item (max 3), the text runs are:
+```
+{ text: "1. Action title here", bold: true, fontSize: 13, color: BLUE_ACCENT, breakLine: true }
+{ text: "    Elaborated description of the solution and what it changes", fontSize: 11, color: BLACK, breakLine: true, bullet: false }
+{ text: "    Resolves ~X calls (Y% of volume)", fontSize: 10, color: MID_GRAY, breakLine: true, bullet: false }
+{ text: "", breakLine: true }  // spacer between items
+```
 
-| Component | Change |
-|-----------|--------|
-| `formatting_agent.md` | Already outputs table + chart_placeholder — ensure table `rows` include ALL 7 columns consistently |
-| PPTX Builder | `renderImpactMatrix()`: two-column layout, styled table left (addTable with header fill, alternating rows), chart image right |
-| Chart generation | Ensure scatter/bubble chart is generated upstream and path passed through |
+Position: `x: 0.5, y: 0.95, w: 9.0, h: 4.0, valign: "top"`
+
+**Selection logic:** Pick the 3 solutions with the **highest ease score** from across all themes. These are the "ship on Monday" fixes.
+
+**Input JSON shape:**
+```json
+{
+  "slide_role": "low_hanging_fruit",
+  "title": "Low Hanging Fruit",
+  "items": [
+    {
+      "action": "Publish transfer-limit FAQ in help center",
+      "detail": "Create a dedicated FAQ page showing daily and per-transaction limits for all transfer types. Link it from the transfer initiation screen and error messages.",
+      "impact": "Resolves ~8 calls (8.3% of volume)",
+      "ease": 9,
+      "theme": "Payments"
+    }
+  ]
+}
+```
 
 ---
 
-### 4. The Biggest Bet Slide
+## Slide Type 5: Recommendations by Owning Team
 
-**Current problem:** Just a blockquote in markdown, rendered as a regular bullet slide. No visual impact.
+**`slide_role: "recommendations"`**
 
-**Target layout:**
+**Background:** WHITE
+
+**Layout — 2×2 card grid:**
 ```
-┌────────────────────────────────────────────────┐
-│  [Dark bg: 003B70]                             │
-│                                                │
-│         ┌─────────────────────────┐            │
-│         │  [Big number, 60pt]     │            │
-│         │  "37 calls"             │            │
-│         │  [white, bold]          │            │
-│         └─────────────────────────┘            │
-│                                                │
-│  [Accent color text, 20pt]                     │
-│  "Rewards & Loyalty"                           │
-│                                                │
-│  [White text, 16pt]                            │
-│  "Fixing the top 3 drivers alone deflects 37   │
-│   calls (38.5% of volume) — achievable within  │
-│   one quarter."                                │
-│                                                │
-└────────────────────────────────────────────────┘
+CARD_W:     4.15 inches
+CARD_H:     2.05 inches
+GAP_X:      0.2 inches
+GAP_Y:      0.15 inches
+GRID_START_X: 0.5 + ((9.0 - 2*4.15 - 0.2) / 2)  = 0.75
+GRID_START_Y: 0.95
+
+Card positions:
+  [0,0] Digital/UX:     x=0.75,  y=0.95
+  [0,1] Operations:     x=5.10,  y=0.95
+  [1,0] Communications: x=0.75,  y=3.15
+  [1,1] Policy:         x=5.10,  y=3.15
 ```
 
-**Changes needed:**
+**Per card:**
 
-| Component | Change |
-|-----------|--------|
-| `formatting_agent.md` | New structured output for `biggest_bet`: `{theme_name, call_count, pct, deflection_statement}` |
-| `narrative_agent.md` | Already produces this — no change needed |
-| PPTX Builder | `renderBiggestBet()`: dark slide, large centered stat, theme name in accent color, context sentence below |
+1. **Card background** — RECTANGLE
+   - Fill: BG_LIGHT ("F5F7FA")
+   - `x: card_x, y: card_y, w: 4.15, h: 2.05`
+
+2. **Left accent bar** — thin RECTANGLE
+   - Fill: dimension color from DIMENSION_COLORS
+   - `x: card_x, y: card_y, w: 0.05, h: 2.05`
+
+3. **Dimension title** — bold text
+   - `"■ Digital / UX"` — the square is a unicode block char (■) colored with dimension color
+   - Rich text: `[{text: "■ ", color: dimension_color, bold: true}, {text: "Digital / UX", color: NAVY, bold: true}]`
+   - fontSize: 13
+   - `x: card_x + 0.2, y: card_y + 0.1, w: 3.75, h: 0.3`
+
+4. **Action bullets** — max 2 per card
+   - Each action:
+     ```
+     { text: "• Action title", bold: true, fontSize: 10.5, color: BLACK, breakLine: true }
+     { text: "   → X calls resolved across Theme", bold: false, fontSize: 9.5, color: MID_GRAY, breakLine: true }
+     ```
+   - `x: card_x + 0.2, y: card_y + 0.5, w: 3.75, h: 1.45`
+   - `valign: "top"`, `paraSpaceAfter: 6`
+
+**If a dimension has no actions:** Skip that card entirely. Remaining cards reposition to fill space. Or: render the card with muted text: `"No high-priority actions in this cycle"` in SMALL_MUTED style.
+
+**Input JSON shape:**
+```json
+{
+  "slide_role": "recommendations",
+  "title": "Recommended Actions by Owning Team",
+  "dimensions": [
+    {
+      "name": "Digital / UX",
+      "actions": [
+        {
+          "title": "Build unified rewards transparency dashboard",
+          "detail": "Resolves 12 calls across Rewards & Loyalty — single view for points balance, earn rates, transfer status"
+        },
+        {
+          "title": "Add real-time transfer status tracker",
+          "detail": "Resolves 4 calls — push notifications at each transfer stage"
+        }
+      ]
+    },
+    {
+      "name": "Operations",
+      "actions": [
+        {
+          "title": "Automate crediting pipeline with 2-hour SLA",
+          "detail": "Resolves 8 calls from crediting SLA breaches"
+        }
+      ]
+    },
+    {
+      "name": "Communications",
+      "actions": [
+        {
+          "title": "Publish planned-maintenance push notifications 48hrs ahead",
+          "detail": "Resolves 6 'is the app down?' calls per cycle"
+        }
+      ]
+    },
+    {
+      "name": "Policy",
+      "actions": [
+        {
+          "title": "Enforce 48-hour crediting SLA with escalation path",
+          "detail": "Resolves 5 calls — policy backstop for ops automation"
+        }
+      ]
+    }
+  ]
+}
+```
 
 ---
 
-### 5. Recommendations by Owning Team
+## Slide Type 6: Theme Deep-Dive Card
 
-**Current problem:** Four dimension groups rendered as flat bullets — no visual grouping.
+**`slide_role: "theme_card"`**
 
-**Target layout:**
+**One slide per theme. Sort by call volume descending.**
+
+**Background:** WHITE
+
+**Layout — two columns:**
 ```
-┌──────────────────────────────────────────────────┐
-│  Title: "Recommended Actions by Owning Team"      │
-│                                                  │
-│  ┌──────────────────┐  ┌──────────────────┐      │
-│  │ ■ Digital / UX   │  │ ■ Operations     │      │
-│  │   [blue accent]  │  │   [green accent] │      │
-│  │                  │  │                  │      │
-│  │ • Build unified  │  │ • Automate       │      │
-│  │   rewards dash   │  │   crediting SLA  │      │
-│  │   → 12 calls     │  │   → 8 calls      │      │
-│  │                  │  │                  │      │
-│  │ • Add transfer   │  │                  │      │
-│  │   tracker        │  │                  │      │
-│  │   → 4 calls      │  │                  │      │
-│  └──────────────────┘  └──────────────────┘      │
-│  ┌──────────────────┐  ┌──────────────────┐      │
-│  │ ■ Communications │  │ ■ Policy         │      │
-│  │   [orange accent]│  │   [purple accent]│      │
-│  │                  │  │                  │      │
-│  │ • Publish SLA    │  │ • Enforce 48-hr  │      │
-│  │   expectations   │  │   crediting rule │      │
-│  │   → 6 calls      │  │   → 5 calls      │      │
-│  └──────────────────┘  └──────────────────┘      │
-└──────────────────────────────────────────────────┘
+TITLE_Y:      0.3
+STATS_Y:      0.62
+RULE_Y:       0.82
+LEFT_X:       0.5
+LEFT_W:       5.3
+RIGHT_X:      6.1
+RIGHT_W:      3.6
+CONTENT_Y:    0.95
+CONTENT_H:    4.2
 ```
 
-**2×2 grid** of dimension cards. Each card has:
-- Dimension name with colored square icon
-- 1-2 consolidated actions (bold action title + impact line)
+**Elements to render:**
 
-**Changes needed:**
+### Top section (full width):
 
-| Component | Change |
-|-----------|--------|
-| `formatting_agent.md` | Emit `recommendations` as `{dimensions: [{name, color, actions: [{title, detail, calls}]}]}` — structured, not flat bullets |
-| PPTX Builder | `renderRecommendations()`: 2×2 card grid with per-dimension accent colors |
+1. **Theme title**
+   - fontSize: 22, bold: true, color: NAVY
+   - `x: 0.5, y: 0.3, w: 9.0, h: 0.35`
 
----
+2. **Stats bar** — single line of muted metrics
+   - `"Calls: 14  |  Impact: 8  |  Ease: 7  |  Priority: 7.6"`
+   - fontSize: 10, color: MID_GRAY
+   - `x: 0.5, y: 0.62, w: 9.0, h: 0.2`
 
-### 6. Theme Deep-Dive Cards (YOUR EXAMPLE)
+3. **Rule** — gray separator
+   - `x: 0.5, y: 0.82, w: 9.0, h: 0.008`
 
-**Current problem:** Theme cards rendered as a scorecard line + bullets + table, all left-aligned. No two-column split. No visual hierarchy between scorecard, narrative, and driver data.
+### Left column (60%):
 
-**Target layout (matching your example):**
-```
-┌──────────────────────────────────────────────────────┐
-│  [Theme Name]                            [bold, 24pt]│
-│  Calls: 14 | Impact: 8 | Ease: 7 | Priority: 7.6   │
-│  [muted gray text, 11pt — stats bar]                 │
-│                                                      │
-│  ┌─────────── LEFT (60%) ──────┐ ┌── RIGHT (40%) ──┐│
-│  │                             │ │                  ││
-│  │  CORE ISSUE          [h3]  │ │ ┌──────────────┐ ││
-│  │  2-3 sentence summary of   │ │ │ Driver Table │ ││
-│  │  the theme and actionable  │ │ │              │ ││
-│  │  core issue                │ │ │ Driver | Vol │ ││
-│  │                             │ │ │ ------+-----│ ││
-│  │  PRIMARY DRIVER      [h3]  │ │ │ Drv 1 |  8  │ ││
-│  │  description of what's     │ │ │ Drv 2 |  4  │ ││
-│  │  driving the calls         │ │ │ Drv 3 |  2  │ ││
-│  │                             │ │ │              │ ││
-│  │  SOLUTIONS           [h3]  │ │ └──────────────┘ ││
-│  │  1. Solution one [Digital] │ │                  ││
-│  │  2. Solution two [Ops]     │ │                  ││
-│  │  3. Solution three [Comms] │ │                  ││
-│  │                             │ │                  ││
-│  └─────────────────────────────┘ └──────────────────┘│
-└──────────────────────────────────────────────────────┘
-```
+4. **"Core Issue" label**
+   - `"CORE ISSUE"`
+   - H3_LABEL style (14pt, bold, BLUE_ACCENT)
+   - `x: 0.5, y: 0.95, w: 5.3, h: 0.25`
 
-**This is the biggest change.** Your Formatting Agent currently outputs theme cards as a flat list of elements. It needs to emit a structured object that the PPTX builder can map to a two-column layout.
+5. **Core issue text**
+   - 2-3 sentences describing the theme's main problem
+   - BODY_TEXT style (11pt, BLACK)
+   - `x: 0.5, y: 1.22, w: 5.3, h: 0.65`
+   - `valign: "top"`
 
-**Changes needed:**
+6. **"Primary Driver" label**
+   - `"PRIMARY DRIVER"`
+   - H3_LABEL style
+   - `x: 0.5, y: 1.95, w: 5.3, h: 0.25`
 
-| Component | Change |
-|-----------|--------|
-| `formatting_agent.md` | **Major restructure** — see detailed spec below |
-| `narrative_agent.md` | Add explicit `<!-- SLIDE -->` content for "Core Issue" and "Primary Driver" as distinct subsections within each theme |
-| `template_extractor.py` | Update `section_map.theme_deep_dives` to reflect new two-column layout spec |
-| PPTX Builder | `renderThemeCard()`: two-column layout with stats bar, left narrative, right driver table |
+7. **Primary driver text**
+   - Description of what's driving calls
+   - BODY_TEXT style
+   - `x: 0.5, y: 2.22, w: 5.3, h: 0.55`
+   - `valign: "top"`
 
----
+8. **"Solutions" label**
+   - `"SOLUTIONS"`
+   - H3_LABEL style
+   - `x: 0.5, y: 2.85, w: 5.3, h: 0.25`
 
-## Detailed Change Specs
+9. **Solutions list** — numbered, max 3 items
+   - Rich text array, each solution:
+     ```
+     { text: "1. ", bold: true, fontSize: 11, color: BLACK }
+     { text: "Solution description here ", bold: false, fontSize: 11, color: BLACK }
+     { text: "[Digital]", bold: true, fontSize: 9, color: BLUE_ACCENT, breakLine: true }
+     ```
+   - `x: 0.5, y: 3.12, w: 5.3, h: 1.8`
+   - `valign: "top"`, `paraSpaceAfter: 4`
+   - Do NOT force 3 solutions. If only 1-2 exist, render only those.
 
-### A. Formatting Agent — New Theme Card JSON Contract
+### Right column (40%):
 
-Replace the current theme card output with this structure:
+10. **Driver table**
+    - Position: `x: 6.1, y: 0.95, w: 3.6`
+    - Auto-height based on row count
 
+    **Table structure:**
+    ```
+    Header row:  bg=NAVY, text=WHITE, fontSize=9, bold=true
+    Body rows:   alternating WHITE / BG_LIGHT, fontSize=9, color=BLACK
+    Border:      color=LIGHT_GRAY, pt=0.5
+    ```
+
+    **Columns:**
+    | Column | Width | Align |
+    |--------|-------|-------|
+    | Driver | 2.5"  | left  |
+    | Calls  | 1.1"  | center|
+
+    **Column widths array:** `colW: [2.5, 1.1]`
+
+    **Row height:** `rowH: 0.3` for header, `0.28` for body rows
+
+    Build as pptxgenjs table:
+    ```javascript
+    const tableRows = [
+      // Header
+      [
+        { text: "Driver", options: { bold: true, fontSize: 9, color: "FFFFFF", fill: { color: "003B70" }, align: "left" } },
+        { text: "Calls",  options: { bold: true, fontSize: 9, color: "FFFFFF", fill: { color: "003B70" }, align: "center" } }
+      ],
+      // Body rows
+      ...drivers.map((d, i) => [
+        { text: d.name,  options: { fontSize: 9, color: "222222", fill: { color: i % 2 === 0 ? "FFFFFF" : "F5F7FA" }, align: "left" } },
+        { text: String(d.calls), options: { fontSize: 9, color: "222222", fill: { color: i % 2 === 0 ? "FFFFFF" : "F5F7FA" }, align: "center" } }
+      ])
+    ];
+
+    slide.addTable(tableRows, {
+      x: 6.1, y: 0.95, w: 3.6,
+      colW: [2.5, 1.1],
+      border: { pt: 0.5, color: "D0D0D0" },
+      margin: [3, 5, 3, 5]  // top, right, bottom, left in points
+    });
+    ```
+
+**Input JSON shape:**
 ```json
 {
   "slide_role": "theme_card",
-  "layout_index": 19,
   "title": "Rewards & Loyalty",
   "stats_bar": {
     "calls": 14,
-    "pct": "14.6%",
     "impact": 8,
     "ease": 7,
     "priority": 7.6
   },
   "left_column": {
-    "core_issue": "Customers cannot see pending points, earn rates, or transfer status — forcing them to call for information that should be self-service.",
+    "core_issue": "Customers cannot see pending points, earn rates, or transfer status — forcing them to call for information that should be self-service. The lack of a real-time tracker means every points crediting event generates a potential call.",
     "primary_driver": "Points crediting exceeds the 48-hour SLA with no visibility into processing status, generating 8 of 14 calls in this theme.",
     "solutions": [
-      {"action": "Build pending points tracker with real-time status", "dimension": "Digital"},
-      {"action": "Enforce 48-hour crediting SLA via automated pipeline", "dimension": "Ops"},
-      {"action": "Send proactive push notification on points credit", "dimension": "Comms"}
+      { "action": "Build pending points tracker with real-time status", "dimension": "Digital" },
+      { "action": "Enforce 48-hour crediting SLA via automated pipeline", "dimension": "Ops" },
+      { "action": "Send proactive push notification on points credit", "dimension": "Comms" }
     ]
   },
   "right_column": {
-    "type": "driver_table",
     "headers": ["Driver", "Calls"],
     "rows": [
       ["Points crediting delay", 8],
@@ -296,157 +664,70 @@ Replace the current theme card output with this structure:
 }
 ```
 
-### B. Formatting Agent — New Biggest Bet JSON
+---
+
+## Complete Input JSON Schema
+
+The renderer expects a single JSON object:
 
 ```json
 {
-  "slide_role": "biggest_bet",
-  "layout_index": 37,
-  "theme_name": "Rewards & Loyalty",
-  "stat_number": "37 calls",
-  "stat_pct": "38.5%",
-  "narrative": "Fixing the top 3 drivers alone deflects 37 calls (38.5% of total volume) and is achievable within one quarter."
-}
-```
-
-### C. Formatting Agent — New Pain Points JSON
-
-```json
-{
-  "slide_role": "pain_points",
-  "layout_index": 1,
-  "title": "3 Pain Points Drive 78% of Call Volume",
-  "cards": [
-    {
-      "name": "Rewards Crediting",
-      "calls": 14,
-      "pct": "14.6%",
-      "priority": 7.6,
-      "issue": "Points crediting is failing its 48-hour SLA. Customers have no visibility into processing status.",
-      "fix": "Add pending-points tracker in mobile app with push notifications at each processing stage.",
-      "owner": "Digital/UX"
-    },
-    { "..." : "..." },
-    { "..." : "..." }
+  "metadata": {
+    "report_title": "Customer Call Analysis — Q4 2024",
+    "total_calls": 96,
+    "generated_at": "2025-01-15"
+  },
+  "slides": [
+    { "slide_role": "executive_summary", ... },
+    { "slide_role": "pain_points", ... },
+    { "slide_role": "impact_ease", ... },
+    { "slide_role": "low_hanging_fruit", ... },
+    { "slide_role": "recommendations", ... },
+    { "slide_role": "theme_card", ... },
+    { "slide_role": "theme_card", ... },
+    { "slide_role": "theme_card", ... }
   ]
 }
 ```
 
-### D. Formatting Agent — New Recommendations JSON
+## Renderer Architecture
 
-```json
-{
-  "slide_role": "recommendations",
-  "layout_index": 1,
-  "title": "Recommended Actions by Owning Team",
-  "dimensions": [
-    {
-      "name": "Digital / UX",
-      "accent_color": "006BA6",
-      "actions": [
-        {"title": "Build unified rewards transparency dashboard", "detail": "Resolves 12 calls across Rewards & Loyalty", "calls": 12},
-        {"title": "Add real-time transfer status tracker", "detail": "Eliminates 4 status-check calls", "calls": 4}
-      ]
-    },
-    {
-      "name": "Operations",
-      "accent_color": "2C5F2D",
-      "actions": [
-        {"title": "Automate crediting pipeline with 2-hour SLA", "detail": "Resolves 8 calls from SLA breaches", "calls": 8}
-      ]
-    }
-  ]
+```javascript
+const pptxgen = require("pptxgenjs");
+const fs = require("fs");
+
+const inputPath = process.argv[2];
+const outputPath = process.argv[3] || "report.pptx";
+const data = JSON.parse(fs.readFileSync(inputPath, "utf-8"));
+
+const pres = new pptxgen();
+pres.layout = "LAYOUT_16x9";
+pres.author = "AgenticAnalytics";
+pres.title = data.metadata.report_title;
+
+// Dispatch each slide to its renderer
+for (const slideData of data.slides) {
+  switch (slideData.slide_role) {
+    case "executive_summary":  renderExecutiveSummary(pres, slideData); break;
+    case "pain_points":        renderPainPoints(pres, slideData); break;
+    case "impact_ease":        renderImpactEase(pres, slideData); break;
+    case "low_hanging_fruit":  renderLowHangingFruit(pres, slideData); break;
+    case "recommendations":    renderRecommendations(pres, slideData); break;
+    case "theme_card":         renderThemeCard(pres, slideData); break;
+  }
 }
+
+pres.writeFile({ fileName: outputPath });
 ```
 
----
+Each `render*` function creates one slide, adds all shapes/text/tables per the specs above. No shared mutable state between functions — each creates fresh option objects to avoid the pptxgenjs mutation pitfall.
 
-## Changes per File — Summary
+## Important pptxgenjs Rules
 
-### `narrative_agent.md`
-
-| # | Change | Why |
-|---|--------|-----|
-| 1 | In Section 4 (Theme Deep Dives), add explicit `## Core Issue` and `## Primary Driver` sub-headings within each theme narrative block | Gives the Formatting Agent clean boundaries to extract structured content from |
-| 2 | In the theme template, add a `## Solutions` sub-section that lists solutions with `[Digital]`, `[Ops]`, `[Comms]`, `[Policy]` dimension tags inline | So the formatter can parse dimension ownership per solution |
-| 3 | Limit solutions per theme to **max 3** — add rule: "List at most 3 solutions per theme, prioritized by impact. Do not pad with weak solutions." | Prevents slide overcrowding |
-
-### `formatting_agent.md`
-
-| # | Change | Why |
-|---|--------|-----|
-| 1 | **Replace flat element arrays** with structured JSON per slide type (see specs above) | Gives the PPTX builder deterministic field access — no guessing what `elements[3]` contains |
-| 2 | Add a `stats_bar` object to every theme card | Enables the builder to render the gray stats line below the title without parsing callout text |
-| 3 | Add `left_column` / `right_column` to theme cards | Enables true two-column rendering |
-| 4 | Add `cards` array to pain points slide | Enables three-column card layout |
-| 5 | Add `dimensions` array to recommendations slide | Enables 2×2 grid layout |
-| 6 | Add `biggest_bet` as its own slide type with `stat_number`, `stat_pct`, `narrative` | Enables the big-number callout slide |
-| 7 | Remove the generic `elements` approach for these 5 slide types — keep `elements` only for generic/fallback slides | Reduces ambiguity in the builder |
-
-### `template_extractor.py`
-
-| # | Change | Why |
-|---|--------|-----|
-| 1 | In `_build_section_map`, update `theme_deep_dives.per_theme_slide` to document the two-column contract: left = narrative, right = driver table | Source of truth alignment |
-| 2 | Add a `biggest_bet` section to the section_map | Currently missing — it's nested inside `impact` but deserves its own layout spec |
-| 3 | Add `pain_points` as a distinct section in the map with `card_count: 3` and card-level placeholder spec | Currently the pain points layout is not formally specified |
-
-### `report_tools.py` — `export_to_pptx`
-
-| # | Change | Why |
-|---|--------|-----|
-| 1 | **Replace `markdown_to_pptx` fallback** with a `pptxgenjs`-based renderer that reads the structured JSON | The markdown fallback produces flat bullet slides — it's the primary quality bottleneck |
-| 2 | Build 6 render functions: `renderHook`, `renderPainPointCards`, `renderImpactMatrix`, `renderBiggestBet`, `renderRecommendations`, `renderThemeCard` | Each slide type gets its own visual logic |
-| 3 | Use a shared color palette and font config derived from `visual_hierarchy` in the template catalog | Consistency across all slides |
-
-### `report_analyst.md`
-
-| # | Change | Why |
-|---|--------|-----|
-| 1 | No major changes needed | This agent just orchestrates artifact generation — the quality improvement is upstream |
-| 2 | Minor: add a check that the Formatting Agent's JSON was used (not the markdown fallback) before marking PPTX as complete | Prevents fallback to the low-quality path |
-
----
-
-## Visual Design Spec (Color Palette + Typography)
-
-Use this across all slides — defined once in the PPTX builder config:
-
-```
-Primary:     003B70  (navy — titles, headers, dark bg slides)
-Secondary:   006BA6  (blue — accent, callout stats)
-Light bg:    F5F7FA  (off-white — content slide backgrounds)
-Dark bg:     003B70  (navy — hook, biggest bet, dividers)
-Text:        333333  (body text)
-Muted:       888888  (stats bar, secondary info)
-Accent-Red:  C0392B  (high-priority markers)
-Accent-Amber:E67E22  (medium-priority markers)
-Accent-Green:27AE60  (low-effort/quick-win markers)
-
-Font:        Calibri (already in your visual_hierarchy — keep it)
-Title:       28pt bold
-Body:        13-14pt
-Stats bar:   11pt, color 888888
-Table header:11pt bold, white on navy
-Table body:  10pt, alternating white/F5F7FA
-```
-
----
-
-## Implementation Priority
-
-| Phase | What | Effort | Impact |
-|-------|------|--------|--------|
-| **Phase 1** | Restructure Formatting Agent JSON output for theme cards + biggest bet | Medium | **Highest** — unblocks all visual improvements |
-| **Phase 2** | Build `pptxgenjs` renderer with 6 slide-type functions | High | **Highest** — this is where the visual quality lives |
-| **Phase 3** | Update Narrative Agent with Core Issue / Primary Driver / Solutions sub-sections | Low | Medium — cleaner input to formatter |
-| **Phase 4** | Update template_extractor to reflect new layout contracts | Low | Low — mostly documentation alignment |
-| **Phase 5** | Visual QA loop — generate → screenshot → fix | Medium | High — catches rendering bugs |
-
----
-
-## Key Principle
-
-**The formatting agent should output render-ready structured data, not prose elements that the builder has to interpret.** Every slide type should have a fixed JSON schema that maps 1:1 to a visual layout function. The builder should never have to "figure out" what an element is — it reads `slide_role` and calls the right renderer with typed fields.
-
-This is the single biggest architectural change: moving from `elements: [{type: "bullet", text: "..."}]` to `stats_bar: {calls: 14, impact: 8}` + `left_column: {core_issue: "...", solutions: [...]}`.
+1. **Never use `#` in hex colors** — `"003B70"` not `"#003B70"`
+2. **Never reuse option objects** — create fresh objects for each `addShape`/`addText` call
+3. **Use `breakLine: true`** between text runs in rich text arrays
+4. **Use `bullet: true`** not unicode `•` characters
+5. **Use `paraSpaceAfter`** not `lineSpacing` for bullet gaps
+6. **Shadow objects need `opacity`** not encoded in hex — `{ color: "000000", opacity: 0.15 }` not `"00000020"`
+7. **Do NOT use accent lines under titles** — use whitespace or the gray RECTANGLE rule instead
