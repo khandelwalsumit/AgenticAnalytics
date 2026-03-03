@@ -142,8 +142,7 @@ def _should_surface_message(node_name: str, text: str) -> bool:
         return False
 
     # Report analyst is a delivery checkpoint; download elements already convey output.
-    # Data analyst output is internal extraction confirmation.
-    if node_name in {"report_analyst", "data_analyst"}:
+    if node_name in {"report_analyst"}:
         return False
 
     t = text.lower()
@@ -739,8 +738,7 @@ async def on_message(message: cl.Message):
                         log.info("interrupt() payload displayed (type=%s)", payload.get("type", "?"))
 
         if is_interrupted:
-            active_node_msg.content = "Waiting for your input..."
-            await active_node_msg.update()
+            await active_node_msg.remove()
         else:
             await active_node_msg.remove()
 

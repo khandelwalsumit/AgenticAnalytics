@@ -171,11 +171,7 @@ def apply_skill(skill_name: str, bucket: str) -> str:
     )
 
 
-class _NoArgs(BaseModel):
-    pass
-
-
-@tool(args_schema=_NoArgs)
+@tool
 def get_findings_summary() -> str:
     """Aggregate and rank all findings accumulated so far.
 
