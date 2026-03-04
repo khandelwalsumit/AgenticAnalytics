@@ -64,6 +64,7 @@ _DECISION_TO_NEXT: dict[str, str] = {
     "analyse": "planner",
     "execute": "",  # resolved from plan_tasks
     "report_generation": "report_generation",
+    "qna": "qna",
 }
 
 # Safety: max consecutive supervisor->data_analyst loops before forcing progress
@@ -77,14 +78,12 @@ ANALYSIS_CONFIRMATION_PENDING = "analysis_dimension_confirmation"
 
 LLM_INPUT_FIELDS: dict[str, list[str]] = {
     "supervisor": [
-        "messages", "dataset_schema", "filters_applied", "data_buckets",
+        "messages", "dataset_schema", "filters_applied",
         "themes_for_analysis", "plan_tasks", "analysis_objective",
-        "selected_friction_agents", "expected_friction_lenses",
         "analysis_scope_confirmed", "pending_input_for",
     ],
     "planner": [
-        "messages", "filters_applied", "themes_for_analysis",
-        "navigation_log", "analysis_objective", "plan_tasks",
+        "filters_applied", "analysis_objective", "critique_enabled",
     ],
     "data_analyst": [
         "messages", "dataset_path", "dataset_schema", "analysis_objective",
@@ -117,6 +116,9 @@ LLM_INPUT_FIELDS: dict[str, list[str]] = {
     ],
     "critique": [
         "messages", "narrative_output", "formatting_output", "synthesis_result", "findings",
+    ],
+    "qna_agent": [
+        "messages", "markdown_file_path",
     ],
 }
 
@@ -801,46 +803,26 @@ def _build_extra_context(
         parts = []
         # Inject available filters so supervisor can match user queries to real columns
         schema = state.get("dataset_schema", {})
-        if schema:
-            parts.append("## Available Dataset Filters\n")
-            parts.append("Use these to match user queries to actual data columns and values.\n\n")
-            for col, values in schema.items():
-                if len(values) <= 20:
-                    parts.append(f"- **{col}**: {values}\n")
-                else:
-                    parts.append(f"- **{col}**: {values[:20]} ... ({len(values)} total)\n")
-            parts.append("\n")
+        parts.append("## Available Dataset Filters\nUse these to match user queries to actual data columns and values.\n\n")
+        for col, values in schema.items():
+            if len(values) <= 20:
+                parts.append(f"- **{col}**: {values}\n")
+            else:
+                parts.append(f"- **{col}**: {values[:20]} ... ({len(values)} total)\n")
 
-        parts.append("## Current State Context\n")
-        # Build data_buckets summary for insight presentation
-        raw_buckets = state.get("data_buckets", {})
-        bucket_summary = {}
-        if isinstance(raw_buckets, dict):
-            for bname, binfo in raw_buckets.items():
-                if isinstance(binfo, dict):
-                    bucket_summary[bname] = {
-                        "row_count": binfo.get("row_count", binfo.get("count", "?")),
-                    }
-                else:
-                    bucket_summary[bname] = {"row_count": "?"}
+        parts.append("\n## Current State Context\n")
         state_ctx: dict[str, Any] = {
             "filters_applied": state.get("filters_applied", {}),
             "themes_for_analysis": state.get("themes_for_analysis", []),
-            "top_themes": state.get("top_themes", []),
-            "data_buckets": bucket_summary,
-            "navigation_log": state.get("navigation_log", []),
             "analysis_objective": state.get("analysis_objective", ""),
             "plan_tasks": state.get("plan_tasks", []),
             "plan_steps_completed": state.get("plan_steps_completed", 0),
             "plan_steps_total": state.get("plan_steps_total", 0),
         }
-        # Inject compact analytics insights when synthesizer has run — allows
-        # supervisor to answer questions like "what are the top issues?" without
-        # re-running the full pipeline.
-        insights = state.get("analytics_insights", {})
-        if insights:
-            state_ctx["analytics_insights"] = insights
-            parts.insert(0, "## Analysis Insights Available\nYou can answer factual questions about the analysis results using `analytics_insights` below.\n\n")
+        
+        # Flag that report exists — supervisor routes to qna for follow-up questions
+        if state.get("markdown_file_path"):
+            state_ctx["report_generated"] = True
         parts.append(json.dumps(state_ctx, indent=2, default=str))
         return "\n\n" + "\n".join(parts)
 
@@ -849,8 +831,6 @@ def _build_extra_context(
             "\n\n## Planning Context\n"
             + json.dumps({
                 "filters_applied": state.get("filters_applied", {}),
-                "themes_for_analysis": state.get("themes_for_analysis", []),
-                "navigation_log": state.get("navigation_log", []),
                 "analysis_objective": state.get("analysis_objective", ""),
                 "critique_enabled": state.get("critique_enabled", False),
             }, indent=2, default=str)
@@ -881,6 +861,41 @@ def _build_extra_context(
             "analysis_objective": state.get("analysis_objective", ""),
         }, indent=2, default=str))
         return "\n\n" + "\n".join(parts)
+
+    if agent_name == "report_analyst":
+        # Report analyst only needs file paths — it verifies and delivers
+        paths = {
+            "report_file_path": state.get("report_file_path", ""),
+            "markdown_file_path": state.get("markdown_file_path", ""),
+            "data_file_path": state.get("data_file_path", ""),
+        }
+        return "\n\n## Report Artifacts\n" + json.dumps(paths, indent=2)
+
+    if agent_name == "critique":
+        # Critique needs synthesis + findings for QA grading
+        synthesis = state.get("synthesis_result", {})
+        findings = state.get("findings", [])
+        ctx = {
+            "synthesis_summary": synthesis.get("summary", {}),
+            "themes": synthesis.get("themes", []),
+            "findings": findings[:20],
+        }
+        return "\n\n## Analysis Output (for QA grading)\n" + json.dumps(ctx, indent=2, default=str)
+
+    if agent_name == "qna_agent":
+        # Read the generated markdown report and inject as context
+        md_path = state.get("markdown_file_path", "")
+        if md_path:
+            from pathlib import Path as _Path
+            p = _Path(md_path)
+            if p.exists():
+                report_content = p.read_text(encoding="utf-8")
+                return (
+                    "\n\n## Analysis Report\n"
+                    "Use ONLY the content below to answer the user's question.\n\n"
+                    + report_content
+                )
+        return "\n\n## Analysis Report\nNo report has been generated yet."
 
     return ""
 
@@ -1332,47 +1347,10 @@ def _apply_supervisor(s: SupervisorOutput, state: AnalyticsState, updates: dict)
     # Only emit supervisor chat text for direct user answers/clarifications.
     # For orchestration decisions (extract/analyse/execute), keep reasoning trace
     # but suppress extra chat chatter to avoid repetitive status messages.
-    if s.response and not suppress_model_response and s.decision in ("answer", "clarify"):
+    if s.response and not suppress_model_response and s.decision in ("answer", "clarify", "qna"):
         updates["messages"] = [AIMessage(content=s.response)]
 
     logger.info("Supervisor (structured): %s -> %s (confidence=%d)", s.decision, updates["next_agent"], s.confidence)
-
-
-def _apply_supervisor_fallback(raw: str, state: AnalyticsState, updates: dict) -> None:
-    """Map legacy JSON supervisor output -> state updates."""
-    data = _parse_json(raw)
-    decision = data.get("decision", "")
-    if decision not in _DECISION_TO_NEXT:
-        logger.warning("Supervisor fallback: unrecognised decision %r", decision)
-        return
-
-    updates["supervisor_decision"] = decision
-    suppress_model_response = False
-    if decision == "execute":
-        plan, agent = _find_next_plan_agent(state.get("plan_tasks", []))
-        updates["next_agent"] = agent
-        updates["plan_tasks"] = plan
-        if _enforce_synthesis_completeness_guard(state, updates, agent):
-            suppress_model_response = True
-    elif decision == "extract":
-        _apply_extract_transition(
-            state,
-            updates,
-            target_agent=_DECISION_TO_NEXT[decision],
-            log_prefix="Supervisor fallback",
-            bootstrap_tasks=False,
-        )
-    elif decision == "analyse":
-        _apply_analyse_transition(state, updates, _DECISION_TO_NEXT[decision])
-    else:
-        updates["next_agent"] = _DECISION_TO_NEXT[decision]
-
-    _enforce_analysis_start_guard(state, updates)
-
-    if decision in ("answer", "clarify") and data.get("response") and not suppress_model_response:
-        updates["messages"] = [AIMessage(content=data["response"])]
-
-    logger.info("Supervisor (fallback): %s -> %s (confidence=%s)", decision, updates.get("next_agent", "?"), data.get("confidence", "?"))
 
 
 # ------------------------------------------------------------------

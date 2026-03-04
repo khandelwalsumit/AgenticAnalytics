@@ -326,7 +326,7 @@ from app import make_initial_state
 try:
     state = make_initial_state()
     expected_keys = [
-        "messages", "user_focus", "analysis_type", "selected_skills",
+        "messages", "user_focus", "analysis_type",
         "critique_enabled", "selected_agents", "selected_friction_agents",
         "auto_approve_checkpoints", "plan_steps_total", "plan_steps_completed",
         "plan_tasks",
@@ -335,7 +335,6 @@ try:
         "execution_trace", "reasoning", "node_io", "io_trace",
         "last_completed_node", "dataset_path", "dataset_schema",
         "active_filters", "data_buckets", "findings",
-        "domain_analysis", "operational_analysis",
         "digital_analysis", "operations_analysis",
         "communication_analysis", "policy_analysis",
         "synthesis_result", "narrative_output", "dataviz_output",
@@ -642,7 +641,7 @@ CONTEXT_AGENTS = [
     ("digital_friction_agent", True),  # needs skill_loader
     ("narrative_agent", True),
     ("formatting_agent", True),
-    ("critique", False),  # no extra context expected
+    ("critique", True),  # critique now gets synthesis + findings context
 ]
 
 for agent_name, expect_context in CONTEXT_AGENTS:

@@ -22,7 +22,7 @@ from langchain_core.messages import AIMessage, SystemMessage
 from langchain.agents import create_agent
 
 from agents.schemas import STRUCTURED_OUTPUT_SCHEMAS
-from config import AGENTS_DIR
+from config import AGENTS_DIR, GROUP_BY_COLUMNS, LLM_ANALYSIS_FOCUS
 from core.chat_model import VertexAILLM
 
 
@@ -149,6 +149,13 @@ class AgentFactory:
         """Create a ReAct (tool-using) agent."""
         config = self.parse_agent_md(name)
         prompt = config.system_prompt
+
+        # Inject GROUP_BY_COLUMNS into the prompt
+        if name == "data_analyst":
+            prompt = prompt.replace("<!--GROUP_BY_COLUMNS-->", ", ".join(GROUP_BY_COLUMNS))
+            prompt = prompt.replace("<!--LLM_ANALYSIS_FOCUS-->", ", ".join(LLM_ANALYSIS_FOCUS))
+            
+
         if extra_context:
             prompt = f"{prompt}\n\n{extra_context}"
 

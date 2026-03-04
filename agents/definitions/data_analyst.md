@@ -66,7 +66,7 @@ Apply filters based on the user's focus area:
 
 ### 4. Bucketing
 Create meaningful data buckets for analysis:
-- Group by call_reason, broad_theme_l3, friction_driver_category, or other relevant columns
+- Group by <!--GROUP_BY_COLUMNS-->
 - For each bucket, provide: bucket name, row count, top values in the focus column
 - Warn if any bucket has fewer than 10 rows (too small for meaningful analysis)
 - Suggest re-bucketing if the distribution is too skewed (one bucket has >80% of rows)
@@ -108,16 +108,12 @@ Do NOT write conversational messages -- the supervisor handles user communicatio
 The datasets you work with contain LLM-processed call records. Key column types:
 
 **LLM Analysis Columns** (these are the ONLY columns sent to friction agents for analysis):
-- `digital_friction` — LLM-processed digital channel friction analysis per call
-- `key_solution` — LLM-processed solution summary per call
+<!--LLM_ANALYSIS_COLUMNS-->
 
 **Grouping Columns** (used for bucketing, configured in GROUP_BY_COLUMNS):
-- `call_reason` — L1 top-level call reason
-- `broad_theme_l3` — L3 broad theme
-- `granular_theme_l5` — L5 granular theme
+<!--GROUP_BY_COLUMNS-->
 
 **Bucketing Configuration** (from config.py):
-- `GROUP_BY_COLUMNS` — ordered list of columns for hierarchical grouping
 - `MIN_BUCKET_SIZE` — buckets smaller than this are merged into "Other"
 - `MAX_BUCKET_SIZE` — buckets larger than this are sub-bucketed by next column
 - `TAIL_BUCKET_ENABLED` — whether to collect small buckets into "Other"

@@ -14,7 +14,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# -- Paths ------------------------------------------------------------------
+
+##########################################################################
+# ----[ Paths ]-----------------------------------------------------------
+##########################################################################
+
 ROOT_DIR = Path(__file__).resolve().parent
 AGENTS_DIR = ROOT_DIR / "agents" / "definitions"
 SKILLS_DIR = ROOT_DIR / "skills"
@@ -25,60 +29,26 @@ DATA_OUTPUT_DIR = DATA_DIR / "output"
 DATA_CACHE_DIR = DATA_DIR / ".cache"
 THREAD_STATES_DIR = DATA_CACHE_DIR / "states"
 
-# Input dataset — must be a Parquet file. Never copied; read in-place every run.
-# Override via DEFAULT_PARQUET_PATH env var or change this line directly.
+
+
+
+##########################################################################
+#----[ MAIN SETTINGS ]----------------------------------------------------
+##########################################################################
+
+VERBOSE = False
+
 DEFAULT_PARQUET_PATH = DATA_INPUT_DIR / "adf.parquet"
+PPTX_TEMPLATE_PATH = os.getenv("PPTX_TEMPLATE_PATH", str(DATA_INPUT_DIR / "template.pptx"))
 
-# -- Google AI Studio / Gemini -------------------------------------------------------
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "")
-GOOGLE_CLOUD_LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
-USE_VERTEXAI_SDK = os.getenv("USE_VERTEXAI_SDK", "false").lower() in ("1", "true", "yes")
-BACKOFF_MAX_DELAY = int(os.getenv("BACKOFF_MAX_DELAY", "0"))
-USERNAME = os.getenv("USERNAME", "")
-R2D2_ENDPOINT = os.getenv("R2D2_ENDPOINT", "")
-R2D2_PROJECT = os.getenv("R2D2_PROJECT", "")
-# BACKOFF_MAX_DELAY = 0  # False or 0 disables backoff and retries, which may be desirable in some cases to fail fast on errors. Adjust as needed.
+LLM_ANALYSIS_FOCUS: list[str] = ["exact_actionable_problem"]
 
-# -- Model defaults -----------------------------------------------------------
-DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "gemini-2.5-flash")
-DEFAULT_TEMPERATURE = float(os.getenv("DEFAULT_TEMPERATURE", "0.1"))
-DEFAULT_TOP_P = float(os.getenv("DEFAULT_TOP_P", "0.95"))
-DEFAULT_MAX_TOKENS = int(os.getenv("DEFAULT_MAX_TOKENS", "8192"))
-
-# -- Parallelism --------------------------------------------------------------
-# Total concurrent agent workers across all friction agents.
-# Per-agent limit = floor(MAX_MULTITHREADING_WORKERS / number_of_active_friction_agents).
-# Example: 40 workers / 4 agents = 10 themes per agent in parallel.
-MAX_MULTITHREADING_WORKERS = int(os.getenv("MAX_MULTITHREADING_WORKERS", "8"))
-
-# -- Thresholds ---------------------------------------------------------------
-MAX_SAMPLE_SIZE = 50  # Max rows returned by sample_data
-TOP_N_DEFAULT = 10  # Default for top-N distributions
-IMPACT_WEIGHT = 0.6  # Weight for impact in composite score
-EASE_WEIGHT = 0.4  # Weight for ease in composite score
-
-# -- Intelligent Bucketing ---------------------------------------------------
-# Columns used for hierarchical group-by (in order of priority).
-# Data is grouped by these columns sequentially to create analysis buckets.
 GROUP_BY_COLUMNS: list[str] = [
     "call_reason",        # L1 — broadest grouping
     "broad_theme_l3",     # L3 — mid-level theme
     "granular_theme_l5",  # L5 — most granular
 ]
 
-# Bucket size controls
-MIN_BUCKET_SIZE = 5     # Buckets smaller than this get merged into "Other"
-MAX_BUCKET_SIZE = 200   # Buckets larger than this get sub-bucketed by next column
-
-# Tail-end collection: merge all small buckets into a single "Other" bucket
-TAIL_BUCKET_ENABLED = True
-
-# -- LLM Analysis Context (Filter Dimensions) --------------------------------
-# Filterable dimensions for user queries — keys are exact dataset column names,
-# values are the valid filter options the LLM may pass to filter_data.
-# Adding a new key here (e.g. "customer_type": ["premium", "regular"])
-# automatically makes it available for filtering without any other code changes.
 LLM_ANALYSIS_CONTEXT: dict[str, list[str]] = {
     "product": ["Costco", "Rewards", "AAdvantage", "Cash", "others","Non Rewards","ATT"],
     "call_reason": [
@@ -94,41 +64,14 @@ LLM_ANALYSIS_CONTEXT: dict[str, list[str]] = {
     ],
 }
 
-# Filterable column names — derived from LLM_ANALYSIS_CONTEXT so adding a new
-# dimension there automatically extends this list. Used by data_analyst to know
-# which columns can be filtered before bucketing.
-DATA_FILTER_COLUMNS: list[str] = list(LLM_ANALYSIS_CONTEXT.keys())
 
-# Columns sent to friction lens agents for root-cause analysis.
-# ONLY these columns appear in the sample rows passed to the LLM.
-# Add more columns here to give agents richer textual evidence.
-LLM_ANALYSIS_FOCUS: list[str] = ["exact_actionable_problem"]
 
-# -- PPTX Template -----------------------------------------------------------
-# Path to an external .pptx template file with pre-designed slide layouts.
-# If the file exists, slides use its layouts. If not, falls back to code-based defaults.
-# Set to "" or leave as default to use code-based template.
-PPTX_TEMPLATE_PATH = os.getenv("PPTX_TEMPLATE_PATH", str(DATA_INPUT_DIR / "template.pptx"))
 
-# -- Display & Debug ---------------------------------------------------------
-# Master switch: when True, every node entry/exit, tool call, AI response,
-# and supervisor reasoning is rendered as collapsible Chainlit Steps.
-VERBOSE = False
 
-# Individual toggles (only matter when VERBOSE is True)
-SHOW_TOOL_CALLS = os.getenv("SHOW_TOOL_CALLS", "true").lower() in ("1", "true", "yes")
-SHOW_NODE_IO = os.getenv("SHOW_NODE_IO", "true").lower() in ("1", "true", "yes")
-SHOW_SUPERVISOR_REASONING = os.getenv("SHOW_SUPERVISOR_REASONING", "true").lower() in ("1", "true", "yes")
+#############################################################################
+#---[ Agent groups (multi-agent subgraphs) ]---------------------------------
+#############################################################################
 
-# Truncation: max characters for long outputs shown in UI steps
-MAX_DISPLAY_LENGTH = int(os.getenv("MAX_DISPLAY_LENGTH", "2000"))
-
-# Log level for console logging ("debug" | "info" | "warning" | "error")
-LOG_LEVEL = os.getenv("LOG_LEVEL", "debug").lower()
-LOG_FORMAT = os.getenv("LOG_FORMAT", " [%(levelname)s]---------[ %(name)s ]----------- %(message)s")
-LOG_DATE_FORMAT = os.getenv("LOG_DATE_FORMAT", "%H:%M:%S")
-
-# -- Agent groups (multi-agent subgraphs) ------------------------------------
 FRICTION_AGENTS = {
     "digital_friction_agent",
     "operations_agent",
@@ -162,3 +105,70 @@ CALL_REASONS_TO_SKILLS = {
         "Other":["general_inquiry"],
         "Rewards":["rewards","promotions_offers"]
 }
+
+##########################################################################
+# ----[ Google AI Studio / Gemini ]---------------------------------------
+##########################################################################
+
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "")
+GOOGLE_CLOUD_LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+USE_VERTEXAI_SDK = os.getenv("USE_VERTEXAI_SDK", "false").lower() in ("1", "true", "yes")
+BACKOFF_MAX_DELAY = int(os.getenv("BACKOFF_MAX_DELAY", "0"))
+USERNAME = os.getenv("USERNAME", "")
+R2D2_ENDPOINT = os.getenv("R2D2_ENDPOINT", "")
+R2D2_PROJECT = os.getenv("R2D2_PROJECT", "")
+# BACKOFF_MAX_DELAY = 0  # False or 0 disables backoff and retries, which may be desirable in some cases to fail fast on errors. Adjust as needed.
+
+
+
+
+##########################################################################
+# ----[ Model defaults ]--------------------------------------------------
+##########################################################################
+
+DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "gemini-2.5-flash")
+DEFAULT_TEMPERATURE = float(os.getenv("DEFAULT_TEMPERATURE", "0.1"))
+DEFAULT_TOP_P = float(os.getenv("DEFAULT_TOP_P", "0.95"))
+DEFAULT_MAX_TOKENS = int(os.getenv("DEFAULT_MAX_TOKENS", "8192"))
+
+
+
+##########################################################################
+# ----[ Parallelism ]-----------------------------------------------------
+##########################################################################
+
+MAX_MULTITHREADING_WORKERS = int(os.getenv("MAX_MULTITHREADING_WORKERS", "8"))
+
+
+
+##########################################################################
+# ----[ Bucketing Thresholds ]--------------------------------------------
+##########################################################################
+
+MAX_SAMPLE_SIZE = 50  # Max rows returned by sample_data
+TOP_N_DEFAULT = 10  # Default for top-N distributions
+IMPACT_WEIGHT = 0.6  # Weight for impact in composite score
+EASE_WEIGHT = 0.4  # Weight for ease in composite score
+
+MIN_BUCKET_SIZE = 5     # Buckets smaller than this get merged into "Other"
+MAX_BUCKET_SIZE = 200   # Buckets larger than this get sub-bucketed by next column
+
+TAIL_BUCKET_ENABLED = True
+
+DATA_FILTER_COLUMNS: list[str] = list(LLM_ANALYSIS_CONTEXT.keys())
+
+
+
+##########################################################################
+# ----[ Log Settings ]--------------------------------------------
+##########################################################################
+SHOW_TOOL_CALLS = os.getenv("SHOW_TOOL_CALLS", "true").lower() in ("1", "true", "yes")
+SHOW_NODE_IO = os.getenv("SHOW_NODE_IO", "true").lower() in ("1", "true", "yes")
+SHOW_SUPERVISOR_REASONING = os.getenv("SHOW_SUPERVISOR_REASONING", "true").lower() in ("1", "true", "yes")
+
+MAX_DISPLAY_LENGTH = int(os.getenv("MAX_DISPLAY_LENGTH", "2000"))
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "debug").lower()
+LOG_FORMAT = os.getenv("LOG_FORMAT", " [%(levelname)s]---------[ %(name)s ]----------- %(message)s")
+LOG_DATE_FORMAT = os.getenv("LOG_DATE_FORMAT", "%H:%M:%S")

@@ -15,8 +15,6 @@ Given a confirmed analysis objective and available themes/filters, produce an or
 
 ## Available Context (from state)
 - **filters_applied:** Current data filters (products, themes)
-- **themes_for_analysis:** Extracted themes ready for analysis
-- **navigation_log:** Theme hierarchy breakdown
 - **analysis_objective:** Confirmed objective from user
 - **critique_enabled:** Whether QA validation is active
 

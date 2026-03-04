@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field, model_validator
 class SupervisorOutput(BaseModel):
     """Structured decision output from the Supervisor agent."""
 
-    decision: Literal["answer", "clarify", "extract", "analyse", "execute", "report_generation"] = Field(
+    decision: Literal["answer", "clarify", "extract", "analyse", "execute", "report_generation", "qna"] = Field(
         description="Routing decision: what action to take next."
     )
     confidence: int = Field(

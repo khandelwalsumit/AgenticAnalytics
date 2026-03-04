@@ -30,7 +30,6 @@ from agents.nodes import (
     _build_extra_context,
     # structured-output appliers
     _apply_supervisor,
-    _apply_supervisor_fallback,
     # tool-result extractors
     _extract_data_analyst_state,
     _extract_formatting_state,
@@ -125,20 +124,17 @@ def build_graph(
         """Routes user intent to the correct pipeline stage.
 
         Reads:
-            messages               – conversation so far
-            dataset_schema         – available filter columns/values (injected into prompt)
+            messages               – conversation so far (trimmed: human + AI only)
+            dataset_schema         – filter columns/values (injected into prompt)
             filters_applied        – current active filters (for scope-change detection)
-            data_buckets           – row counts per theme (for insight-review display)
             themes_for_analysis    – extracted themes ready for analysis
             plan_tasks             – current execution plan (for execute routing)
-            plan_steps_completed   – progress counter (for execute routing)
-            navigation_log         – theme hierarchy (for context)
             analysis_objective     – confirmed objective (for context)
 
         Writes:
             next_agent             – which node to run next
-            supervisor_decision    – "answer" | "clarify" | "extract" | "analyse" | "execute"
-            messages               – user-visible reply (answer / clarify decisions only)
+            supervisor_decision    – routing decision string
+            messages               – user-visible reply (answer/clarify/qna only)
             plan_tasks             – marks next step in-progress (execute decision)
             selected_friction_agents, expected_friction_lenses
                                    – dimension filter from user reply (analyse decision)
@@ -146,17 +142,27 @@ def build_graph(
         ctx = _build_extra_context("supervisor", state, None)
         sys_prompt = agent_factory.parse_agent_md("supervisor").system_prompt + ctx
 
+        # Trim messages: keep only HumanMessages + AI messages (drop internal tool calls)
+        slim_state = dict(state)
+        slim_msgs = []
+        for msg in state.get("messages", []):
+            if isinstance(msg, HumanMessage):
+                slim_msgs.append(msg)
+            elif isinstance(msg, AIMessage) and not getattr(msg, "tool_calls", None) and msg.content:
+                slim_msgs.append(msg)
+        slim_state["messages"] = slim_msgs
+
         base, structured, last_msg = await _run_structured_node(
-            "supervisor", supervisor_chain, SupervisorOutput, sys_prompt, state, extra_context=ctx
+            "supervisor", supervisor_chain, SupervisorOutput, sys_prompt, slim_state, extra_context=ctx
         )
 
         if isinstance(structured, SupervisorOutput):
             _apply_supervisor(structured, state, base)
         elif last_msg:
-            _apply_supervisor_fallback(_text(last_msg.content), state, base)
-            data = _parse_json(_text(last_msg.content))
-            reasoning = data.get("reasoning", base.get("supervisor_decision", "?"))
-            base["reasoning"] = [{"step_name": "Supervisor", "step_text": reasoning}]
+            raise RuntimeError(
+                f"[supervisor] Structured output failed — got {type(structured).__name__}. "
+                "Check chain setup or model response."
+            )
 
         # If routing helpers requested user input (old user_checkpoint route),
         # use interrupt() to pause the graph and collect user reply inline.
@@ -184,8 +190,6 @@ def build_graph(
 
         Reads:
             filters_applied        – active filters (shown in context)
-            themes_for_analysis    – buckets to analyse
-            navigation_log         – theme hierarchy
             analysis_objective     – what the user wants to know
             critique_enabled       – whether to include a QA step
             plan_tasks             – existing done steps (prepended to new plan)
@@ -200,39 +204,36 @@ def build_graph(
         ctx = _build_extra_context("planner", state, None)
         sys_prompt = agent_factory.parse_agent_md("planner").system_prompt + ctx
 
+        # Planner works from structured context only — no conversation needed
+        planner_state = dict(state)
+        planner_state["messages"] = [HumanMessage(content=(
+            f"Create an execution plan. Objective: {state.get('analysis_objective', '')}"
+        ))]
+
         base, structured, last_msg = await _run_structured_node(
-            "planner", planner_chain, PlannerOutput, sys_prompt, state, extra_context=ctx
+            "planner", planner_chain, PlannerOutput, sys_prompt, planner_state, extra_context=ctx
         )
 
-        if isinstance(structured, PlannerOutput):
-            new_tasks = [t.model_dump() for t in structured.plan_tasks]
-            existing   = state.get("plan_tasks", [])
-            done_steps = [t for t in existing if t.get("status") == "done"]
-            all_tasks  = done_steps + new_tasks
-            base.update({
-                "plan_tasks":           all_tasks,
-                "plan_steps_total":     len(all_tasks),
-                "plan_steps_completed": len(done_steps),
-                "analysis_objective":   structured.analysis_objective,
-            })
-            base["reasoning"] = [{"step_name": "Planner", "step_text": structured.reasoning}]
-            logger.info("Planner: %d tasks (%d done + %d new), objective=%r",
-                        len(all_tasks), len(done_steps), len(new_tasks),
-                        structured.analysis_objective[:80])
-        elif last_msg:
-            data = _parse_json(_text(last_msg.content))
-            if data.get("plan_tasks"):
-                existing   = state.get("plan_tasks", [])
-                done_steps = [t for t in existing if t.get("status") == "done"]
-                all_tasks  = done_steps + data["plan_tasks"]
-                base.update({
-                    "plan_tasks":           all_tasks,
-                    "plan_steps_total":     len(all_tasks),
-                    "plan_steps_completed": len(done_steps),
-                })
-                if data.get("analysis_objective"):
-                    base["analysis_objective"] = data["analysis_objective"]
+        if not isinstance(structured, PlannerOutput):
+            raise RuntimeError(
+                f"[planner] Structured output failed — got {type(structured).__name__}. "
+                "Check chain setup or model response."
+            )
 
+        new_tasks  = [t.model_dump() for t in structured.plan_tasks]
+        existing   = state.get("plan_tasks", [])
+        done_steps = [t for t in existing if t.get("status") == "done"]
+        all_tasks  = done_steps + new_tasks
+        base.update({
+            "plan_tasks":           all_tasks,
+            "plan_steps_total":     len(all_tasks),
+            "plan_steps_completed": len(done_steps),
+            "analysis_objective":   structured.analysis_objective,
+        })
+        base["reasoning"] = [{"step_name": "Planner", "step_text": structured.reasoning}]
+        logger.info("Planner: %d tasks (%d done + %d new), objective=%r",
+                    len(all_tasks), len(done_steps), len(new_tasks),
+                    structured.analysis_objective[:80])
         return base
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -364,6 +365,7 @@ def build_graph(
         """Return versioned-md base name: '{agent_id}_{bucket}' or just '{agent_id}'."""
         fb = state.get("_focus_bucket", "")
         return f"{agent_id}_{fb}" if fb else agent_id
+
 
     async def digital_friction_node(state: AnalyticsState) -> dict[str, Any]:
         """Identifies digital/UX friction: app failures, self-service gaps, web issues.
@@ -497,23 +499,11 @@ def build_graph(
             if structured.findings:
                 synthesis_data["findings"] = [f.model_dump() for f in structured.findings]
 
-            # Compact insights kept in state so supervisor can answer questions
-            # about analysis results without re-running the pipeline.
             top_theme_names = [t.theme for t in structured.themes[:5]] if structured.themes else []
-            analytics_insights = {
-                "executive_narrative":    narrative,
-                "top_themes":             top_theme_names,
-                "total_calls_analyzed":   structured.summary.total_calls_analyzed,
-                "total_findings":         structured.summary.total_findings,
-                "quick_wins_count":       structured.summary.quick_wins_count,
-                "overall_preventability": structured.summary.overall_preventability,
-                "confidence":             structured.confidence,
-            }
 
             base.update({
                 "synthesis_result":  synthesis_data,
                 "findings":          [f.model_dump() for f in structured.findings],
-                "analytics_insights": analytics_insights,
                 "top_themes":        top_theme_names,
             })
             base["reasoning"] = [{"step_name": "Synthesizer Agent", "step_text": narrative}]
@@ -654,7 +644,11 @@ def build_graph(
 
         Tools: validate_findings, score_quality
         """
-        base, last_msg = await _run_react_node("critique", agent_factory, "", state)
+        # Build proper context for critique (synthesis + findings)
+        ctx = _build_extra_context("critique", state, None)
+        critique_state = dict(state)
+        critique_state["messages"] = [HumanMessage(content="Grade the analysis quality.")]
+        base, last_msg = await _run_react_node("critique", agent_factory, ctx, critique_state)
 
         data          = _parse_json(_text(last_msg.content)) if last_msg else {}
         quality_score = float(data.get("quality_score", data.get("overall_quality_score", 0.0)))
@@ -669,6 +663,26 @@ def build_graph(
             "reasoning":         [{"step_name": "Critique Agent", "step_text": text}],
             "messages":          [AIMessage(content=text)],
         })
+        return base
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    # QNA AGENT
+    # ══════════════════════════════════════════════════════════════════════════════
+
+    async def qna_node(state: AnalyticsState) -> dict[str, Any]:
+        """Answers user follow-up questions using the generated markdown report.
+
+        Reads:
+            messages               – user’s question
+            markdown_file_path     – path to the analysis report (.md)
+
+        Writes:
+            messages               – answer to the user’s question
+        """
+        ctx = _build_extra_context("qna_agent", state, None)
+        base, last_msg = await _run_react_node("qna_agent", agent_factory, ctx, state)
+        summary = _trunc(_text(last_msg.content), 200) if last_msg else ""
+        base["reasoning"] = [{"step_name": "QnA Agent", "step_text": summary}]
         return base
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -779,6 +793,12 @@ def build_graph(
             for bucket_key in bucket_keys:
                 focused_state = dict(state)
                 focused_state["_focus_bucket"] = bucket_key
+                # Single targeted message — bucket data is already in extra_context
+                bucket_name = raw_buckets.get(bucket_key, {}).get("bucket_name", bucket_key) if isinstance(raw_buckets.get(bucket_key), dict) else bucket_key
+                focused_state["messages"] = [HumanMessage(content=(
+                    f"Analyze bucket '{bucket_name}' for friction drivers. "
+                    f"Analysis objective: {state.get('analysis_objective', 'Identify friction drivers')}"
+                ))]
                 coro = _LENS_NODE_MAP[lens_id](focused_state)
                 run_tasks.append(_tracked_run(lens_id, bucket_key, coro))
                 run_combos.append((lens_id, bucket_key))
@@ -856,7 +876,12 @@ def build_graph(
         for k, v in merged.items():
             if k != "messages":
                 synth_state[k] = v
-        synth_state["messages"]              = list(state["messages"]) + merged.get("messages", [])
+        # Single targeted message — lens data is already in extra_context
+        synth_state["messages"] = [HumanMessage(content=(
+            "Synthesize the friction lens analyses into themes. "
+            "Produce executive narrative, ranked findings, and impact×ease scores. "
+            f"Analysis objective: {state.get('analysis_objective', 'Identify friction drivers')}"
+        ))]
         synth_state["lens_synthesis_paths"]  = lens_synthesis_paths
         synth_state["friction_md_paths"]     = nested_md_paths
 
@@ -1059,6 +1084,7 @@ def build_graph(
     graph.add_node("data_analyst",      data_analyst_node)
     graph.add_node("report_analyst",    report_analyst_node)
     graph.add_node("critique",           critique_node)
+    graph.add_node("qna",               qna_node)
     graph.add_node("lens_confirmation",  lens_confirmation_node)
     graph.add_node("friction_analysis",  friction_analysis_node)
     graph.add_node("report_generation",  report_generation_node)
@@ -1074,6 +1100,7 @@ def build_graph(
             "planner":           "planner",
             "report_analyst":    "report_analyst",
             "critique":          "critique",
+            "qna":               "qna",
             "supervisor":        "supervisor",
             "__end__":           END,
         }
@@ -1086,6 +1113,7 @@ def build_graph(
         "planner":           "planner",
         "report_analyst":    "report_analyst",
         "critique":          "critique",
+        "qna":               "qna",
         "supervisor":        "supervisor",
         END:                 END,
     })
@@ -1114,6 +1142,7 @@ def build_graph(
     graph.add_edge("planner",           "supervisor")
     graph.add_edge("report_analyst",    "supervisor")
     graph.add_edge("critique",          "supervisor")
+    graph.add_edge("qna",              "supervisor")
 
     compiled = graph.compile(checkpointer=checkpointer)
     compiled.recursion_limit = 25
