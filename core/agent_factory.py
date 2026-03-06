@@ -6,7 +6,7 @@ Two agent creation paths:
    ``LLM.with_structured_output(Schema)`` chain.
 
 2. **ReAct (tool-using)** — ``make_agent()`` builds a LangGraph
-   ``create_react_agent`` that can call tools.
+   ``create_agent`` that can call tools.
 """
 
 from __future__ import annotations

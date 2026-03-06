@@ -79,6 +79,10 @@ _SAFETY_SETTINGS = [
         category=HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
         threshold=HarmBlockThreshold.BLOCK_NONE,
     ),
+    SafetySetting(
+        category=HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
+        threshold=HarmBlockThreshold.BLOCK_NONE,
+    ),
 ]
 
 
@@ -349,8 +353,21 @@ class VertexAIChatModel(BaseChatModel):
                 feedback = getattr(response, "prompt_feedback", None)
                 block_reason = getattr(feedback, "block_reason", "UNKNOWN") if feedback else "NO_FEEDBACK"
                 safety_ratings = getattr(feedback, "safety_ratings", []) if feedback else []
+                logger.warning(
+                    "Model returned no candidates (attempt 1). block_reason=%s safety_ratings=%s",
+                    block_reason,
+                    safety_ratings,
+                )
+                # Retry once — NO_FEEDBACK blocks are often transient
+                time.sleep(1.0)
+                response = self._call_with_backoff(model.generate_content, contents, **call_kwargs)
+
+            if not getattr(response, "candidates", None):
+                feedback = getattr(response, "prompt_feedback", None)
+                block_reason = getattr(feedback, "block_reason", "UNKNOWN") if feedback else "NO_FEEDBACK"
+                safety_ratings = getattr(feedback, "safety_ratings", []) if feedback else []
                 logger.error(
-                    "Model returned no candidates. block_reason=%s safety_ratings=%s prompt_feedback=%s",
+                    "Model returned no candidates after retry. block_reason=%s safety_ratings=%s prompt_feedback=%s",
                     block_reason,
                     safety_ratings,
                     feedback,

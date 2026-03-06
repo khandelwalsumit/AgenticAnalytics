@@ -294,7 +294,7 @@ try:
     expected_nodes = {
         "supervisor", "planner", "data_analyst", "report_analyst",
         "critique", "friction_analysis",
-        "report_generation",
+        "report_drafts", "artifact_writer", "qna",
     }
     # LangGraph compiled graph stores nodes differently
     if hasattr(graph, "get_graph"):
@@ -326,15 +326,15 @@ from app import make_initial_state
 try:
     state = make_initial_state()
     expected_keys = [
-        "messages", "user_focus", "analysis_type",
-        "critique_enabled", "selected_agents", "selected_friction_agents",
+        "messages",
+        "critique_enabled", "selected_agents",
         "auto_approve_checkpoints", "plan_steps_total", "plan_steps_completed",
         "plan_tasks",
         "checkpoint_message",
-        "checkpoint_prompt", "checkpoint_token", "pending_input_for",
-        "execution_trace", "reasoning", "node_io", "io_trace",
+        "checkpoint_prompt", "pending_input_for",
+        "execution_trace", "reasoning", "io_trace",
         "last_completed_node", "dataset_path", "dataset_schema",
-        "active_filters", "data_buckets", "findings",
+        "data_buckets", "findings",
         "digital_analysis", "operations_analysis",
         "communication_analysis", "policy_analysis",
         "synthesis_result", "narrative_output", "dataviz_output",
@@ -342,7 +342,7 @@ try:
         "data_file_path", "markdown_file_path", "critique_feedback", "quality_score",
         "next_agent", "supervisor_decision", "analysis_complete",
         "phase", "filters_applied", "themes_for_analysis",
-        "navigation_log", "analysis_objective",
+        "analysis_objective",
         "error_count", "recoverable_error", "fault_injection",
     ]
     missing = [k for k in expected_keys if k not in state]
@@ -512,7 +512,7 @@ except Exception as exc:
 try:
     p = PlannerOutput(
         plan_tasks=[], plan_steps_total=0,
-        analysis_objective="test", reasoning="test",
+        analysis_objective="test", selected_agents=[], reasoning="test",
     )
     ok(f"PlannerOutput: {p.plan_steps_total} tasks")
 except Exception as exc:
@@ -616,6 +616,7 @@ test_state: dict[str, Any] = {
     "filters_applied": {},
     "dataset_path": DEFAULT_PARQUET_PATH,
     "analysis_objective": "Test",
+    "analysis_scope_reply": "",
     "digital_analysis": {"output": "test"},
     "operations_analysis": {"output": "test"},
     "communication_analysis": {"output": "test"},
@@ -624,13 +625,16 @@ test_state: dict[str, Any] = {
     "findings": [{"finding": "test"}],
     "narrative_output": {},
     "dataviz_output": {},
+    "formatting_output": {},
+    "critique_feedback": {},
+    "data_buckets": {},
     "selected_agents": [],
     "critique_enabled": False,
     "themes_for_analysis": [],
-    "navigation_log": [],
     "plan_tasks": [],
     "plan_steps_completed": 0,
     "plan_steps_total": 0,
+    "markdown_file_path": "",
 }
 
 CONTEXT_AGENTS = [
@@ -779,7 +783,7 @@ ok("_message_text(json blob) returns empty")
 state: dict[str, Any] = {}
 _apply_agent_selection(state, ["digital_friction_agent", "critique"])
 assert state["critique_enabled"] is True
-assert "digital_friction_agent" in state["selected_friction_agents"]
+assert "digital_friction_agent" in state["selected_agents"]
 ok("_apply_agent_selection() works")
 
 # Labels

@@ -58,12 +58,8 @@ AGENT_STATE_FIELDS: dict[str, str] = {
 # Supervisor decision -> next node routing
 _DECISION_TO_NEXT: dict[str, str] = {
     "answer": "__end__",
-    "clarify": "__end__",
-    "extract": "data_analyst",
-    "analyse": "planner",
+    "plan": "planner",
     "execute": "",  # resolved from plan_tasks
-    "report_generation": "report_generation",
-    "qna": "qna",
 }
 
 # Safety: max consecutive supervisor->data_analyst loops before forcing progress
@@ -179,7 +175,8 @@ def _PRELIMINARY_PLAN_TASKS() -> list[dict[str, str]]:
     return [
         {"title": "Data extraction & bucketing", "agent": "data_analyst", "status": "in_progress"},
         {"title": "Multi-dimensional friction analysis", "agent": "friction_analysis", "status": "ready"},
-        {"title": "Generate analysis report", "agent": "report_generation", "status": "ready"},
+        {"title": "Generate report drafts", "agent": "report_drafts", "status": "ready"},
+        {"title": "Create report artifacts", "agent": "artifact_writer", "status": "ready"},
         {"title": "Deliver report and downloads", "agent": "report_analyst", "status": "ready"},
     ]
 
@@ -271,10 +268,8 @@ def _peek_next_plan_agent(plan_tasks: list[dict]) -> str:
 
 def _clear_checkpoint_fields() -> dict[str, Any]:
     return {
-        "requires_user_input": False,
         "checkpoint_message": "",
         "checkpoint_prompt": "",
-        "checkpoint_token": "",
         "pending_input_for": "",
     }
 
@@ -320,7 +315,6 @@ def _verbose_details(messages: list) -> dict[str, Any]:
 def _trace_io(state: AnalyticsState, node: str, inp: dict, out: dict) -> dict[str, Any]:
     entry = {"node": node, "input": inp, "output": {k: v for k, v in out.items() if k != "messages"}}
     return {
-        "node_io": entry,
         "io_trace": state.get("io_trace", []) + [entry],
         "last_completed_node": node,
     }
@@ -845,21 +839,41 @@ def _build_extra_context(
         return "\n\n" + "\n".join(parts)
 
     if agent_name == "planner":
-        return (
-            "\n\n## Planning Context\n"
-            + json.dumps({
-                "filters_applied": state.get("filters_applied", {}),
-                "analysis_objective": state.get("analysis_objective", ""),
-                "analysis_scope_reply": state.get("analysis_scope_reply", ""),
-                "critique_enabled": state.get("critique_enabled", False),
-                "allowed_selected_agents": [
-                    "digital_friction_agent",
-                    "operations_agent",
-                    "communication_agent",
-                    "policy_agent",
-                ],
-            }, indent=2, default=str)
-        )
+        ctx: dict[str, Any] = {
+            "filters_applied": state.get("filters_applied", {}),
+            "analysis_objective": state.get("analysis_objective", ""),
+            "analysis_scope_reply": state.get("analysis_scope_reply", ""),
+            "critique_enabled": state.get("critique_enabled", False),
+            "plan_tasks": state.get("plan_tasks", []),
+            "allowed_selected_agents": [
+                "digital_friction_agent",
+                "operations_agent",
+                "communication_agent",
+                "policy_agent",
+            ],
+        }
+        # Add completed step results so planner can make informed decisions
+        if state.get("data_buckets"):
+            bucket_summary = {
+                k: {"bucket_name": v.get("bucket_name", k), "row_count": v.get("row_count", 0)}
+                for k, v in state.get("data_buckets", {}).items()
+                if isinstance(v, dict)
+            }
+            ctx["data_buckets_summary"] = bucket_summary
+        synthesis = state.get("synthesis_result", {})
+        if synthesis and isinstance(synthesis, dict):
+            ctx["synthesis_done"] = True
+            ctx["synthesis_decision"] = synthesis.get("decision", "")
+            ctx["total_findings"] = len(state.get("findings", []))
+        critique = state.get("critique_feedback", {})
+        if critique and isinstance(critique, dict):
+            ctx["critique_decision"] = critique.get("decision", "")
+            ctx["critique_grade"] = critique.get("grade", "")
+        if state.get("narrative_output"):
+            ctx["narrative_done"] = True
+        if state.get("formatting_output"):
+            ctx["blueprint_done"] = True
+        return "\n\n## Planning Context\n" + json.dumps(ctx, indent=2, default=str)
 
     if agent_name == "data_analyst":
         parts = []
@@ -1067,7 +1081,7 @@ def _should_gate_analysis_start(next_agent: str) -> bool:
 def _enforce_analysis_start_guard(state: AnalyticsState, updates: dict[str, Any]) -> None:
     """Prevent analysis start before bucketed data exists.
 
-    Dimension confirmation is handled by lens_confirmation_node (interrupt),
+    Dimension confirmation is handled inline by data_analyst_node (interrupt),
     so this guard only redirects to data_analyst when no buckets exist.
     """
     next_agent = str(updates.get("next_agent", "") or "")
@@ -1080,16 +1094,14 @@ def _enforce_analysis_start_guard(state: AnalyticsState, updates: dict[str, Any]
             next_agent,
         )
         updates["next_agent"] = "data_analyst"
-        updates["supervisor_decision"] = "extract"
+        updates["supervisor_decision"] = "plan"
         updates["analysis_scope_reply"] = ""
         return
 
-    # Scope confirmation is handled by lens_confirmation_node via interrupt().
-    # No user_checkpoint needed here.
     if state.get("analysis_scope_reply"):
         return
 
-    logger.info("Supervisor guard: buckets exist, scope not yet confirmed — lens_confirmation will handle it.")
+    logger.info("Supervisor guard: buckets exist, scope not yet confirmed -- data_analyst will handle it.")
 
 
 def _enforce_synthesis_completeness_guard(
@@ -1097,11 +1109,11 @@ def _enforce_synthesis_completeness_guard(
     updates: dict[str, Any],
     planned_next_agent: str,
 ) -> bool:
-    """Before report_generation, reroute if synthesis is incomplete.
+    """Before report_drafts, reroute if synthesis is incomplete.
 
     Returns True if routing was overridden.
     """
-    if planned_next_agent != "report_generation":
+    if planned_next_agent not in ("report_drafts", "report_generation"):
         return False
 
     lens_order = [
@@ -1118,147 +1130,34 @@ def _enforce_synthesis_completeness_guard(
     # Primary source: per-lens synthesis files produced by friction_analysis phase 1.
     available = list((state.get("lens_synthesis_paths", {}) or {}).keys())
     if not available:
-        # Legacy fallback for older sessions.
         available = list((state.get("friction_output_files", {}) or {}).keys())
 
     missing = [a for a in expected if a not in available]
     missing = list(dict.fromkeys([a for a in missing if a]))
 
-    synthesis = state.get("synthesis_result", {})
-    decision = synthesis.get("decision", "") if isinstance(synthesis, dict) else ""
     # Deterministic gate: if all expected lens outputs are present, allow progress.
     if not missing:
-        if expected or decision != "incomplete":
-            return False
-        # decision is incomplete and expected lenses are unknown -> ask user to clarify.
-        updates["next_agent"] = "user_checkpoint"
-        updates["requires_user_input"] = True
-        updates["checkpoint_message"] = (
-            "Synthesis is incomplete and expected friction lenses are not clearly defined."
-        )
-        updates["checkpoint_prompt"] = (
-            "Reply 'rerun all lenses' to rerun friction analysis, or specify lenses to rerun "
-            "(digital, operations, communication, policy)."
-        )
-        updates["pending_input_for"] = "synthesis_completion_check"
-        updates["checkpoint_token"] = str(uuid.uuid4())[:8]
-        updates["plan_tasks"] = state.get("plan_tasks", [])
-        logger.warning(
-            "Supervisor guard: synthesis incomplete with unknown expected lenses; requesting user checkpoint."
-        )
-        return True
+        return False
 
-    if missing:
-        updates["next_agent"] = "friction_analysis"
-        updates["selected_agents"] = missing
-        updates["plan_tasks"] = state.get("plan_tasks", [])
-        updates["reasoning"] = [{
-            "step_name": "Supervisor",
-            "step_text": f"Synthesis incomplete. Re-running missing friction lenses: {', '.join(missing)}.",
-        }]
-        logger.warning(
-            "Supervisor guard: blocked report_generation due incomplete synthesis; rerouting to friction_analysis with missing=%s",
-            missing,
-        )
-        return True
-
-    return False
-
-
-def _has_real_filters(state: AnalyticsState) -> bool:
-    existing_filters = state.get("filters_applied", {})
-    return bool(
-        existing_filters
-        and isinstance(existing_filters, dict)
-        and existing_filters.get("status") != "extraction_attempted"
-        and any(k != "status" for k in existing_filters)
+    updates["next_agent"] = "friction_analysis"
+    updates["selected_agents"] = missing
+    updates["plan_tasks"] = state.get("plan_tasks", [])
+    updates["reasoning"] = [{
+        "step_name": "Supervisor",
+        "step_text": f"Synthesis incomplete. Re-running missing friction lenses: {', '.join(missing)}.",
+    }]
+    logger.warning(
+        "Supervisor guard: blocked report_drafts due incomplete synthesis; rerouting to friction_analysis with missing=%s",
+        missing,
     )
-
-
-def _count_consecutive_data_analyst_loops(state: AnalyticsState) -> int:
-    trace = state.get("execution_trace", [])
-    consecutive = 0
-    for entry in reversed(trace):
-        agent = entry.get("agent", "") if isinstance(entry, dict) else getattr(entry, "agent", "")
-        if agent == "data_analyst":
-            consecutive += 1
-        elif agent == "supervisor":
-            continue
-        else:
-            break
-    return consecutive
-
-
-def _apply_analyse_transition(state: AnalyticsState, updates: dict[str, Any], target_agent: str) -> None:
-    updates["next_agent"] = target_agent
-    lens_order = [
-        "digital_friction_agent",
-        "operations_agent",
-        "communication_agent",
-        "policy_agent",
-    ]
-    current = [a for a in state.get("selected_agents", []) if a in lens_order]
-    updates["selected_agents"] = list(dict.fromkeys(current or lens_order))
-
-
-def _apply_extract_transition(
-    state: AnalyticsState,
-    updates: dict[str, Any],
-    *,
-    target_agent: str,
-    log_prefix: str,
-    bootstrap_tasks: bool,
-) -> None:
-    updates["analysis_scope_reply"] = ""
-    if _has_real_filters(state):
-        logger.info(
-            "%s: filters already applied (%s), forcing extract -> analyse",
-            log_prefix,
-            state.get("filters_applied", {}),
-        )
-        updates["next_agent"] = "planner"
-        updates["supervisor_decision"] = "analyse"
-        return
-
-    consecutive = _count_consecutive_data_analyst_loops(state)
-    if consecutive >= MAX_SUPERVISOR_LOOPS:
-        if _has_bucketed_output(state):
-            logger.warning(
-                "%s loop detected: %d consecutive extract->data_analyst cycles with bucketed output present. "
-                "Transitioning to 'analyse' (planner).",
-                log_prefix,
-                consecutive,
-            )
-            updates["next_agent"] = "planner"
-            updates["supervisor_decision"] = "analyse"
-        else:
-            logger.warning(
-                "%s loop detected: %d consecutive extract->data_analyst cycles without bucketed output. "
-                "Requesting user confirmation to retry extraction instead of forcing analysis.",
-                log_prefix,
-                consecutive,
-            )
-            updates["next_agent"] = "user_checkpoint"
-            updates["requires_user_input"] = True
-            updates["checkpoint_message"] = (
-                "Data extraction ran but bucketed output is still missing, so analysis cannot start yet."
-            )
-            updates["checkpoint_prompt"] = (
-                "Reply `retry extraction` to run extraction again, or update filters before retrying."
-            )
-            updates["pending_input_for"] = "extraction_retry_confirmation"
-            updates["checkpoint_token"] = str(uuid.uuid4())[:8]
-        return
-
-    updates["next_agent"] = target_agent
-    updates["analysis_scope_reply"] = ""
-    if bootstrap_tasks and not state.get("plan_tasks"):
-        updates["plan_tasks"] = _PRELIMINARY_PLAN_TASKS()
-        updates["plan_steps_total"] = len(updates["plan_tasks"])
+    return True
 
 
 def _apply_supervisor(s: SupervisorOutput, state: AnalyticsState, updates: dict) -> None:
-    """Map SupervisorOutput -> state updates."""
+    """Map SupervisorOutput -> state updates.
+
+    Simplified to 3 decisions: answer, plan, execute.
+    """
     updates["supervisor_decision"] = s.decision
     updates["reasoning"] = [{"step_name": "Supervisor", "step_text": s.reasoning}]
     suppress_model_response = False
@@ -1269,7 +1168,7 @@ def _apply_supervisor(s: SupervisorOutput, state: AnalyticsState, updates: dict)
     # proceed with plan execution instead of asking for dimensions again.
     if state.get("analysis_scope_reply") and not state.get("analysis_complete"):
         next_planned = _peek_next_plan_agent(state.get("plan_tasks", []))
-        if next_planned != "__end__" and s.decision in {"answer", "clarify", "analyse"}:
+        if next_planned != "__end__" and s.decision == "answer":
             s = SupervisorOutput(
                 decision="execute",
                 confidence=max(int(getattr(s, "confidence", 80)), 80),
@@ -1286,28 +1185,26 @@ def _apply_supervisor(s: SupervisorOutput, state: AnalyticsState, updates: dict)
         updates["plan_tasks"] = plan
         if _enforce_synthesis_completeness_guard(state, updates, agent):
             suppress_model_response = True
-    elif s.decision == "extract":
-        _apply_extract_transition(
-            state,
-            updates,
-            target_agent=target_agent,
-            log_prefix="Supervisor",
-            bootstrap_tasks=True,
-        )
-    elif s.decision == "analyse":
-        _apply_analyse_transition(state, updates, target_agent)
-    else:
+    elif s.decision == "plan":
         updates["next_agent"] = target_agent
+        # Bootstrap preliminary tasks if no plan exists yet
+        if not state.get("plan_tasks"):
+            updates["plan_tasks"] = _PRELIMINARY_PLAN_TASKS()
+            updates["plan_steps_total"] = len(updates["plan_tasks"])
+    else:
+        # answer — route to __end__, or qna if report exists
+        if state.get("markdown_file_path") and s.decision == "answer":
+            updates["next_agent"] = "qna"
+        else:
+            updates["next_agent"] = target_agent
 
     _enforce_analysis_start_guard(state, updates)
 
-    # Only emit supervisor chat text for direct user answers/clarifications.
-    # For orchestration decisions (extract/analyse/execute), keep reasoning trace
-    # but suppress extra chat chatter to avoid repetitive status messages.
-    if s.response and not suppress_model_response and s.decision in ("answer", "clarify", "qna"):
+    # Only emit supervisor chat text for direct user answers.
+    if s.response and not suppress_model_response and s.decision == "answer":
         updates["messages"] = [AIMessage(content=s.response)]
 
-    logger.info("Supervisor (structured): %s -> %s (confidence=%d)", s.decision, updates["next_agent"], s.confidence)
+    logger.info("Supervisor (structured): %s -> %s (confidence=%d)", s.decision, updates.get("next_agent", "?"), s.confidence)
 
 
 # ------------------------------------------------------------------

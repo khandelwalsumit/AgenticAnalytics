@@ -348,22 +348,20 @@ def _create_runtime(thread_id: str) -> tuple[str, DataStore, Any]:
 def make_initial_state() -> dict[str, Any]:
     return {
         "messages": [],
-        "user_focus": "", "analysis_type": "", "selected_skills": [],
         "critique_enabled": False,
         "selected_agents": list(DEFAULT_SELECTED_AGENTS),
         "auto_approve_checkpoints": False,
         "plan_steps_total": 0, "plan_steps_completed": 0, "plan_tasks": [],
         "checkpoint_message": "", "checkpoint_prompt": "",
-        "checkpoint_token": "", "pending_input_for": "",
+        "pending_input_for": "",
         "analysis_scope_reply": "",
         "execution_trace": [], "reasoning": [],
-        "node_io": {}, "io_trace": [], "last_completed_node": "",
+        "io_trace": [], "last_completed_node": "",
         "dataset_path": "", "dataset_schema": {},
-        "active_filters": {}, "data_buckets": {},
+        "data_buckets": {},
         "filtered_parquet_path": "", "bucket_paths": {},
         "top_themes": [], "analytics_insights": {},
         "findings": [],
-        "domain_analysis": {}, "operational_analysis": {},
         "digital_analysis": {}, "operations_analysis": {},
         "communication_analysis": {}, "policy_analysis": {},
         "friction_output_files": {}, "friction_md_paths": {},
@@ -377,7 +375,7 @@ def make_initial_state() -> dict[str, Any]:
         "analysis_complete": False, "phase": "analysis",
         "downloads_sent": False,
         "filters_applied": {}, "themes_for_analysis": [],
-        "navigation_log": [], "analysis_objective": "",
+        "analysis_objective": "",
         "error_count": 0, "recoverable_error": "",
         "fault_injection": {"next_error": "", "target": "any"},
     }
@@ -707,7 +705,7 @@ async def on_message(message: cl.Message):
 
                 # Mid-stream checkpoint: persist state after key nodes so
                 # a crash during later stages doesn't lose prior work.
-                if node_name in {"data_analyst", "lens_confirmation", "friction_analysis"}:
+                if node_name in {"data_analyst", "friction_analysis", "report_drafts", "artifact_writer"}:
                     cl.user_session.set("state", state)
                     await save_analysis_state(thread_id, state)
                     log.info("Mid-stream checkpoint saved after %s", node_name)

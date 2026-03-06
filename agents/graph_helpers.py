@@ -87,7 +87,7 @@ def _safe_thread_id(raw: str) -> str:
 
 def _thread_tmp_dir() -> Path:
     thread_id = str(cl.user_session.get("thread_id") or "unknown_thread")
-    return Path(DATA_CACHE_DIR) / _safe_thread_id(thread_id)
+    return Path(DATA_CACHE_DIR) /_safe_thread_id(thread_id)
 
 
 def _thread_output_dir() -> Path:

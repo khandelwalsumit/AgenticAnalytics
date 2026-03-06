@@ -5,8 +5,9 @@ The docstring of every node states exactly which state fields it reads and write
 so you can understand the full data flow without looking anywhere else.
 
 Parallelism uses asyncio.gather (no LangGraph Send API).
-Composite nodes (friction_analysis, report_generation) orchestrate sub-agents
-internally and return a single merged delta to the graph.
+Composite node (friction_analysis) orchestrates sub-agents internally.
+Report pipeline is split: report_drafts (narrative + blueprint) and
+artifact_writer (PPTX/CSV/MD generation) are separate graph nodes.
 """
 
 from __future__ import annotations
@@ -75,11 +76,6 @@ from agents.graph_helpers import (
 )
 
 logger = logging.getLogger("agenticanalytics.graph")
-
-# Matches the constant in agents/nodes.py — defined here to avoid importing
-# from nodes.py at graph-load time (nodes + graph_helpers share that module
-# and a cross-import at load time can cause partial-init errors).
-_ANALYSIS_CONFIRMATION_PENDING = "analysis_dimension_confirmation"
 
 
 def build_graph(
@@ -251,20 +247,21 @@ def build_graph(
     # ══════════════════════════════════════════════════════════════════════════
 
     async def data_analyst_node(state: AnalyticsState) -> dict[str, Any]:
-        """Loads the dataset, applies filters, and buckets themes.
+        """Loads the dataset, applies filters, buckets themes, and confirms dimensions.
 
         Reads:
-            messages               – user's filter specification
-            dataset_path           – CSV path from config
-            dataset_schema         – available column names / values (injected into prompt)
-            analysis_objective     – context for bucket labelling
+            messages               - user's filter specification
+            dataset_path           - CSV path from config
+            dataset_schema         - available column names / values (injected into prompt)
+            analysis_objective     - context for bucket labelling
 
         Writes:
-            filters_applied        – dict of column→value filters that were applied
-            themes_for_analysis    – list of bucket/theme names discovered
-            data_buckets           – per-bucket row counts and sample rows
-            dataset_schema         – populated from load_dataset if not already set
-            messages               – single clean summary (tool noise replaced)
+            filters_applied        - dict of column->value filters that were applied
+            themes_for_analysis    - list of bucket/theme names discovered
+            data_buckets           - per-bucket row counts and sample rows
+            dataset_schema         - populated from load_dataset if not already set
+            analysis_scope_reply   - user's dimension confirmation
+            messages               - single clean summary (tool noise replaced)
 
         Tools: load_dataset, filter_data, bucket_data, describe_filters
         """
@@ -284,56 +281,32 @@ def build_graph(
         if summary:
             base["messages"] = [AIMessage(content=summary)]
 
+        # After bucketing, interrupt for dimension confirmation
+        has_buckets = base.get("data_buckets") or state.get("data_buckets")
+        already_confirmed = state.get("analysis_scope_reply")
+        if has_buckets and not already_confirmed:
+            user_reply = interrupt({
+                "type": "analysis_dimension_confirmation",
+                "message": (
+                    f"{summary}\n\n"
+                    "Before starting multi-lens friction analysis, please confirm "
+                    "which dimensions to analyse:\n"
+                    "\u2022 **Digital Friction** \u2014 app failures, self-service gaps, web/UX issues\n"
+                    "\u2022 **Operations** \u2014 process breakdowns, SLA breaches, handoff failures\n"
+                    "\u2022 **Communication** \u2014 notification gaps, expectation mismatches\n"
+                    "\u2022 **Policy** \u2014 regulatory constraints, fee disputes, compliance issues"
+                ),
+                "prompt": (
+                    "Reply **run all lenses** to analyse all dimensions, "
+                    "or specify which ones (e.g. 'digital and operations')."
+                ),
+            })
+            logger.info("data_analyst: dimension confirmation reply %r", str(user_reply)[:120])
+            base["analysis_scope_reply"] = str(user_reply).strip()
+            base["next_agent"] = "planner"
+
         _advance_plan("data_analyst", state, base)
         return base
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # LENS CONFIRMATION  (mandatory interrupt after data bucketing)
-    # ══════════════════════════════════════════════════════════════════════════
-
-    async def lens_confirmation_node(state: AnalyticsState) -> dict[str, Any]:
-        """Mandatory gate between data analysis and friction analysis.
-
-        Simple flow:
-            interrupt -> capture user reply -> store reply in state -> planner.
-        """
-        buckets = state.get("data_buckets", {})
-        if not buckets or state.get("analysis_scope_reply"):
-            return {}
-
-        reasoning = state.get("reasoning", [])
-        msg_to_user = ""
-        for entry in reasoning:
-            if str(entry.get("step_name", "")).strip() == "Data Analyst":
-                msg_to_user = str(entry.get("step_text", "")).strip()
-                break
-
-        ai_msg = (
-            "Reply **run all lenses** to analyse all dimensions, "
-            "or specify which ones (e.g. 'digital and operations')."
-        )
-
-        # ── interrupt() pauses graph here; returns user's reply on resume ──
-        user_reply = interrupt({
-            "type": _ANALYSIS_CONFIRMATION_PENDING,
-            "message": (
-                f"{msg_to_user}\n\n"
-                "Before starting multi-lens friction analysis, please confirm "
-                "which dimensions to analyse:\n"
-                "\u2022 **Digital Friction** \u2014 app failures, self-service gaps, web/UX issues\n"
-                "\u2022 **Operations** \u2014 process breakdowns, SLA breaches, handoff failures\n"
-                "\u2022 **Communication** \u2014 notification gaps, expectation mismatches\n"
-                "\u2022 **Policy** \u2014 regulatory constraints, fee disputes, compliance issues"
-            ),
-            "prompt": ai_msg,
-        })
-
-        logger.info("lens_confirmation: user replied %r", str(user_reply)[:120])
-        return {
-            "analysis_scope_reply": str(user_reply).strip(),
-            "pending_input_for": "",
-            "next_agent": "planner",
-        }
 
     # ══════════════════════════════════════════════════════════════════════════
     # FRICTION LENS AGENTS  (4 agents, run in parallel inside friction_analysis)
@@ -912,36 +885,24 @@ def build_graph(
         return final
 
     # ══════════════════════════════════════════════════════════════════════════
-    # COMPOSITE NODE: report_generation
-    # Runs narrative → formatting blueprint → deterministic artifact writer.
+    # REPORT DRAFTS  (narrative agent + fixed deck blueprint)
     # ══════════════════════════════════════════════════════════════════════════
 
-    async def report_generation_node(state: AnalyticsState) -> dict[str, Any]:
-        """Narrative agent → deterministic deck blueprint → artifact writing.
-
-        Simplified pipeline:
-          1. Narrative agent produces markdown (for .md report + Chainlit UI)
-          2. Fixed deck blueprint built deterministically from synthesis data
-             (no LLM — no parsing issues)
-          3. Artifact writer generates charts, PPTX, CSV
+    async def report_drafts_node(state: AnalyticsState) -> dict[str, Any]:
+        """Narrative agent + deterministic deck blueprint (no artifact writing).
 
         Reads:
-            synthesis_result       – themes + findings for narrative + deck
-            synthesis_output_file  – DataStore key (preferred over state dict)
-            findings               – flat finding list
-            filters_applied        – report header
-            selected lenses completeness check
+            synthesis_result       - themes + findings for narrative + deck
+            synthesis_output_file  - DataStore key (preferred over state dict)
+            findings               - flat finding list
+            filters_applied        - report header
 
         Writes:
-            narrative_output       – markdown narrative
-            formatting_output      – slide blueprint JSON
-            report_file_path       – PPTX path on disk
-            markdown_file_path     – .md path on disk
-            data_file_path         – CSV path on disk
-            plan_steps_completed   – incremented
-            analysis_complete      – True (pipeline done)
+            narrative_output       - markdown narrative
+            formatting_output      - slide blueprint JSON
+            plan_steps_completed   - incremented
         """
-        logger.info("Report generation: starting narrative -> fixed deck blueprint -> artifact writer")
+        logger.info("Report drafts: starting narrative -> fixed deck blueprint")
         expected = [a for a in state.get("selected_agents", []) if a in _ALL_LENS_IDS]
         if not expected:
             expected = list(_ALL_LENS_IDS)
@@ -953,21 +914,20 @@ def build_graph(
         missing = list(dict.fromkeys([a for a in missing if a]))
         if missing:
             raise RuntimeError(
-                "Report generation blocked: required friction lenses are missing outputs. "
-                f"Missing: {missing}. Run complete friction analysis before generating report artifacts."
+                "Report drafts blocked: required friction lenses are missing outputs. "
+                f"Missing: {missing}. Run complete friction analysis before generating report drafts."
             )
 
         sub_agents = [
-            _make_sub_agent_entry(REPORTING_SUB_AGENTS, "narrative_agent",      status="in_progress"),
-            _make_sub_agent_entry(REPORTING_SUB_AGENTS, "formatting_agent",     status="ready"),
-            _make_sub_agent_entry(REPORTING_SUB_AGENTS, "artifact_writer_node", status="ready"),
+            _make_sub_agent_entry(REPORTING_SUB_AGENTS, "narrative_agent",  status="in_progress"),
+            _make_sub_agent_entry(REPORTING_SUB_AGENTS, "formatting_agent", status="ready"),
         ]
         tasks = await _set_task_sub_agents_and_emit(
-            state.get("plan_tasks", []), agent_name="report_generation",
+            state.get("plan_tasks", []), agent_name="report_drafts",
             sub_agents=sub_agents, task_status="in_progress",
         )
 
-        # --- Step 1: Narrative agent (ReAct — for .md report + Chainlit UI) ---
+        # --- Step 1: Narrative agent (ReAct) ---
         narrative_state = dict(state)
         narrative_state["messages"] = [HumanMessage(content=(
             "Generate the narrative markdown now with explicit slide boundary tags. "
@@ -982,10 +942,10 @@ def build_graph(
         _set_sub_agent_status(sub_agents, "narrative_agent",  status="done")
         _set_sub_agent_status(sub_agents, "formatting_agent", status="in_progress")
         tasks = await _set_task_sub_agents_and_emit(
-            tasks, agent_name="report_generation", sub_agents=sub_agents, task_status="in_progress",
+            tasks, agent_name="report_drafts", sub_agents=sub_agents, task_status="in_progress",
         )
 
-        # --- Step 2: Fixed deck blueprint (deterministic — no LLM) ---
+        # --- Step 2: Fixed deck blueprint (deterministic) ---
         synthesis = state.get("synthesis_result", {})
         if not synthesis and state.get("synthesis_output_file"):
             import chainlit as cl
@@ -1001,36 +961,17 @@ def build_graph(
         )
         total_slides = sum(len(s.get("slides", [])) for s in section_blueprints)
         logger.info(
-            "Report generation: fixed deck blueprint built | %d slides across %d sections",
+            "Report drafts: fixed deck blueprint built | %d slides across %d sections",
             total_slides, len(section_blueprints),
         )
 
-        _set_sub_agent_status(sub_agents, "formatting_agent",    status="done",
+        _set_sub_agent_status(sub_agents, "formatting_agent", status="done",
                               detail=f"Fixed deck: {total_slides} slides")
-        _set_sub_agent_status(sub_agents, "artifact_writer_node", status="in_progress")
         tasks = await _set_task_sub_agents_and_emit(
-            tasks, agent_name="report_generation", sub_agents=sub_agents, task_status="in_progress",
+            tasks, agent_name="report_drafts", sub_agents=sub_agents, task_status="done",
         )
 
-        # --- Step 3: Deterministic artifact writer (charts + PPTX + CSV) ---
-        artifact_result = _run_section_artifact_writer(state, narrative_result, section_blueprints)
-        artifact_errors = _validate_artifact_paths(artifact_result)
-        if artifact_errors:
-            raise RuntimeError(f"artifact_writer_node failed validation: {artifact_errors}")
-        logger.info(
-            "Report generation: artifacts created | report=%r markdown=%r data=%r",
-            artifact_result.get("report_file_path", ""),
-            artifact_result.get("markdown_file_path", ""),
-            artifact_result.get("data_file_path", ""),
-        )
-
-        _set_sub_agent_status(sub_agents, "artifact_writer_node", status="done",
-                              detail="Creating PPT, data and md files.")
-        tasks = await _set_task_sub_agents_and_emit(
-            tasks, agent_name="report_generation", sub_agents=sub_agents, task_status="done",
-        )
-
-        # Build final state delta
+        # Build final state delta (no artifacts yet)
         fmt_summary = {
             "formatting_output": {
                 "output": f"{total_slides} slides across {len(section_blueprints)} sections",
@@ -1039,7 +980,7 @@ def build_graph(
             },
         }
         final = _merge_state_deltas(
-            narrative_result, fmt_summary, artifact_result,
+            narrative_result, fmt_summary,
             list_keys={"execution_trace", "io_trace"},
             skip_keys={"messages"},
         )
@@ -1047,7 +988,74 @@ def build_graph(
         final["messages"]   = [AIMessage(content=_build_executive_summary_message(final.get("narrative_output", {})))]
         final["plan_tasks"] = tasks
 
-        _record_plan_progress(state, final, agent_name="report_generation", mark_analysis_complete=True)
+        _record_plan_progress(state, final, agent_name="report_drafts")
+        return final
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # ARTIFACT WRITER  (charts + PPTX + CSV + markdown)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    async def artifact_writer_node(state: AnalyticsState) -> dict[str, Any]:
+        """Generates report artifacts: charts, PPTX, CSV, markdown files.
+
+        Reads:
+            narrative_output       - markdown narrative from report_drafts
+            formatting_output      - slide blueprint JSON from report_drafts
+            synthesis_result       - themes + findings
+            findings               - flat finding list
+            filters_applied        - for CSV export
+
+        Writes:
+            report_file_path       - PPTX path on disk
+            markdown_file_path     - .md path on disk
+            data_file_path         - CSV path on disk
+            analysis_complete      - True (pipeline done)
+        """
+        logger.info("Artifact writer: generating charts, PPTX, CSV, markdown")
+
+        # Reconstruct section_blueprints from formatting_output
+        fmt_output = state.get("formatting_output", {})
+        section_blueprints = []
+        if isinstance(fmt_output, dict):
+            raw = fmt_output.get("full_response", "")
+            if raw:
+                try:
+                    section_blueprints = json.loads(raw)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+
+        narrative_result = {"narrative_output": state.get("narrative_output", {})}
+
+        sub_agents = [
+            _make_sub_agent_entry(REPORTING_SUB_AGENTS, "artifact_writer_node", status="in_progress"),
+        ]
+        tasks = await _set_task_sub_agents_and_emit(
+            state.get("plan_tasks", []), agent_name="artifact_writer",
+            sub_agents=sub_agents, task_status="in_progress",
+        )
+
+        artifact_result = _run_section_artifact_writer(state, narrative_result, section_blueprints)
+        artifact_errors = _validate_artifact_paths(artifact_result)
+        if artifact_errors:
+            raise RuntimeError(f"artifact_writer failed validation: {artifact_errors}")
+        logger.info(
+            "Artifact writer: created | report=%r markdown=%r data=%r",
+            artifact_result.get("report_file_path", ""),
+            artifact_result.get("markdown_file_path", ""),
+            artifact_result.get("data_file_path", ""),
+        )
+
+        _set_sub_agent_status(sub_agents, "artifact_writer_node", status="done",
+                              detail="Created PPT, data and md files.")
+        tasks = await _set_task_sub_agents_and_emit(
+            tasks, agent_name="artifact_writer", sub_agents=sub_agents, task_status="done",
+        )
+
+        final = dict(artifact_result)
+        final["plan_tasks"] = tasks
+        final["reasoning"] = [{"step_name": "Artifact Writer", "step_text": "Report artifacts generated."}]
+
+        _record_plan_progress(state, final, agent_name="artifact_writer", mark_analysis_complete=True)
         return final
 
     # ------------------------------------------------------------------
@@ -1059,67 +1067,56 @@ def build_graph(
     graph.add_node("supervisor",        supervisor_node)
     graph.add_node("planner",           planner_node)
     graph.add_node("data_analyst",      data_analyst_node)
+    graph.add_node("friction_analysis", friction_analysis_node)
+    graph.add_node("report_drafts",     report_drafts_node)
+    graph.add_node("artifact_writer",   artifact_writer_node)
+    graph.add_node("critique",          critique_node)
     graph.add_node("report_analyst",    report_analyst_node)
-    graph.add_node("critique",           critique_node)
-    graph.add_node("qna",               qna_node)
-    graph.add_node("lens_confirmation",  lens_confirmation_node)
-    graph.add_node("friction_analysis",  friction_analysis_node)
-    graph.add_node("report_generation",  report_generation_node)
+    graph.add_node("qna",              qna_node)
 
     graph.add_edge(START, "supervisor")
 
+    # Work nodes -> planner (planner decides next step)
+    graph.add_edge("data_analyst",      "planner")
+    graph.add_edge("friction_analysis", "planner")
+    graph.add_edge("report_drafts",     "planner")
+    graph.add_edge("artifact_writer",   "planner")
+    graph.add_edge("critique",          "planner")
+
+    # Final/meta nodes -> supervisor
+    graph.add_edge("report_analyst",    "supervisor")
+    graph.add_edge("planner",          "supervisor")
+    graph.add_edge("qna",             "supervisor")
+
+    # Supervisor conditional routing
     def route_from_supervisor(state: AnalyticsState) -> str:
         next_agent = state.get("next_agent", "")
         route_map = {
-            "friction_analysis": "friction_analysis",
-            "report_generation": "report_generation",
             "data_analyst":      "data_analyst",
-            "planner":           "planner",
-            "report_analyst":    "report_analyst",
+            "friction_analysis": "friction_analysis",
+            "report_drafts":     "report_drafts",
+            "artifact_writer":   "artifact_writer",
             "critique":          "critique",
+            "report_analyst":    "report_analyst",
             "qna":               "qna",
+            "planner":           "planner",
             "supervisor":        "supervisor",
             "__end__":           END,
         }
         return route_map.get(next_agent, END)
 
     graph.add_conditional_edges("supervisor", route_from_supervisor, {
-        "friction_analysis": "friction_analysis",
-        "report_generation": "report_generation",
         "data_analyst":      "data_analyst",
-        "planner":           "planner",
-        "report_analyst":    "report_analyst",
+        "friction_analysis": "friction_analysis",
+        "report_drafts":     "report_drafts",
+        "artifact_writer":   "artifact_writer",
         "critique":          "critique",
+        "report_analyst":    "report_analyst",
         "qna":               "qna",
+        "planner":           "planner",
         "supervisor":        "supervisor",
         END:                 END,
     })
-
-    # data_analyst → lens_confirmation (mandatory interrupt gate).
-    # When scope is freshly confirmed (no analysis plan yet), skip the
-    # supervisor and go straight to planner — the supervisor would
-    # redundantly present data insights and ask for confirmation again.
-    graph.add_edge("data_analyst", "lens_confirmation")
-
-    def route_from_lens_confirmation(state: AnalyticsState) -> str:
-        # lens_confirmation_node sets next_agent="planner" when it
-        # actively confirms scope.  Pass-through (no buckets, or
-        # already confirmed) returns {} so next_agent keeps its old value.
-        if state.get("next_agent") == "planner":
-            return "planner"
-        return "supervisor"
-
-    graph.add_conditional_edges("lens_confirmation", route_from_lens_confirmation, {
-        "planner": "planner",
-        "supervisor": "supervisor",
-    })
-
-    graph.add_edge("friction_analysis", "supervisor")
-    graph.add_edge("report_generation", "supervisor")
-    graph.add_edge("planner",           "supervisor")
-    graph.add_edge("report_analyst",    "supervisor")
-    graph.add_edge("critique",          "supervisor")
-    graph.add_edge("qna",              "supervisor")
 
     compiled = graph.compile(checkpointer=checkpointer)
     compiled.recursion_limit = 25

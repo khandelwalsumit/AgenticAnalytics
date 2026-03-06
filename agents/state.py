@@ -35,9 +35,6 @@ class AnalyticsState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
 
     # User intent
-    user_focus: str
-    analysis_type: str  # "domain" | "operational" | "combined"
-    selected_skills: list[str]
     critique_enabled: bool
 
     # Plan (Planner generates, Supervisor executes)
@@ -50,14 +47,12 @@ class AnalyticsState(TypedDict):
 
     # Node telemetry for UI (graph contract)
     reasoning: list[dict[str, Any]]
-    node_io: dict[str, Any]
     io_trace: list[dict[str, Any]]
     last_completed_node: str
 
     # Data — METADATA ONLY (raw data lives in cache files)
     dataset_path: str                   # path to input parquet (never copied)
     dataset_schema: dict[str, Any]
-    active_filters: dict[str, Any]
     data_buckets: dict[str, dict[str, Any]]
     filtered_parquet_path: str          # data/.cache/<thread_id>/filtered.parquet
     bucket_paths: dict[str, str]        # {bucket_key → parquet_path}
@@ -68,8 +63,6 @@ class AnalyticsState(TypedDict):
 
     # Analysis — scored findings (dicts matching RankedFinding schema)
     findings: list[dict[str, Any]]
-    domain_analysis: dict[str, Any]
-    operational_analysis: dict[str, Any]
 
     # Friction lens agent outputs (written by each agent independently)
     digital_analysis: dict[str, Any]
@@ -107,11 +100,9 @@ class AnalyticsState(TypedDict):
 
     # Control flow
     next_agent: str
-    supervisor_decision: str  # "answer" | "clarify" | "extract" | "analyse" | "execute"
-    requires_user_input: bool
+    supervisor_decision: str  # "answer" | "plan" | "execute"
     checkpoint_message: str
     checkpoint_prompt: str
-    checkpoint_token: str
     pending_input_for: str
     analysis_scope_reply: str
     analysis_complete: bool  # True once all plan steps are done
@@ -120,7 +111,6 @@ class AnalyticsState(TypedDict):
     # Supervisor decision context
     filters_applied: dict[str, Any]
     themes_for_analysis: list[str]
-    navigation_log: list[dict[str, Any]]
     analysis_objective: str
 
     # Session agent selection

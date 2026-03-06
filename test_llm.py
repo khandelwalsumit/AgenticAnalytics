@@ -11,6 +11,10 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from core.chat_model import VertexAILLM
+from langchain.agents import create_agent
+
+
+
 
 SEP = "\n" + "=" * 60 + "\n"
 
@@ -38,11 +42,10 @@ parsed = RickQuote(**json.loads(result2.content))
 print(f"  .quote      : {parsed.quote!r}")
 print(f"  .catchphrase: {parsed.catchphrase!r}")
 
-# ── 3. create_react_agent — no tools, just invoke ─────────────────
-print(SEP + "TEST 3 — create_react_agent (no tools)")
-from langgraph.prebuilt import create_react_agent
+# ── 3. create_agent — no tools, just invoke ─────────────────
+print(SEP + "TEST 3 — create_agent (no tools)")
 
-agent3 = create_react_agent(
+agent3 = create_agent(
     model=VertexAILLM(),
     tools=[],
     prompt="You are Rick Sanchez. Keep replies to one sentence.",
@@ -54,15 +57,15 @@ last_msg3 = result3["messages"][-1]
 print(f"  last msg type  : {type(last_msg3)}")
 print(f"  last .content  : {last_msg3.content!r}")
 
-# ── 4. create_react_agent — with a calc tool ──────────────────────
-print(SEP + "TEST 4 — create_react_agent (with calc tool)")
+# ── 4. create_agent — with a calc tool ──────────────────────
+print(SEP + "TEST 4 — create_agent (with calc tool)")
 
 @tool
 def multiply(a: float, b: float) -> float:
     """Multiply two numbers and return the result."""
     return a * b
 
-agent4 = create_react_agent(
+agent4 = create_agent(
     model=VertexAILLM(),
     tools=[multiply],
     prompt="You are Rick Sanchez. Use the multiply tool when asked to calculate.",
