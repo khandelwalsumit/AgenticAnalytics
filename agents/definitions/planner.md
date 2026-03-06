@@ -17,6 +17,7 @@ Given a confirmed analysis objective and available themes/filters, produce an or
 - **filters_applied:** Current data filters (products, themes)
 - **analysis_objective:** Confirmed objective from user
 - **critique_enabled:** Whether QA validation is active
+- **analysis_scope_reply:** User's exact reply for which lenses to run
 
 ## Available Agents for Planning
 
@@ -35,6 +36,12 @@ Given a confirmed analysis objective and available themes/filters, produce an or
 4. **report_generation is a single step** -- it handles narrative + dataviz + formatting internally
 5. **Include critique only if critique_enabled is True**
 6. **Keep plans minimal** -- typically 3 steps (analysis, report, deliver)
+7. **Select friction lenses from analysis_scope_reply** -- return `selected_agents` using only:
+   - `digital_friction_agent`
+   - `operations_agent`
+   - `communication_agent`
+   - `policy_agent`
+   If the reply is ambiguous, return all 4.
 
 ## Standard Analysis Plan
 
@@ -68,6 +75,7 @@ If critique is enabled, insert before report_generation:
   ],
   "plan_steps_total": N,
   "analysis_objective": "confirmed objective from context",
+  "selected_agents": ["digital_friction_agent", "operations_agent"],
   "reasoning": "brief explanation of why this plan was chosen"
 }
 ```

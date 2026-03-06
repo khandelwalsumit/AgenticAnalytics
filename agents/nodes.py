@@ -14,7 +14,6 @@ import logging
 import re
 import time
 import uuid
-from difflib import get_close_matches
 from typing import Any
 
 from langchain_core.messages import AIMessage
@@ -80,10 +79,10 @@ LLM_INPUT_FIELDS: dict[str, list[str]] = {
     "supervisor": [
         "messages", "dataset_schema", "filters_applied",
         "themes_for_analysis", "plan_tasks", "analysis_objective",
-        "analysis_scope_confirmed", "pending_input_for",
+        "analysis_scope_reply", "pending_input_for",
     ],
     "planner": [
-        "filters_applied", "analysis_objective", "critique_enabled",
+        "filters_applied", "analysis_objective", "analysis_scope_reply", "critique_enabled",
     ],
     "data_analyst": [
         "messages", "dataset_path", "dataset_schema", "analysis_objective",
@@ -102,7 +101,7 @@ LLM_INPUT_FIELDS: dict[str, list[str]] = {
     ],
     "synthesizer_agent": [
         "messages", "friction_md_paths", "lens_synthesis_paths",
-        "expected_friction_lenses", "selected_friction_agents",
+        "selected_agents",
     ],
     "narrative_agent": [
         "messages", "synthesis_result", "synthesis_output_file", "findings", "filters_applied",
@@ -257,6 +256,17 @@ def _find_next_plan_agent(plan_tasks: list[dict]) -> tuple[list[dict], str]:
             task["status"] = "in_progress"
             return updated, task.get("agent", "__end__")
     return updated, "__end__"
+
+
+def _peek_next_plan_agent(plan_tasks: list[dict]) -> str:
+    """Return next actionable plan agent without mutating task statuses."""
+    for task in plan_tasks:
+        if task.get("status") == "in_progress":
+            return task.get("agent", "__end__")
+    for task in plan_tasks:
+        if task.get("status") in ("ready", "todo"):
+            return task.get("agent", "__end__")
+    return "__end__"
 
 
 def _clear_checkpoint_fields() -> dict[str, Any]:
@@ -613,7 +623,15 @@ def _build_extra_context(
     if agent_name == "synthesizer_agent":
         from pathlib import Path as _Path
 
-        expected = state.get("expected_friction_lenses", []) or state.get("selected_friction_agents", [])
+        lens_order = [
+            "digital_friction_agent",
+            "operations_agent",
+            "communication_agent",
+            "policy_agent",
+        ]
+        expected = [a for a in state.get("selected_agents", []) if a in lens_order]
+        if not expected:
+            expected = list(lens_order)
         expected = list(dict.fromkeys([a for a in expected if a]))
         parts = [
             "\n\n## Friction Agent Outputs\n",
@@ -832,7 +850,14 @@ def _build_extra_context(
             + json.dumps({
                 "filters_applied": state.get("filters_applied", {}),
                 "analysis_objective": state.get("analysis_objective", ""),
+                "analysis_scope_reply": state.get("analysis_scope_reply", ""),
                 "critique_enabled": state.get("critique_enabled", False),
+                "allowed_selected_agents": [
+                    "digital_friction_agent",
+                    "operations_agent",
+                    "communication_agent",
+                    "policy_agent",
+                ],
             }, indent=2, default=str)
         )
 
@@ -988,7 +1013,7 @@ def _extract_data_analyst_state(
             logger.info("[DATA][bucket_data] themes_for_analysis=%s", data["themes"])
         if "buckets" in data:
             updates["data_buckets"] = data["buckets"]
-            updates["analysis_scope_confirmed"] = False
+            updates["analysis_scope_reply"] = ""
             # Top-level theme names for supervisor quick-answers
             bucket_names = [
                 info.get("bucket_name", key)
@@ -1027,94 +1052,6 @@ def _extract_data_analyst_state(
         logger.info("[DATA][filter_data] no filter results found, marking extraction_attempted")
 
 
-def _parse_dimension_preferences(
-    state: AnalyticsState, updates: dict[str, Any]
-) -> None:
-    """Parse user's last message for friction dimension preferences.
-
-    If the user mentions specific dimensions (e.g., "digital and operations"),
-    update selected_friction_agents to run only those.  If the user says
-    "all" / "yes" / "proceed" or doesn't mention specifics, keep all 4.
-    """
-    lens_order = [
-        "digital_friction_agent",
-        "operations_agent",
-        "communication_agent",
-        "policy_agent",
-    ]
-    dimension_aliases: dict[str, set[str]] = {
-        "digital_friction_agent": {
-            "digital", "degital", "digtal", "digitel", "ux", "ui", "app", "web", "website",
-        },
-        "operations_agent": {
-            "operations", "operation", "operational", "process", "workflow", "handoff", "sla",
-        },
-        "communication_agent": {
-            "communication", "communications", "comms", "messaging", "notification",
-            "communcation", "cmmunication", "comunication", "communicaton", "communiction",
-        },
-        "policy_agent": {
-            "policy", "policies", "governance", "regulatory", "compliance", "rule", "rules",
-        },
-    }
-    all_markers = (
-        "all",
-        "all dimensions",
-        "all lenses",
-        "run all",
-        "everything",
-    )
-
-    last_user_msg = ""
-    for m in reversed(state.get("messages", [])):
-        if getattr(m, "type", "") == "human":
-            last_user_msg = _text(m.content).lower()
-            break
-
-    if not last_user_msg:
-        return
-
-    normalized = re.sub(r"[^a-z0-9\s]", " ", last_user_msg)
-    tokens = set(re.findall(r"[a-z]+", normalized))
-
-    if any(marker in normalized for marker in all_markers):
-        updates["selected_friction_agents"] = list(lens_order)
-        updates["expected_friction_lenses"] = list(lens_order)
-        logger.info("Supervisor: user selected dimensions=all (%s)", lens_order)
-        return
-
-    def _matches_aliases(aliases: set[str]) -> bool:
-        # Direct phrase match for multi-word aliases.
-        for alias in aliases:
-            if " " in alias and alias in normalized:
-                return True
-
-        single_word_aliases = [a for a in aliases if " " not in a]
-        if tokens.intersection(single_word_aliases):
-            return True
-
-        # Tolerate common misspellings: e.g., "cmmunication", "degital".
-        fuzzy_aliases = [a for a in single_word_aliases if len(a) >= 5]
-        for token in tokens:
-            if len(token) < 5:
-                continue
-            if get_close_matches(token, fuzzy_aliases, n=1, cutoff=0.82):
-                return True
-        return False
-
-    mentioned = [
-        agent_id
-        for agent_id in lens_order
-        if _matches_aliases(dimension_aliases.get(agent_id, set()))
-    ]
-
-    if mentioned:
-        selected_unique = list(dict.fromkeys(mentioned))
-        updates["selected_friction_agents"] = selected_unique
-        updates["expected_friction_lenses"] = selected_unique
-        logger.info("Supervisor: user selected dimensions=%s", selected_unique)
-
-
 def _has_bucketed_output(state: AnalyticsState) -> bool:
     buckets = state.get("data_buckets", {})
     themes = state.get("themes_for_analysis", [])
@@ -1144,12 +1081,12 @@ def _enforce_analysis_start_guard(state: AnalyticsState, updates: dict[str, Any]
         )
         updates["next_agent"] = "data_analyst"
         updates["supervisor_decision"] = "extract"
-        updates["analysis_scope_confirmed"] = False
+        updates["analysis_scope_reply"] = ""
         return
 
     # Scope confirmation is handled by lens_confirmation_node via interrupt().
     # No user_checkpoint needed here.
-    if state.get("analysis_scope_confirmed"):
+    if state.get("analysis_scope_reply"):
         return
 
     logger.info("Supervisor guard: buckets exist, scope not yet confirmed — lens_confirmation will handle it.")
@@ -1167,7 +1104,15 @@ def _enforce_synthesis_completeness_guard(
     if planned_next_agent != "report_generation":
         return False
 
-    expected = state.get("expected_friction_lenses", []) or state.get("selected_friction_agents", [])
+    lens_order = [
+        "digital_friction_agent",
+        "operations_agent",
+        "communication_agent",
+        "policy_agent",
+    ]
+    expected = [a for a in state.get("selected_agents", []) if a in lens_order]
+    if not expected:
+        expected = list(lens_order)
     expected = list(dict.fromkeys([a for a in expected if a]))
 
     # Primary source: per-lens synthesis files produced by friction_analysis phase 1.
@@ -1176,11 +1121,7 @@ def _enforce_synthesis_completeness_guard(
         # Legacy fallback for older sessions.
         available = list((state.get("friction_output_files", {}) or {}).keys())
 
-    if expected:
-        missing = [a for a in expected if a not in available]
-    else:
-        # If expected lenses are unknown, fall back to explicit synthesizer output.
-        missing = state.get("missing_friction_lenses", []) or []
+    missing = [a for a in expected if a not in available]
     missing = list(dict.fromkeys([a for a in missing if a]))
 
     synthesis = state.get("synthesis_result", {})
@@ -1209,9 +1150,7 @@ def _enforce_synthesis_completeness_guard(
 
     if missing:
         updates["next_agent"] = "friction_analysis"
-        updates["selected_friction_agents"] = missing
-        updates["expected_friction_lenses"] = expected or missing
-        updates["missing_friction_lenses"] = missing
+        updates["selected_agents"] = missing
         updates["plan_tasks"] = state.get("plan_tasks", [])
         updates["reasoning"] = [{
             "step_name": "Supervisor",
@@ -1252,11 +1191,14 @@ def _count_consecutive_data_analyst_loops(state: AnalyticsState) -> int:
 
 def _apply_analyse_transition(state: AnalyticsState, updates: dict[str, Any], target_agent: str) -> None:
     updates["next_agent"] = target_agent
-    _parse_dimension_preferences(state, updates)
-    if "expected_friction_lenses" not in updates:
-        current = state.get("selected_friction_agents", [])
-        updates["expected_friction_lenses"] = list(dict.fromkeys([a for a in current if a]))
-    updates["missing_friction_lenses"] = []
+    lens_order = [
+        "digital_friction_agent",
+        "operations_agent",
+        "communication_agent",
+        "policy_agent",
+    ]
+    current = [a for a in state.get("selected_agents", []) if a in lens_order]
+    updates["selected_agents"] = list(dict.fromkeys(current or lens_order))
 
 
 def _apply_extract_transition(
@@ -1267,7 +1209,7 @@ def _apply_extract_transition(
     log_prefix: str,
     bootstrap_tasks: bool,
 ) -> None:
-    updates["analysis_scope_confirmed"] = False
+    updates["analysis_scope_reply"] = ""
     if _has_real_filters(state):
         logger.info(
             "%s: filters already applied (%s), forcing extract -> analyse",
@@ -1309,7 +1251,7 @@ def _apply_extract_transition(
         return
 
     updates["next_agent"] = target_agent
-    updates["analysis_scope_confirmed"] = False
+    updates["analysis_scope_reply"] = ""
     if bootstrap_tasks and not state.get("plan_tasks"):
         updates["plan_tasks"] = _PRELIMINARY_PLAN_TASKS()
         updates["plan_steps_total"] = len(updates["plan_tasks"])
@@ -1322,6 +1264,21 @@ def _apply_supervisor(s: SupervisorOutput, state: AnalyticsState, updates: dict)
     suppress_model_response = False
 
     target_agent = _DECISION_TO_NEXT.get(s.decision, "__end__")
+
+    # Deterministic handoff: once user has confirmed analysis scope and a plan exists,
+    # proceed with plan execution instead of asking for dimensions again.
+    if state.get("analysis_scope_reply") and not state.get("analysis_complete"):
+        next_planned = _peek_next_plan_agent(state.get("plan_tasks", []))
+        if next_planned != "__end__" and s.decision in {"answer", "clarify", "analyse"}:
+            s = SupervisorOutput(
+                decision="execute",
+                confidence=max(int(getattr(s, "confidence", 80)), 80),
+                reasoning="Analysis scope already confirmed; continuing with next planned step.",
+                response="",
+            )
+            updates["supervisor_decision"] = s.decision
+            updates["reasoning"] = [{"step_name": "Supervisor", "step_text": s.reasoning}]
+            target_agent = _DECISION_TO_NEXT.get(s.decision, "__end__")
 
     if s.decision == "execute":
         plan, agent = _find_next_plan_agent(state.get("plan_tasks", []))

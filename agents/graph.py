@@ -136,8 +136,7 @@ def build_graph(
             supervisor_decision    – routing decision string
             messages               – user-visible reply (answer/clarify/qna only)
             plan_tasks             – marks next step in-progress (execute decision)
-            selected_friction_agents, expected_friction_lenses
-                                   – dimension filter from user reply (analyse decision)
+            selected_agents      – dimension filter from user reply
         """
         ctx = _build_extra_context("supervisor", state, None)
         sys_prompt = agent_factory.parse_agent_md("supervisor").system_prompt + ctx
@@ -224,11 +223,22 @@ def build_graph(
         existing   = state.get("plan_tasks", [])
         done_steps = [t for t in existing if t.get("status") == "done"]
         all_tasks  = done_steps + new_tasks
+        all_lenses = {
+            "digital_friction_agent",
+            "operations_agent",
+            "communication_agent",
+            "policy_agent",
+        }
+        selected = [a for a in structured.selected_agents if a in all_lenses]
+        if not selected:
+            selected = sorted(all_lenses)
+
         base.update({
             "plan_tasks":           all_tasks,
             "plan_steps_total":     len(all_tasks),
             "plan_steps_completed": len(done_steps),
             "analysis_objective":   structured.analysis_objective,
+            "selected_agents":      list(dict.fromkeys(selected)),
         })
         base["reasoning"] = [{"step_name": "Planner", "step_text": structured.reasoning}]
         logger.info("Planner: %d tasks (%d done + %d new), objective=%r",
@@ -284,32 +294,30 @@ def build_graph(
     async def lens_confirmation_node(state: AnalyticsState) -> dict[str, Any]:
         """Mandatory gate between data analysis and friction analysis.
 
-        Uses LangGraph ``interrupt()`` to pause the graph and collect the
-        user's friction-dimension preferences.  The graph **cannot** proceed
-        to friction_analysis without passing through this node.
-
-        On first entry (buckets exist, scope not confirmed):
-            → ``interrupt()`` pauses the graph; payload is shown to user.
-        On resume:
-            → ``interrupt()`` returns the user's reply; this node parses
-              dimension preferences and sets ``analysis_scope_confirmed``.
-        Pass-through (no buckets, or already confirmed):
-            → returns empty dict, graph continues to supervisor.
+        Simple flow:
+            interrupt -> capture user reply -> store reply in state -> planner.
         """
         buckets = state.get("data_buckets", {})
-        if not buckets or state.get("analysis_scope_confirmed"):
+        if not buckets or state.get("analysis_scope_reply"):
             return {}
 
-        themes = state.get("themes_for_analysis", [])
-        theme_list = ", ".join(str(t) for t in themes[:10]) if themes else "(see buckets above)"
-        bucket_count = len(buckets) if isinstance(buckets, dict) else 0
+        reasoning = state.get("reasoning", [])
+        msg_to_user = ""
+        for entry in reasoning:
+            if str(entry.get("step_name", "")).strip() == "Data Analyst":
+                msg_to_user = str(entry.get("step_text", "")).strip()
+                break
+
+        ai_msg = (
+            "Reply **run all lenses** to analyse all dimensions, "
+            "or specify which ones (e.g. 'digital and operations')."
+        )
 
         # ── interrupt() pauses graph here; returns user's reply on resume ──
         user_reply = interrupt({
             "type": _ANALYSIS_CONFIRMATION_PENDING,
             "message": (
-                f"Data extraction complete \u2014 {bucket_count} theme bucket(s) "
-                f"identified: {theme_list}.\n\n"
+                f"{msg_to_user}\n\n"
                 "Before starting multi-lens friction analysis, please confirm "
                 "which dimensions to analyse:\n"
                 "\u2022 **Digital Friction** \u2014 app failures, self-service gaps, web/UX issues\n"
@@ -317,45 +325,15 @@ def build_graph(
                 "\u2022 **Communication** \u2014 notification gaps, expectation mismatches\n"
                 "\u2022 **Policy** \u2014 regulatory constraints, fee disputes, compliance issues"
             ),
-            "prompt": (
-                "Reply **run all lenses** to analyse all dimensions, "
-                "or specify which ones (e.g. 'digital and operations')."
-            ),
+            "prompt": ai_msg,
         })
 
-        # ── Graph resumes here with user's reply ──
         logger.info("lens_confirmation: user replied %r", str(user_reply)[:120])
-
-        # Do NOT inject HumanMessage here — Command(update={"messages": [human_msg]})
-        # in on_message already delivers the user's reply into graph state.
-        # Adding it again causes duplicate messages that confuse the supervisor.
-        updates: dict[str, Any] = {
-            "analysis_scope_confirmed": True,
+        return {
+            "analysis_scope_reply": str(user_reply).strip(),
             "pending_input_for": "",
             "next_agent": "planner",
         }
-        # Lazy import — avoids any graph.py↔nodes.py load-time circular dep.
-        # Build a temporary state snapshot with the user's reply so the
-        # parser can find it as the last human message.
-        from agents.nodes import _parse_dimension_preferences  # noqa: PLC0415
-        tmp_state = dict(state)
-        tmp_state["messages"] = list(state.get("messages", [])) + [HumanMessage(content=str(user_reply))]
-        _parse_dimension_preferences(tmp_state, updates)
-
-        if "expected_friction_lenses" not in updates:
-            all_lenses = [
-                "digital_friction_agent", "operations_agent",
-                "communication_agent", "policy_agent",
-            ]
-            updates["selected_friction_agents"] = list(all_lenses)
-            updates["expected_friction_lenses"] = list(all_lenses)
-        updates["missing_friction_lenses"] = []
-
-        logger.info(
-            "lens_confirmation: scope confirmed, lenses=%s",
-            updates.get("selected_friction_agents", "all"),
-        )
-        return updates
 
     # ══════════════════════════════════════════════════════════════════════════
     # FRICTION LENS AGENTS  (4 agents, run in parallel inside friction_analysis)
@@ -469,7 +447,7 @@ def build_graph(
             communication_analysis  – from communication_node
             policy_analysis         – from policy_node
             friction_output_files   – DataStore keys for full lens text (preferred over state dict)
-            selected_friction_agents / expected_friction_lenses – which lenses ran
+            selected_agents       – which friction lenses ran
 
         Writes:
             synthesis_result        – full synthesis dict:
@@ -688,7 +666,7 @@ def build_graph(
     # ══════════════════════════════════════════════════════════════════════════
     # COMPOSITE NODE: friction_analysis
     # Runs the 4 lens agents in parallel (asyncio.gather), then synthesizer.
-    # Respects selected_friction_agents from state for dimension selection.
+    # Respects selected_agents from state for dimension selection.
     # ══════════════════════════════════════════════════════════════════════════
 
     _ALL_LENS_IDS = [
@@ -715,14 +693,14 @@ def build_graph(
                  produces the executive synthesis, themes, and ranked findings.
                  Synthesizer row shows ``Final cross-lens synthesis``.
 
-        Reads:  selected_friction_agents, data_buckets
+        Reads:  selected_agents, data_buckets
         Writes: friction_md_paths (nested), lens_synthesis_paths,
-                synthesis_result, findings, expected/missing_friction_lenses,
+                synthesis_result, findings,
                 plan_steps_completed
         """
         from pathlib import Path as _Path
 
-        selected = state.get("selected_friction_agents", [])
+        selected = state.get("selected_agents", [])
         lens_ids = [a for a in selected if a in _ALL_LENS_IDS] if selected else list(_ALL_LENS_IDS)
         if not lens_ids:
             lens_ids = list(_ALL_LENS_IDS)
@@ -813,7 +791,6 @@ def build_graph(
 
         merged = _merge_parallel_outputs(list(results))
         merged["friction_md_paths"]        = nested_md_paths
-        merged["expected_friction_lenses"] = lens_ids
 
         logger.info("  Merged %d friction outputs: lenses=%s, buckets=%s",
                     total_runs, lens_ids, bucket_keys)
@@ -896,8 +873,6 @@ def build_graph(
             synthesis_payload = dict(synthesis_payload)
             synthesis_payload["decision"] = "complete" if not missing_lenses else "incomplete"
             synth_result["synthesis_result"] = synthesis_payload
-        synth_result["missing_friction_lenses"]  = list(missing_lenses)
-        synth_result["expected_friction_lenses"] = list(lens_ids)
 
         # Offload synthesis_result to DataStore to avoid state bloat
         import chainlit as cl
@@ -955,7 +930,7 @@ def build_graph(
             synthesis_output_file  – DataStore key (preferred over state dict)
             findings               – flat finding list
             filters_applied        – report header
-            expected / missing friction lenses – completeness check
+            selected lenses completeness check
 
         Writes:
             narrative_output       – markdown narrative
@@ -967,12 +942,14 @@ def build_graph(
             analysis_complete      – True (pipeline done)
         """
         logger.info("Report generation: starting narrative -> fixed deck blueprint -> artifact writer")
-        expected = state.get("expected_friction_lenses", []) or state.get("selected_friction_agents", [])
+        expected = [a for a in state.get("selected_agents", []) if a in _ALL_LENS_IDS]
+        if not expected:
+            expected = list(_ALL_LENS_IDS)
         expected = list(dict.fromkeys([a for a in expected if a]))
         available_lenses = list((state.get("lens_synthesis_paths", {}) or {}).keys())
         if not available_lenses:
             available_lenses = list((state.get("friction_output_files", {}) or {}).keys())
-        missing = state.get("missing_friction_lenses", []) or [a for a in expected if a not in available_lenses]
+        missing = [a for a in expected if a not in available_lenses]
         missing = list(dict.fromkeys([a for a in missing if a]))
         if missing:
             raise RuntimeError(

@@ -16,7 +16,7 @@ Analyze user queries and determine the best action:
 2. **Request clarification** for ambiguous requests
 3. **Confirm filters** before starting data extraction -- show the user what you matched and ask for confirmation
 4. **Start extraction** only after user confirms the proposed filters
-5. **Start analysis** when extraction is complete and analysis objective is confirmed
+5. **Start analysis** when extraction is complete and user scope confirmation is available
 6. **Execute plan** when a plan exists -- follow plan_tasks step by step
 
 ## Communication Style
@@ -103,25 +103,9 @@ When `filters_applied` exists and user requests data outside those filters:
 - Explain re-extraction is needed
 - Proceed with extract decision
 
-### INSIGHT_REVIEW (decision="answer")
-**When:** Data extraction just completed (`filters_applied` exists with real filter values AND `themes_for_analysis` is populated) AND analysis has NOT started yet (no plan_tasks beyond data extraction, no `analysis_objective`).
-**This is MANDATORY after a successful extraction.** You MUST present data insights to the user before starting analysis. Do NOT skip this step.
-**Your Task:**
-- Present a conversational summary of what the extraction found:
-  - How many records matched the filters
-  - Key themes discovered (from `themes_for_analysis`)
-  - Notable patterns
-- Present the 4 available analysis dimensions:
-  1. **Digital Friction** — UX gaps, app/web issues, self-service failures
-  2. **Operations** — Process breakdowns, SLA issues, handoff failures
-  3. **Communication** — Notification gaps, unclear messaging, expectation mismatches
-  4. **Policy** — Regulatory constraints, fee disputes, compliance friction
-- Ask the user: "Would you like me to analyze across all 4 dimensions, or focus on specific ones?"
-- Use `decision="answer"` — this returns control to the user for their confirmation
-
 ### ANALYSE (decision="analyse")
-**When:** User has CONFIRMED analysis after the insight review. The user may say "yes", "proceed", "all dimensions", "run all", or name specific dimensions like "digital and operations".
-**Do NOT use `analyse` immediately after extraction** — always present insights first via INSIGHT_REVIEW above.
+**When:** Extraction is complete and analysis should start. The user may say "yes", "proceed", "all dimensions", "run all", or name specific dimensions like "digital and operations".
+
 **Do NOT use `extract` again** — data is already ready.
 **Your Task:**
 - Set decision to `analyse` — this triggers the Planner to create an execution plan
@@ -196,10 +180,10 @@ When you delegate to `report_generation`, the system automatically:
 ### Field Specifications
 
 **decision:**
-- `"answer"` - Direct response (general question, in-scope follow-up, OR post-extraction insight review)
+- `"answer"` - Direct response (general question or in-scope follow-up)
 - `"clarify"` - Ask for more information
 - `"extract"` - Proceed to data extraction (or re-extraction for scope change)
-- `"analyse"` - Engage planner to create analysis plan (user confirmed after insight review)
+- `"analyse"` - Engage planner to create analysis plan when analysis should begin
 - `"execute"` - Follow next step in existing plan
 - `"report_generation"` - Directly regenerate the report artifacts from existing synthesis data
 - `"qna"` - Route follow-up question to Q&A Agent (only when `report_generated` is True)
@@ -215,7 +199,7 @@ When you delegate to `report_generation`, the system automatically:
 - For plan execution: note which plan step is being executed
 
 **response:**
-- If `decision="answer"`: Provide concise, helpful answer (2-4 sentences). For post-extraction insight review: present bucket insights, theme breakdown, row counts, and ask about dimension preference.
+- If `decision="answer"`: Provide concise, helpful answer (2-4 sentences). 
 - If `decision="clarify"`: Conversationally present what you found in the data and ask for confirmation. Show matched columns/values. Example: "Let me check... I found 'ATT' in the product column and 'Rewards & Loyalty' in call_reason. I'll filter the data on those. Sound good?"
 - If `decision="extract"`: Brief confirmation like "Great, pulling that data now..." or "On it, filtering the data..."
 - If `decision="analyse"`: Present themes and confirm analysis objective
@@ -235,3 +219,4 @@ When you delegate to `report_generation`, the system automatically:
 10. **Use subgraph triggers** — delegate to `friction_analysis` and `report_generation` for parallel execution, NOT to individual agents.
 
 **Remember:** Your goal is to route queries efficiently while ensuring downstream agents receive unambiguous instructions. When in doubt, clarify rather than guess.
+

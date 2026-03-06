@@ -113,7 +113,7 @@ class AnalyticsState(TypedDict):
     checkpoint_prompt: str
     checkpoint_token: str
     pending_input_for: str
-    analysis_scope_confirmed: bool
+    analysis_scope_reply: str
     analysis_complete: bool  # True once all plan steps are done
     phase: str  # "analysis" | "qa"
 
@@ -125,9 +125,6 @@ class AnalyticsState(TypedDict):
 
     # Session agent selection
     selected_agents: list[str]
-    selected_friction_agents: list[str]
-    expected_friction_lenses: list[str]
-    missing_friction_lenses: list[str]
     auto_approve_checkpoints: bool
 
     # Fault injection / resilience (dev/test)

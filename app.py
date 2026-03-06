@@ -351,14 +351,11 @@ def make_initial_state() -> dict[str, Any]:
         "user_focus": "", "analysis_type": "", "selected_skills": [],
         "critique_enabled": False,
         "selected_agents": list(DEFAULT_SELECTED_AGENTS),
-        "selected_friction_agents": list(DEFAULT_SELECTED_AGENTS),
-        "expected_friction_lenses": list(DEFAULT_SELECTED_AGENTS),
-        "missing_friction_lenses": [],
         "auto_approve_checkpoints": False,
         "plan_steps_total": 0, "plan_steps_completed": 0, "plan_tasks": [],
         "checkpoint_message": "", "checkpoint_prompt": "",
         "checkpoint_token": "", "pending_input_for": "",
-        "analysis_scope_confirmed": False,
+        "analysis_scope_reply": "",
         "execution_trace": [], "reasoning": [],
         "node_io": {}, "io_trace": [], "last_completed_node": "",
         "dataset_path": "", "dataset_schema": {},
@@ -478,8 +475,6 @@ def _rehydrate_friction_outputs(state: dict[str, Any]) -> None:
 
 def _apply_agent_selection(state: dict[str, Any], selected: list[str]) -> None:
     state["selected_agents"] = list(selected)
-    state["selected_friction_agents"] = [a for a in selected if a in FRICTION_AGENT_IDS]
-    state["expected_friction_lenses"] = list(state["selected_friction_agents"])
     state["critique_enabled"] = "critique" in selected
 
 
@@ -588,25 +583,14 @@ async def on_message(message: cl.Message):
     was_complete_before_run = bool(state.get("analysis_complete"))
     downloads_reset_for_run = False
 
-    # Resume from checkpoint interrupt or start fresh
+    # Resume from checkpoint or start fresh
     snapshot = graph.get_state(config)
-    # Only resume via Command(resume=...) if there's a real interrupt pending,
-    # not just a stale checkpoint from update_state during on_chat_resume.
-    has_real_interrupt = False
-    if snapshot and snapshot.next:
-        for task in (snapshot.tasks or []):
-            if getattr(task, "interrupts", ()):
-                has_real_interrupt = True
-                break
+    waiting_for_resume = bool(snapshot and snapshot.next)
     human_msg = HumanMessage(content=user_text)
 
-    if has_real_interrupt:
-        # interrupt() resume: pass user reply as the resume value AND
-        # inject the HumanMessage so conversation history stays intact.
-        # Do NOT also append to state["messages"] — Command.update handles it,
-        # and double-injecting causes the supervisor to process the message twice.
+    if waiting_for_resume:
         graph_input = Command(resume=user_text, update={"messages": [human_msg]})
-        log.info("Resuming from interrupt() with Command(resume=...) (next=%s)", snapshot.next)
+        log.info("Resuming graph (next=%s)", snapshot.next)
     else:
         state["messages"].append(human_msg)
         graph_input = state
@@ -737,9 +721,7 @@ async def on_message(message: cl.Message):
         final_snapshot = graph.get_state(config)
         is_interrupted = bool(final_snapshot and final_snapshot.next)
 
-        # Surface interrupt() payloads (e.g. lens_confirmation) to the user.
-        # These carry {message, prompt} dicts that should be displayed.
-        interrupt_handled = False
+        # Surface pending checkpoint prompt to the user.
         if is_interrupted and final_snapshot.tasks:
             for task in final_snapshot.tasks:
                 for intr in getattr(task, "interrupts", ()):
@@ -751,13 +733,13 @@ async def on_message(message: cl.Message):
                         combined = "\n\n".join(p for p in [info, prompt] if p)
                         if combined:
                             await cl.Message(content=combined).send()
-                        interrupt_handled = True
-                        log.info("interrupt() payload displayed (type=%s)", payload.get("type", "?"))
+                        log.info("Checkpoint prompt displayed (type=%s)", payload.get("type", "?"))
+                        break
+                else:
+                    continue
+                break
 
-        if is_interrupted:
-            await active_node_msg.remove()
-        else:
-            await active_node_msg.remove()
+        await active_node_msg.remove()
 
         # --- Downloads ---
         sent = await _maybe_send_downloads(thread_id, state)

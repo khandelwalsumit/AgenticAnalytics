@@ -73,6 +73,12 @@ class PlannerOutput(BaseModel):
     analysis_objective: str = Field(
         description="Confirmed analysis objective extracted from user intent."
     )
+    selected_agents: list[str] = Field(
+        description=(
+            "Selected friction lens agents to run based on analysis_scope_reply. "
+            "Use only: digital_friction_agent, operations_agent, communication_agent, policy_agent."
+        )
+    )
     reasoning: str = Field(description="Brief explanation of why this plan was chosen.")
 
 
@@ -147,9 +153,24 @@ def _normalize_quadrant(raw: str) -> str:
     return "strategic_investment"
 
 
-def _normalize_driver(raw: str) -> str:
-    """Map any LLM driver string to a valid literal value."""
-    cleaned = raw.lower().strip().replace("-", "_").replace(" ", "_")
+def _normalize_driver(raw: Any) -> str:
+    """Map any LLM-produced driver value to a valid literal value."""
+    if raw is None:
+        return "digital"
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, str):
+                candidate = _normalize_driver(item)
+                if candidate in _VALID_DRIVERS:
+                    return candidate
+        return "digital"
+    if isinstance(raw, dict):
+        for key in ("dominant_driver", "driver", "dimension", "type"):
+            if key in raw:
+                return _normalize_driver(raw.get(key))
+        return "digital"
+
+    cleaned = str(raw).lower().strip().replace("-", "_").replace(" ", "_")
     if cleaned in _VALID_DRIVERS:
         return cleaned
     for keyword, driver in _DRIVER_KEYWORDS.items():
@@ -282,7 +303,7 @@ class RankedFinding(BaseModel):
         if isinstance(pq, str):
             data["priority_quadrant"] = _normalize_quadrant(pq)
         dd = data.get("dominant_driver")
-        if isinstance(dd, str):
+        if dd is not None:
             data["dominant_driver"] = _normalize_driver(dd)
         for field in ("preventability_score", "confidence", "call_percentage", "volume"):
             if field in data:
@@ -317,7 +338,7 @@ class ThemeDriver(BaseModel):
             return {"driver": data, "dimension": "digital"}
         if isinstance(data, dict):
             dim = data.get("dimension")
-            if isinstance(dim, str):
+            if dim is not None:
                 data["dimension"] = _normalize_driver(dim)
         return data
 
@@ -352,7 +373,7 @@ class ThemeSummary(BaseModel):
         if isinstance(pq, str):
             data["priority_quadrant"] = _normalize_quadrant(pq)
         dd = data.get("dominant_driver")
-        if isinstance(dd, str):
+        if dd is not None:
             data["dominant_driver"] = _normalize_driver(dd)
         for field in ("preventability_score", "call_percentage"):
             if field in data:
