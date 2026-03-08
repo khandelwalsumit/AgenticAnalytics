@@ -292,8 +292,8 @@ try:
 
     # Check node names
     expected_nodes = {
-        "supervisor", "planner", "data_analyst", "report_analyst",
-        "critique", "friction_analysis",
+        "supervisor", "planner", "plan_dispatcher", "data_analyst",
+        "report_analyst", "critique", "friction_analysis",
         "report_drafts", "artifact_writer", "qna",
     }
     # LangGraph compiled graph stores nodes differently

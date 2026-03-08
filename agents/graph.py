@@ -51,7 +51,7 @@ from agents.schemas import (
     SynthesizerOutput,
 )
 from agents.state import AnalyticsState
-from config import MAX_MULTITHREADING_WORKERS
+from config import MAX_MULTITHREADING_WORKERS, MAX_SUPERVISOR_MSGS
 from core.agent_factory import AgentFactory
 from core.skill_loader import SkillLoader
 from tools import TOOL_REGISTRY
@@ -71,6 +71,8 @@ from agents.graph_helpers import (
     _run_section_artifact_writer,
     _set_sub_agent_status,
     _set_task_sub_agents_and_emit,
+    _should_summarize_lens_outputs,
+    _summarize_lens_buckets,
     _validate_artifact_paths,
     _validate_narrative,
 )
@@ -145,6 +147,9 @@ def build_graph(
                 slim_msgs.append(msg)
             elif isinstance(msg, AIMessage) and not getattr(msg, "tool_calls", None) and msg.content:
                 slim_msgs.append(msg)
+        # Cap message count: keep first 2 (original question + first reply) + last N
+        if len(slim_msgs) > MAX_SUPERVISOR_MSGS:
+            slim_msgs = slim_msgs[:2] + slim_msgs[-(MAX_SUPERVISOR_MSGS - 2):]
         slim_state["messages"] = slim_msgs
 
         base, structured, last_msg = await _run_structured_node(
@@ -201,9 +206,11 @@ def build_graph(
 
         # Planner works from structured context only — no conversation needed
         planner_state = dict(state)
-        planner_state["messages"] = [HumanMessage(content=(
-            f"Create an execution plan. Objective: {state.get('analysis_objective', '')}"
-        ))]
+        scope_reply = state.get("analysis_scope_reply", "")
+        planner_msg = f"Create an execution plan. Objective: {state.get('analysis_objective', '')}"
+        if scope_reply:
+            planner_msg += f"\nUser lens selection: {scope_reply}"
+        planner_state["messages"] = [HumanMessage(content=planner_msg)]
 
         base, structured, last_msg = await _run_structured_node(
             "planner", planner_chain, PlannerOutput, sys_prompt, planner_state, extra_context=ctx
@@ -790,11 +797,19 @@ def build_graph(
         logger.info("  Merged %d friction outputs: lenses=%s, buckets=%s",
                     total_runs, lens_ids, bucket_keys)
 
-        # ── Phase 1: per-lens aggregation (no LLM) with synthesizer progress ──
+        # ── Phase 1: per-lens aggregation with synthesizer progress ──
+        # If total raw output exceeds SUMMARIZE_THRESHOLD_CHARS, extract
+        # structured per-bucket summaries (key issues, call volume, solutions
+        # by team) instead of raw concatenation.  This keeps the synthesizer
+        # context manageable at scale (e.g. 50 buckets × 4 lenses).
+        use_summarization = _should_summarize_lens_outputs(nested_md_paths)
+        phase1_label = "Per-lens summarization" if use_summarization else "Per-lens aggregation"
+        logger.info("  Phase 1: %s (summarize=%s)", phase1_label, use_summarization)
+
         sub_agents.append({
             "id": "synthesizer_agent",
             "title": FRICTION_SUB_AGENTS["synthesizer_agent"]["title"],
-            "detail": f"Per-lens aggregation (0/{len(lens_ids)})",
+            "detail": f"{phase1_label} (0/{len(lens_ids)})",
             "status": "in_progress",
         })
         tasks = await _set_task_sub_agents_and_emit(
@@ -805,26 +820,34 @@ def build_graph(
         lens_synthesis_paths: dict[str, str] = {}
         for i, lid in enumerate(lens_ids):
             bucket_path_dict = nested_md_paths[lid]
-            parts = [f"# {lid} — Per-Bucket Analysis\n"]
-            for bk in sorted(bucket_path_dict.keys()):
-                bpath = bucket_path_dict[bk]
-                if bpath and _Path(bpath).exists():
-                    content = _Path(bpath).read_text(encoding="utf-8")
-                    bucket_name = raw_buckets.get(bk, {}).get("bucket_name", bk) if isinstance(raw_buckets.get(bk), dict) else bk
-                    parts.append(f"\n## Bucket: {bucket_name}\n{content}")
-                else:
-                    parts.append(f"\n## Bucket: {bk}\n(No output)\n")
-            lens_md = "\n".join(parts)
+
+            if use_summarization:
+                # Structured summarization: extract issues, call volume,
+                # solutions by team from each bucket's raw output
+                lens_md = _summarize_lens_buckets(lid, bucket_path_dict, raw_buckets)
+            else:
+                # Raw concatenation (small context — no summarization needed)
+                parts = [f"# {lid} — Per-Bucket Analysis\n"]
+                for bk in sorted(bucket_path_dict.keys()):
+                    bpath = bucket_path_dict[bk]
+                    if bpath and _Path(bpath).exists():
+                        content = _Path(bpath).read_text(encoding="utf-8")
+                        bucket_name = raw_buckets.get(bk, {}).get("bucket_name", bk) if isinstance(raw_buckets.get(bk), dict) else bk
+                        parts.append(f"\n## Bucket: {bucket_name}\n{content}")
+                    else:
+                        parts.append(f"\n## Bucket: {bk}\n(No output)\n")
+                lens_md = "\n".join(parts)
+
             lens_path = _write_versioned_md(
                 f"lens_synthesis_{lid}", lens_md,
-                {"lens": lid, "bucket_count": len(bucket_path_dict)},
+                {"lens": lid, "bucket_count": len(bucket_path_dict), "summarized": use_summarization},
             )
             if lens_path:
                 lens_synthesis_paths[lid] = lens_path
 
             _set_sub_agent_status(
                 sub_agents, "synthesizer_agent", status="in_progress",
-                detail=f"Per-lens aggregation ({i + 1}/{len(lens_ids)})",
+                detail=f"{phase1_label} ({i + 1}/{len(lens_ids)})",
             )
             tasks = await _set_task_sub_agents_and_emit(
                 tasks, agent_name="friction_analysis",
@@ -832,7 +855,8 @@ def build_graph(
             )
 
         merged["lens_synthesis_paths"] = lens_synthesis_paths
-        logger.info("  Phase 1 done: %d per-lens synthesis files written", len(lens_synthesis_paths))
+        logger.info("  Phase 1 done: %d per-lens synthesis files written (summarized=%s)",
+                     len(lens_synthesis_paths), use_summarization)
 
         # ── Phase 2: final synthesis (single LLM call) ──
         _set_sub_agent_status(
@@ -1080,6 +1104,105 @@ def build_graph(
         _record_plan_progress(state, final, agent_name="artifact_writer", mark_analysis_complete=True)
         return final
 
+    # ══════════════════════════════════════════════════════════════════════════
+    # PLAN DISPATCHER (deterministic — no LLM call)
+    # Replaces the planner→supervisor ping-pong mid-pipeline.
+    # Reads plan_tasks, marks current task done, picks next ready task.
+    # ══════════════════════════════════════════════════════════════════════════
+
+    async def plan_dispatcher_node(state: AnalyticsState) -> dict[str, Any]:
+        """Deterministic plan execution: advance plan and route to next work node.
+
+        No LLM call.  Reads plan_tasks, marks the most recent in_progress task
+        as done, promotes the next ready/todo task to in_progress, and sets
+        next_agent for the conditional edge.
+
+        Also handles OPT-5: if the next task is report_analyst and all artifact
+        paths are already valid, skip it and mark analysis complete.
+
+        Reads:  plan_tasks, report_file_path, data_file_path, markdown_file_path
+        Writes: plan_tasks, plan_steps_completed, plan_steps_total, next_agent,
+                analysis_complete, phase
+        """
+        tasks = [dict(t) for t in state.get("plan_tasks", [])]
+
+        # Respect explicit routing override from upstream node (e.g. data_analyst
+        # setting next_agent="supervisor" for non-lens replies).
+        upstream_next = state.get("next_agent", "")
+        if upstream_next in ("supervisor", "planner") and not tasks:
+            logger.info("Plan dispatcher: upstream override next=%s (no plan)", upstream_next)
+            return {
+                "plan_tasks": [],
+                "plan_steps_completed": 0,
+                "plan_steps_total": 0,
+                "next_agent": upstream_next,
+            }
+
+        # If no plan exists yet (e.g. data_analyst completed before planner ran),
+        # route to planner for initial plan creation.
+        if not tasks:
+            logger.info("Plan dispatcher: no plan yet, routing to planner")
+            return {
+                "plan_tasks": [],
+                "plan_steps_completed": 0,
+                "plan_steps_total": 0,
+                "next_agent": "planner",
+            }
+
+        # Mark the in_progress task as done
+        for t in tasks:
+            if t.get("status") == "in_progress":
+                t["status"] = "done"
+                break
+
+        # Find next ready/todo task
+        next_agent = "__end__"
+        for t in tasks:
+            if t.get("status") in ("ready", "todo"):
+                t["status"] = "in_progress"
+                next_agent = t.get("agent", "__end__")
+                break
+
+        done_count = len([t for t in tasks if t.get("status") == "done"])
+        total = len(tasks)
+
+        result: dict[str, Any] = {
+            "plan_tasks": tasks,
+            "plan_steps_completed": done_count,
+            "plan_steps_total": total,
+            "next_agent": next_agent,
+        }
+
+        # OPT-5: Skip report_analyst if all artifacts are already valid
+        if next_agent == "report_analyst":
+            artifact_errors = _validate_artifact_paths({
+                "report_file_path": state.get("report_file_path", ""),
+                "data_file_path": state.get("data_file_path", ""),
+                "markdown_file_path": state.get("markdown_file_path", ""),
+            })
+            if not artifact_errors:
+                # All artifacts exist — skip report_analyst, mark it done
+                for t in tasks:
+                    if t.get("agent") == "report_analyst" and t.get("status") == "in_progress":
+                        t["status"] = "done"
+                        break
+                done_count = len([t for t in tasks if t.get("status") == "done"])
+                result["plan_tasks"] = tasks
+                result["plan_steps_completed"] = done_count
+                result["analysis_complete"] = True
+                result["phase"] = "qa"
+                next_agent = "__end__"
+                result["next_agent"] = next_agent
+                logger.info("Plan dispatcher: skipped report_analyst (all artifacts valid)")
+
+        # Check if plan is fully complete
+        if total > 0 and done_count >= total and not result.get("analysis_complete"):
+            result["analysis_complete"] = True
+            result["phase"] = "qa"
+
+        logger.info("Plan dispatcher: %d/%d done, next=%s", done_count, total, next_agent)
+        return result
+
     # ------------------------------------------------------------------
     # Graph wiring
     # ------------------------------------------------------------------
@@ -1088,6 +1211,7 @@ def build_graph(
 
     graph.add_node("supervisor",        supervisor_node)
     graph.add_node("planner",           planner_node)
+    graph.add_node("plan_dispatcher",   plan_dispatcher_node)
     graph.add_node("data_analyst",      data_analyst_node)
     graph.add_node("friction_analysis", friction_analysis_node)
     graph.add_node("report_drafts",     report_drafts_node)
@@ -1098,21 +1222,32 @@ def build_graph(
 
     graph.add_edge(START, "supervisor")
 
-    # Work nodes -> planner (planner decides next step)
-    graph.add_edge("data_analyst",      "planner")
-    graph.add_edge("friction_analysis", "planner")
-    graph.add_edge("report_drafts",     "planner")
-    graph.add_edge("artifact_writer",   "planner")
-    graph.add_edge("critique",          "planner")
+    # Work nodes -> plan_dispatcher (deterministic routing, no LLM)
+    # data_analyst: route to planner when user just confirmed lenses, else plan_dispatcher
+    def route_from_data_analyst(state: AnalyticsState) -> str:
+        if state.get("next_agent") == "planner":
+            return "planner"
+        return "plan_dispatcher"
 
-    # Final/meta nodes -> supervisor
+    graph.add_conditional_edges("data_analyst", route_from_data_analyst, {
+        "planner": "planner",
+        "plan_dispatcher": "plan_dispatcher",
+    })
+    graph.add_edge("friction_analysis", "plan_dispatcher")
+    graph.add_edge("report_drafts",     "plan_dispatcher")
+    graph.add_edge("artifact_writer",   "plan_dispatcher")
+    graph.add_edge("critique",          "plan_dispatcher")
+
+    # Planner -> plan_dispatcher (after initial plan creation, dispatcher picks first task)
+    graph.add_edge("planner",          "plan_dispatcher")
+
+    # Final nodes -> supervisor (for answer/qna routing)
     graph.add_edge("report_analyst",    "supervisor")
-    graph.add_edge("planner",          "supervisor")
 
     # QnA ends the graph — next user message starts fresh via START -> supervisor
     graph.add_edge("qna",              END)
 
-    # Supervisor conditional routing
+    # Supervisor conditional routing (only for initial routing + answer/qna)
     def route_from_supervisor(state: AnalyticsState) -> str:
         next_agent = state.get("next_agent", "")
         route_map = {
@@ -1137,6 +1272,34 @@ def build_graph(
         "critique":          "critique",
         "report_analyst":    "report_analyst",
         "qna":               "qna",
+        "planner":           "planner",
+        "supervisor":        "supervisor",
+        END:                 END,
+    })
+
+    # Plan dispatcher conditional routing (deterministic next task)
+    def route_from_plan_dispatcher(state: AnalyticsState) -> str:
+        next_agent = state.get("next_agent", "")
+        route_map = {
+            "data_analyst":      "data_analyst",
+            "friction_analysis": "friction_analysis",
+            "report_drafts":     "report_drafts",
+            "artifact_writer":   "artifact_writer",
+            "critique":          "critique",
+            "report_analyst":    "report_analyst",
+            "planner":           "planner",
+            "__end__":           END,
+        }
+        # Fall back to supervisor for unrecognized agents (e.g. qna routing)
+        return route_map.get(next_agent, "supervisor")
+
+    graph.add_conditional_edges("plan_dispatcher", route_from_plan_dispatcher, {
+        "data_analyst":      "data_analyst",
+        "friction_analysis": "friction_analysis",
+        "report_drafts":     "report_drafts",
+        "artifact_writer":   "artifact_writer",
+        "critique":          "critique",
+        "report_analyst":    "report_analyst",
         "planner":           "planner",
         "supervisor":        "supervisor",
         END:                 END,

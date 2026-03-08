@@ -21,7 +21,189 @@ from ui.components import sync_task_list
 logger = logging.getLogger("agenticanalytics.graph")
 
 
+from config import SUMMARIZE_THRESHOLD_CHARS
+
 MAX_REPORT_RETRIES = 3
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Per-bucket summarization (OPT-1)
+# Extracts structured summaries from raw lens markdown to reduce synthesizer
+# context. Preserves: key issues/themes, call volume, and solutions by team.
+# ═══════════════════════════════════════════════════════════════════════════
+
+_TEAM_LABELS = {
+    "digital": "Digital / UX",
+    "operations": "Operations",
+    "communication": "Communication",
+    "policy": "Policy / Compliance",
+}
+
+
+def _extract_bucket_summary(bucket_key: str, bucket_name: str, raw_md: str) -> str:
+    """Parse a single bucket's raw markdown output into a compact structured summary.
+
+    Extracts:
+      - Key issues / themes
+      - Call volume indicators
+      - Solutions broken down by responsible team
+
+    The same friction (e.g. "autopay notification failure") may appear with
+    different solutions per team (Digital: in-app alert; Communication: SMS
+    reminder). Both are preserved so each team can independently evaluate.
+    """
+    if not raw_md or not raw_md.strip():
+        return f"### {bucket_name}\n(No output)\n"
+
+    lines = raw_md.strip().splitlines()
+    issues: list[str] = []
+    solutions_by_team: dict[str, list[str]] = {}
+    call_volume_lines: list[str] = []
+    current_section = ""
+
+    for line in lines:
+        stripped = line.strip()
+        lower = stripped.lower()
+
+        # Detect section headers
+        if stripped.startswith("#"):
+            header_text = stripped.lstrip("#").strip().lower()
+            if any(kw in header_text for kw in ("issue", "finding", "friction", "problem", "pain", "theme", "root cause")):
+                current_section = "issues"
+            elif any(kw in header_text for kw in ("solution", "recommendation", "action", "fix", "remediation")):
+                current_section = "solutions"
+            elif any(kw in header_text for kw in ("volume", "call", "impact", "metric", "stat")):
+                current_section = "volume"
+            else:
+                current_section = ""
+            continue
+
+        if not stripped or stripped == "---":
+            continue
+
+        # Extract call volume indicators from anywhere
+        if any(kw in lower for kw in ("call", "volume", "row", "record", "instance", "occurrence")):
+            # Look for numbers
+            nums = re.findall(r'\d[\d,]*', stripped)
+            if nums:
+                call_volume_lines.append(stripped.lstrip("- ").strip()[:120])
+
+        # Extract issues
+        if current_section == "issues" and stripped.startswith(("-", "*", "•")):
+            issue_text = stripped.lstrip("-*• ").strip()
+            if issue_text and len(issues) < 8:
+                issues.append(issue_text[:150])
+
+        # Extract solutions — tag by team if mentioned
+        if current_section == "solutions" and stripped.startswith(("-", "*", "•")):
+            sol_text = stripped.lstrip("-*• ").strip()
+            if sol_text:
+                assigned_team = _detect_team_from_text(sol_text)
+                solutions_by_team.setdefault(assigned_team, [])
+                if len(solutions_by_team[assigned_team]) < 5:
+                    solutions_by_team[assigned_team].append(sol_text[:180])
+
+    # Fallback: if structured parsing found nothing, extract bullet points as issues
+    if not issues:
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith(("-", "*", "•")) and len(stripped) > 10:
+                issues.append(stripped.lstrip("-*• ").strip()[:150])
+                if len(issues) >= 5:
+                    break
+
+    # Build compact summary
+    parts = [f"### {bucket_name}"]
+
+    if call_volume_lines:
+        parts.append(f"**Volume**: {'; '.join(call_volume_lines[:3])}")
+
+    if issues:
+        parts.append("**Key Issues**:")
+        for issue in issues[:5]:
+            parts.append(f"  - {issue}")
+
+    if solutions_by_team:
+        parts.append("**Solutions by Team**:")
+        for team_key, team_sols in solutions_by_team.items():
+            team_label = _TEAM_LABELS.get(team_key, team_key.replace("_", " ").title())
+            for sol in team_sols[:3]:
+                parts.append(f"  - [{team_label}] {sol}")
+    elif issues:
+        # No explicit solutions found — note it for synthesizer
+        parts.append("**Solutions**: (to be synthesized from issues)")
+
+    return "\n".join(parts) + "\n"
+
+
+def _detect_team_from_text(text: str) -> str:
+    """Detect which team a solution belongs to based on keywords."""
+    lower = text.lower()
+    team_keywords = {
+        "digital": ["app", "web", "ui", "ux", "digital", "mobile", "online", "self-service",
+                     "portal", "interface", "click", "page", "screen", "button", "api"],
+        "operations": ["process", "sla", "handoff", "agent", "queue", "workflow", "manual",
+                        "backlog", "escalat", "training", "procedure", "turnaround"],
+        "communication": ["notification", "email", "sms", "alert", "message", "letter",
+                           "communicat", "inform", "update", "reminder", "template", "proactive"],
+        "policy": ["policy", "regulat", "compliance", "fee", "rule", "terms", "legal",
+                    "waiver", "exception", "eligib", "restrict"],
+    }
+    scores: dict[str, int] = {team: 0 for team in team_keywords}
+    for team, keywords in team_keywords.items():
+        for kw in keywords:
+            if kw in lower:
+                scores[team] += 1
+    best_team = max(scores, key=scores.get)  # type: ignore[arg-type]
+    return best_team if scores[best_team] > 0 else "operations"
+
+
+def _summarize_lens_buckets(
+    lens_id: str,
+    bucket_path_dict: dict[str, str],
+    raw_buckets: dict[str, Any],
+) -> str:
+    """Summarize all bucket outputs for one lens into a compact structured format.
+
+    Returns a markdown string with per-bucket summaries containing key issues,
+    call volumes, and solutions tagged by responsible team.
+
+    Each team gets its own solution entries so they can independently evaluate
+    based on their budget and solution complexity.
+    """
+    from pathlib import Path as _P
+
+    parts = [f"# {lens_id} — Summarized Bucket Analysis\n"]
+    for bk in sorted(bucket_path_dict.keys()):
+        bpath = bucket_path_dict[bk]
+        bucket_name = bk
+        if isinstance(raw_buckets.get(bk), dict):
+            bucket_name = raw_buckets[bk].get("bucket_name", bk)
+
+        if bpath and _P(bpath).exists():
+            raw_content = _P(bpath).read_text(encoding="utf-8")
+            summary = _extract_bucket_summary(bk, bucket_name, raw_content)
+            parts.append(summary)
+        else:
+            parts.append(f"### {bucket_name}\n(No output)\n")
+
+    return "\n".join(parts)
+
+
+def _should_summarize_lens_outputs(
+    nested_md_paths: dict[str, dict[str, str]],
+) -> bool:
+    """Check if total raw lens output exceeds threshold, requiring summarization."""
+    from pathlib import Path as _P
+
+    total_chars = 0
+    for lens_id, bucket_paths in nested_md_paths.items():
+        for bk, bpath in bucket_paths.items():
+            if bpath and _P(bpath).exists():
+                total_chars += _P(bpath).stat().st_size
+            if total_chars > SUMMARIZE_THRESHOLD_CHARS:
+                return True
+    return False
 
 
 def _extract_json(text: str) -> dict[str, Any]:
@@ -85,9 +267,13 @@ def _safe_thread_id(raw: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]", "_", text)[:80]
 
 
-def _thread_tmp_dir() -> Path:
-    thread_id = str(cl.user_session.get("thread_id") or "unknown_thread")
-    return Path(DATA_CACHE_DIR) /_safe_thread_id(thread_id)
+def _thread_tmp_dir(thread_id: str = "") -> Path:
+    if not thread_id:
+        try:
+            thread_id = str(cl.user_session.get("thread_id") or "unknown_thread")
+        except Exception:
+            thread_id = "unknown_thread"
+    return Path(DATA_CACHE_DIR) / _safe_thread_id(thread_id)
 
 
 def _thread_output_dir() -> Path:
@@ -157,12 +343,15 @@ def _build_deterministic_dataviz_output(state: dict[str, Any]) -> dict[str, Any]
     """Generate required charts deterministically via Python chart scripts."""
     synthesis = state.get("synthesis_result", {})
     if not synthesis and state.get("synthesis_output_file"):
-        import chainlit as cl
-        data_store = cl.user_session.get("data_store")
-        if data_store:
-                loaded = data_store.get_text(state["synthesis_output_file"])
-                if loaded:
-                    synthesis = json.loads(loaded)
+        try:
+            import chainlit as cl
+            data_store = cl.user_session.get("data_store")
+            if data_store:
+                    loaded = data_store.get_text(state["synthesis_output_file"])
+                    if loaded:
+                        synthesis = json.loads(loaded)
+        except Exception:
+            pass  # Thread-pool context — synthesis_result should be in state
 
     themes_raw = synthesis.get("themes", []) if isinstance(synthesis, dict) else []
 
@@ -292,16 +481,21 @@ def _build_deterministic_dataviz_output(state: dict[str, Any]) -> dict[str, Any]
     ]
 
     chart_tool = TOOL_REGISTRY["execute_chart_code"]
+    # Resolve output dir from state so the tool doesn't need Chainlit context
+    # (safe for thread-pool contexts where cl.user_session is unavailable).
+    tid = _safe_thread_id(state.get("thread_id", "unknown_thread"))
+    chart_output_dir = str(Path(DATA_CACHE_DIR) / tid)
     charts: list[dict[str, Any]] = []
     for spec in chart_specs:
         raw_result = chart_tool.invoke({
             "code": spec["code"],
             "output_filename": spec["output_filename"],
+            "output_dir": chart_output_dir,
         })
         parsed = _extract_json(str(raw_result))
         chart_path = str(parsed.get("chart_path", "")).strip()
         if not chart_path:
-            chart_path = str(_thread_tmp_dir() / spec["output_filename"])
+            chart_path = str(_thread_tmp_dir(state.get("thread_id", "")) / spec["output_filename"])
 
         if not _path_exists(chart_path):
             logger.warning(
@@ -1888,17 +2082,14 @@ def _run_section_artifact_writer(
 ) -> dict[str, Any]:
     """Deterministic artifact writer using section-based PPTX builder.
 
-    Replaces the legacy _run_artifact_writer_node for the new pipeline.
+    OPT-4: Charts and CSV export run in parallel via threads, then PPTX
+    (which needs chart paths) runs after charts complete.
     """
+    import asyncio
+    import concurrent.futures
     from utils.pptx_builder import build_pptx_from_sections
 
-    # 1. Generate charts deterministically
-    dataviz_result = _build_deterministic_dataviz_output(state)
-    dataviz_errors = _validate_dataviz(dataviz_result)
-    if dataviz_errors:
-        raise RuntimeError(f"Deterministic DataViz generation failed: {dataviz_errors}")
-
-    # 2. Extract narrative markdown
+    # 2. Extract narrative markdown (needed before parallel work)
     narrative_payload = narrative_result.get("narrative_output", {})
     narrative_markdown = str(
         narrative_payload.get("full_response", "") if isinstance(narrative_payload, dict) else ""
@@ -1906,17 +2097,9 @@ def _run_section_artifact_writer(
     if not narrative_markdown:
         narrative_markdown = "# Analysis Report\n\nNo narrative markdown was generated."
 
-    # 3. Build chart paths map
-    dataviz_json = _extract_json(
-        dataviz_result.get("dataviz_output", {}).get("full_response", "")
-        if isinstance(dataviz_result.get("dataviz_output", {}), dict) else ""
-    )
-    chart_paths = _build_chart_paths_map(dataviz_json)
-
     # 4. Load template catalog for visual hierarchy
     catalog_path = Path(__file__).resolve().parent.parent / "data" / "input" / "template_catalog.json"
     catalog = json.loads(catalog_path.read_text(encoding="utf-8")) if catalog_path.exists() else {}
-
     visual_hierarchy = catalog.get("visual_hierarchy")
 
     # 5. Persist narrative markdown
@@ -1934,7 +2117,39 @@ def _run_section_artifact_writer(
             {"agent": "narrative_agent", "type": "report_markdown"},
         )
 
-    # 6. Build PPTX from section blueprints using new builder
+    # OPT-4: Run charts + CSV export in parallel threads.
+    # Resolve output dirs here (main thread has Chainlit context) so that
+    # spawned threads don't need cl.user_session.
+    _tid = state.get("thread_id", "") or str(cl.user_session.get("thread_id") or "unknown_thread")
+    _csv_output_dir = str(Path(DATA_OUTPUT_DIR) / _safe_thread_id(_tid))
+
+    def _generate_charts() -> dict[str, Any]:
+        return _build_deterministic_dataviz_output(state)
+
+    def _export_csv() -> tuple[str, str]:
+        csv_tool = TOOL_REGISTRY["export_filtered_csv"]
+        csv_raw = csv_tool.invoke({"output_dir": _csv_output_dir})
+        csv_data = _extract_json(str(csv_raw))
+        return _resolve_existing_path(str(csv_data.get("csv_path", "")).strip())
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        chart_future = pool.submit(_generate_charts)
+        csv_future = pool.submit(_export_csv)
+        dataviz_result = chart_future.result()
+        data_path = csv_future.result()
+
+    dataviz_errors = _validate_dataviz(dataviz_result)
+    if dataviz_errors:
+        raise RuntimeError(f"Deterministic DataViz generation failed: {dataviz_errors}")
+
+    # 3. Build chart paths map (needs charts to be done)
+    dataviz_json = _extract_json(
+        dataviz_result.get("dataviz_output", {}).get("full_response", "")
+        if isinstance(dataviz_result.get("dataviz_output", {}), dict) else ""
+    )
+    chart_paths = _build_chart_paths_map(dataviz_json)
+
+    # 6. Build PPTX from section blueprints (needs chart paths)
     from config import PPTX_TEMPLATE_PATH
     pptx_path = str(output_dir / "report.pptx")
     template_path = PPTX_TEMPLATE_PATH if Path(PPTX_TEMPLATE_PATH).exists() else ""
@@ -1948,12 +2163,6 @@ def _run_section_artifact_writer(
     )
     report_path = pptx_path if Path(pptx_path).exists() else ""
     logger.info("Section-based PPTX built: %s", report_path)
-
-    # 7. Export filtered CSV
-    csv_tool = TOOL_REGISTRY["export_filtered_csv"]
-    csv_raw = csv_tool.invoke({})
-    csv_data = _extract_json(str(csv_raw))
-    data_path = _resolve_existing_path(str(csv_data.get("csv_path", "")).strip())
 
     payload = {
         "report_markdown_key": report_key,

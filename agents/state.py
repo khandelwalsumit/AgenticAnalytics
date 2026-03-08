@@ -118,6 +118,9 @@ class AnalyticsState(TypedDict):
     selected_agents: list[str]
     auto_approve_checkpoints: bool
 
+    # Session identity (propagated from app.py — avoids Chainlit context in threads)
+    thread_id: str
+
     # Fault injection / resilience (dev/test)
     fault_injection: dict[str, str]
     error_count: int

@@ -139,6 +139,8 @@ DEFAULT_MAX_TOKENS = int(os.getenv("DEFAULT_MAX_TOKENS", "8192"))
 ##########################################################################
 
 MAX_MULTITHREADING_WORKERS = int(os.getenv("MAX_MULTITHREADING_WORKERS", "8"))
+MAX_SUPERVISOR_MSGS = int(os.getenv("MAX_SUPERVISOR_MSGS", "6"))
+SUMMARIZE_THRESHOLD_CHARS = int(os.getenv("SUMMARIZE_THRESHOLD_CHARS", "40000"))
 
 
 

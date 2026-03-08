@@ -32,10 +32,13 @@ def _safe_thread_id(raw: str) -> str:
 
 def _get_thread_id(store: DataStore) -> str:
     """Resolve thread_id from Chainlit session when available."""
-    import chainlit as cl
-    thread_id = cl.user_session.get("thread_id")
-    if thread_id:
-        return _safe_thread_id(str(thread_id))
+    try:
+        import chainlit as cl
+        thread_id = cl.user_session.get("thread_id")
+        if thread_id:
+            return _safe_thread_id(str(thread_id))
+    except Exception:
+        pass
     return _safe_thread_id(store.session_id)
 
 

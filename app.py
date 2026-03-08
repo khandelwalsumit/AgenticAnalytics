@@ -573,7 +573,7 @@ async def on_message(message: cl.Message):
     user_text = message.content or "Proceed"
     log.info("User message: %s", user_text[:80])
     _apply_agent_selection(state, cl.user_session.get("selected_agents") or DEFAULT_SELECTED_AGENTS)
-
+    state["thread_id"] = thread_id
 
     config = {"configurable": {"thread_id": thread_id}}
     task_list: cl.TaskList | None = cl.user_session.get("task_list")

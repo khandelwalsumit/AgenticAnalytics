@@ -287,13 +287,15 @@ def score_quality(
 
 
 @tool
-def execute_chart_code(code: str, output_filename: str) -> str:
+def execute_chart_code(code: str, output_filename: str, output_dir: str = "") -> str:
     """Execute Python code to generate a chart image.
 
     Args:
         code: Python code using matplotlib to generate a chart.
               The variable ``output_path`` is pre-set to the target file path.
         output_filename: Filename for the chart image (e.g., 'friction_distribution.png').
+        output_dir: Optional pre-resolved output directory. When provided, skips
+                    Chainlit session lookup (safe for thread-pool contexts).
 
     Returns:
         JSON with the path to the saved chart image.
@@ -303,12 +305,15 @@ def execute_chart_code(code: str, output_filename: str) -> str:
     import matplotlib.pyplot as plt
     import numpy as np
 
-    import chainlit as cl
-    thread_id = str(cl.user_session.get("thread_id") or "unknown_thread")
-
-    safe_thread_id = "".join(ch if (ch.isalnum() or ch in ("-", "_")) else "_" for ch in thread_id)[:80]
     filename = Path(str(output_filename or "chart.png")).name
-    output_path = Path(DATA_CACHE_DIR) / safe_thread_id / filename
+    if output_dir:
+        chart_dir = Path(output_dir)
+    else:
+        import chainlit as cl
+        thread_id = str(cl.user_session.get("thread_id") or "unknown_thread")
+        safe_thread_id = "".join(ch if (ch.isalnum() or ch in ("-", "_")) else "_" for ch in thread_id)[:80]
+        chart_dir = Path(DATA_CACHE_DIR) / safe_thread_id
+    output_path = chart_dir / filename
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     exec_globals = {
