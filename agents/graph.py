@@ -218,6 +218,9 @@ def build_graph(
         new_tasks  = [t.model_dump() for t in structured.plan_tasks]
         existing   = state.get("plan_tasks", [])
         done_steps = [t for t in existing if t.get("status") == "done"]
+        # Deduplicate: remove new tasks whose agent already has a done step
+        done_agents = {t.get("agent") for t in done_steps}
+        new_tasks = [t for t in new_tasks if t.get("agent") not in done_agents]
         all_tasks  = done_steps + new_tasks
         all_lenses = {
             "digital_friction_agent",
@@ -301,9 +304,28 @@ def build_graph(
                     "or specify which ones (e.g. 'digital and operations')."
                 ),
             })
-            logger.info("data_analyst: dimension confirmation reply %r", str(user_reply)[:120])
-            base["analysis_scope_reply"] = str(user_reply).strip()
-            base["next_agent"] = "planner"
+            reply_text = str(user_reply).strip()
+            logger.info("data_analyst: dimension confirmation reply %r", reply_text[:120])
+
+            # Guard: check if the reply is actually a lens selection vs. an
+            # unrelated message (e.g. user correcting filters while data_analyst
+            # was still running). Lens-related replies mention lens keywords or
+            # are simple confirmations like "all", "yes", "run all".
+            _LENS_KEYWORDS = {
+                "all", "digital", "operations", "communication", "policy",
+                "run all", "run all lenses", "yes", "go ahead", "proceed",
+            }
+            reply_lower = reply_text.lower()
+            is_lens_reply = any(kw in reply_lower for kw in _LENS_KEYWORDS)
+
+            if is_lens_reply:
+                base["analysis_scope_reply"] = reply_text
+                base["next_agent"] = "planner"
+            else:
+                # Not a lens selection — likely a filter correction or other
+                # user intent. Route back to supervisor to handle it properly.
+                logger.info("data_analyst: reply doesn't match lens selection, routing to supervisor")
+                base["next_agent"] = "supervisor"
 
         _advance_plan("data_analyst", state, base)
         return base
@@ -1086,7 +1108,9 @@ def build_graph(
     # Final/meta nodes -> supervisor
     graph.add_edge("report_analyst",    "supervisor")
     graph.add_edge("planner",          "supervisor")
-    graph.add_edge("qna",             "supervisor")
+
+    # QnA ends the graph — next user message starts fresh via START -> supervisor
+    graph.add_edge("qna",              END)
 
     # Supervisor conditional routing
     def route_from_supervisor(state: AnalyticsState) -> str:

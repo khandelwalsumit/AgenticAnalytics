@@ -341,7 +341,7 @@ try:
         "formatting_output", "report_markdown_key", "report_file_path",
         "data_file_path", "markdown_file_path", "critique_feedback", "quality_score",
         "next_agent", "supervisor_decision", "analysis_complete",
-        "phase", "filters_applied", "themes_for_analysis",
+        "phase", "proposed_filters", "filters_applied", "themes_for_analysis",
         "analysis_objective",
         "error_count", "recoverable_error", "fault_injection",
     ]

@@ -44,6 +44,12 @@ class SupervisorOutput(BaseModel):
     response: str = Field(
         description="User-visible text for 'answer'; empty for plan/execute."
     )
+    proposed_filters: dict[str, Any] = Field(
+        default_factory=dict,
+        description="When decision='plan', map column names to proposed filter values "
+                    "based on the user's request and available dataset filters. "
+                    "Empty for 'answer' and 'execute'.",
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -109,6 +109,7 @@ class AnalyticsState(TypedDict):
     phase: str  # "analysis" | "qa"
 
     # Supervisor decision context
+    proposed_filters: dict[str, Any]  # supervisor-proposed filters awaiting user confirmation
     filters_applied: dict[str, Any]
     themes_for_analysis: list[str]
     analysis_objective: str

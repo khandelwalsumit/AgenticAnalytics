@@ -1187,21 +1187,40 @@ def _apply_supervisor(s: SupervisorOutput, state: AnalyticsState, updates: dict)
             suppress_model_response = True
     elif s.decision == "plan":
         updates["next_agent"] = target_agent
+        # Store confirmed filters and analysis objective for the data_analyst
+        if s.proposed_filters:
+            updates["proposed_filters"] = s.proposed_filters
+        if s.response:
+            updates["analysis_objective"] = s.response
         # Bootstrap preliminary tasks if no plan exists yet
         if not state.get("plan_tasks"):
             updates["plan_tasks"] = _PRELIMINARY_PLAN_TASKS()
             updates["plan_steps_total"] = len(updates["plan_tasks"])
     else:
-        # answer — route to __end__, or qna if report exists
-        if state.get("markdown_file_path") and s.decision == "answer":
-            updates["next_agent"] = "qna"
+        # answer — route to qna for genuine user follow-up questions when
+        # the report exists. The supervisor only sees user questions when
+        # this is the FIRST node in a new graph invocation (START -> supervisor).
+        # If we got here via report_analyst -> supervisor (pipeline finishing),
+        # the last message won't be a user question — just end the graph.
+        if (
+            state.get("markdown_file_path")
+            and s.decision == "answer"
+            and state.get("analysis_complete")
+        ):
+            from langchain_core.messages import HumanMessage as _HM
+            msgs = state.get("messages", [])
+            # Route to QnA only if the very last message is from the user
+            if msgs and isinstance(msgs[-1], _HM):
+                updates["next_agent"] = "qna"
+            else:
+                updates["next_agent"] = target_agent
         else:
             updates["next_agent"] = target_agent
 
     _enforce_analysis_start_guard(state, updates)
 
-    # Only emit supervisor chat text for direct user answers.
-    if s.response and not suppress_model_response and s.decision == "answer":
+    # Emit supervisor chat text for answers and plan acknowledgments.
+    if s.response and not suppress_model_response and s.decision in ("answer", "plan"):
         updates["messages"] = [AIMessage(content=s.response)]
 
     logger.info("Supervisor (structured): %s -> %s (confidence=%d)", s.decision, updates.get("next_agent", "?"), s.confidence)

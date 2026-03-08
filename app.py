@@ -374,6 +374,7 @@ def make_initial_state() -> dict[str, Any]:
         "next_agent": "", "supervisor_decision": "",
         "analysis_complete": False, "phase": "analysis",
         "downloads_sent": False,
+        "proposed_filters": {},
         "filters_applied": {}, "themes_for_analysis": [],
         "analysis_objective": "",
         "error_count": 0, "recoverable_error": "",
