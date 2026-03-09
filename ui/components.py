@@ -38,11 +38,74 @@ def _sub_title(a: dict) -> str:
     return f"  -> {a['title']}" + (f"  -  {detail}" if detail else "")
 
 
+def _merge_status(statuses: list[str]) -> str:
+    """Return one combined status from multiple task statuses."""
+    values = {str(s or "").strip().lower() for s in statuses}
+    if "failed" in values:
+        return "failed"
+    if "blocked" in values:
+        return "blocked"
+    if "in_progress" in values:
+        return "in_progress"
+    if "done" in values and (values & {"ready", "todo"}):
+        return "in_progress"
+    if values == {"done"}:
+        return "done"
+    if values & {"ready", "todo"}:
+        return "ready"
+    return "ready"
+
+
+def _collapse_report_tasks(tasks: list[dict]) -> list[dict]:
+    """Collapse report_drafts + artifact_writer into one UI-facing task."""
+    if not tasks:
+        return tasks
+
+    report_agents = {"report_drafts", "artifact_writer"}
+    report_rows = [t for t in tasks if t.get("agent") in report_agents]
+    if not report_rows:
+        return tasks
+
+    merged_sub_agents: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for row in report_rows:
+        for sub in row.get("sub_agents", []) or []:
+            if not isinstance(sub, dict):
+                continue
+            sub_id = str(sub.get("id", ""))
+            if sub_id and sub_id in seen_ids:
+                continue
+            if sub_id:
+                seen_ids.add(sub_id)
+            merged_sub_agents.append(dict(sub))
+
+    merged_row = {
+        "id": "report_generation",
+        "title": "Generate report",
+        "agent": "report_generation",
+        "status": _merge_status([str(r.get("status", "ready")) for r in report_rows]),
+        "sub_agents": merged_sub_agents,
+    }
+
+    first_report_idx = next((i for i, t in enumerate(tasks) if t.get("agent") in report_agents), len(tasks))
+    collapsed: list[dict] = []
+    inserted = False
+    for idx, task in enumerate(tasks):
+        if idx == first_report_idx and not inserted:
+            collapsed.append(merged_row)
+            inserted = True
+        if task.get("agent") in report_agents:
+            continue
+        collapsed.append(task)
+    return collapsed
+
+
 def _flatten_task_entries(tasks: list[dict]) -> list[dict]:
     """Expand parent tasks and sub-agents into a single ordered list.
 
     Sub-agent rows are placed immediately after their parent task.
     """
+    tasks = _collapse_report_tasks(tasks)
     rows: list[dict] = []
     for t in tasks:
         rows.append({

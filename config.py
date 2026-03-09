@@ -43,6 +43,10 @@ PPTX_TEMPLATE_PATH = os.getenv("PPTX_TEMPLATE_PATH", str(DATA_INPUT_DIR / "templ
 
 LLM_ANALYSIS_FOCUS: list[str] = ["exact_actionable_problem"]
 
+MIN_BUCKET_SIZE = 5     # Buckets smaller than this get merged into "Other"
+MAX_BUCKET_SIZE = 200   # Buckets larger than this get sub-bucketed by next column
+TAIL_BUCKET_ENABLED = True
+
 GROUP_BY_COLUMNS: list[str] = [
     "call_reason",        # L1 — broadest grouping
     "broad_theme_l3",     # L3 — mid-level theme
@@ -153,10 +157,7 @@ TOP_N_DEFAULT = 10  # Default for top-N distributions
 IMPACT_WEIGHT = 0.6  # Weight for impact in composite score
 EASE_WEIGHT = 0.4  # Weight for ease in composite score
 
-MIN_BUCKET_SIZE = 5     # Buckets smaller than this get merged into "Other"
-MAX_BUCKET_SIZE = 200   # Buckets larger than this get sub-bucketed by next column
 
-TAIL_BUCKET_ENABLED = True
 
 DATA_FILTER_COLUMNS: list[str] = list(LLM_ANALYSIS_CONTEXT.keys())
 
