@@ -235,9 +235,10 @@ def _collect_output_files(thread_id: str) -> list[str]:
         return []
 
     preferred_order = [
-        output_dir / "complete_analysis.md",
+        output_dir / "report.docx",
         output_dir / "report.pptx",
         output_dir / "filtered_data.csv",
+        output_dir / "complete_analysis.md",
     ]
     files: list[str] = [str(p.resolve()) for p in preferred_order if p.exists() and p.is_file()]
 

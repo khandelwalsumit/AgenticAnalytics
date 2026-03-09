@@ -23,7 +23,7 @@ from tools.data_tools import (
     sample_data,
 )
 from tools.metrics import MetricsEngine
-from tools.report_tools import REPORT_TOOLS, export_filtered_csv, export_to_pptx, generate_markdown_report
+from tools.report_tools import REPORT_TOOLS, export_filtered_csv, export_to_docx, export_to_pptx, generate_markdown_report
 
 # ------------------------------------------------------------------
 # Shared references — set by the graph at session init
@@ -347,6 +347,7 @@ TOOL_REGISTRY: dict[str, Any] = {
     "get_findings_summary": get_findings_summary,
     "generate_markdown_report": generate_markdown_report,
     "export_to_pptx": export_to_pptx,
+    "export_to_docx": export_to_docx,
     "export_filtered_csv": export_filtered_csv,
     "validate_findings": validate_findings,
     "score_quality": score_quality,

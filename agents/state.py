@@ -91,6 +91,7 @@ class AnalyticsState(TypedDict):
     # Report — metadata only (full text in DataStore)
     report_markdown_key: str
     report_file_path: str
+    docx_file_path: str
     data_file_path: str
     markdown_file_path: str
 

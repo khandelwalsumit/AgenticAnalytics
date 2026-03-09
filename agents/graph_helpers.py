@@ -2126,17 +2126,24 @@ def _run_section_artifact_writer(
     def _generate_charts() -> dict[str, Any]:
         return _build_deterministic_dataviz_output(state)
 
-    def _export_csv() -> tuple[str, str]:
+    def _export_csv() -> str:
         csv_tool = TOOL_REGISTRY["export_filtered_csv"]
         csv_raw = csv_tool.invoke({"output_dir": _csv_output_dir})
         csv_data = _extract_json(str(csv_raw))
         return _resolve_existing_path(str(csv_data.get("csv_path", "")).strip())
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+    def _export_docx() -> str:
+        from utils.docx_export import markdown_to_docx as _md_to_docx
+        docx_path = str(Path(_csv_output_dir) / "report.docx")
+        return _md_to_docx(narrative_markdown, docx_path)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
         chart_future = pool.submit(_generate_charts)
         csv_future = pool.submit(_export_csv)
+        docx_future = pool.submit(_export_docx)
         dataviz_result = chart_future.result()
         data_path = csv_future.result()
+        docx_path = docx_future.result()
 
     dataviz_errors = _validate_dataviz(dataviz_result)
     if dataviz_errors:
@@ -2168,6 +2175,7 @@ def _run_section_artifact_writer(
         "report_markdown_key": report_key,
         "markdown_file_path": markdown_path,
         "report_file_path": report_path,
+        "docx_file_path": docx_path,
         "data_file_path": data_path,
     }
     payload_json = json.dumps(payload, indent=2)
@@ -2176,13 +2184,14 @@ def _run_section_artifact_writer(
         "messages": [AIMessage(content=payload_json)],
         "reasoning": [{
             "step_name": "Artifact Writer",
-            "step_text": "Built PPTX from section blueprints, persisted narrative markdown, and exported filtered CSV.",
+            "step_text": "Built PPTX from section blueprints, generated Word report, persisted narrative markdown, and exported filtered CSV.",
             "agent": "artifact_writer_node",
         }],
         "dataviz_output": dataviz_result.get("dataviz_output", {}),
         "report_markdown_key": report_key,
         "markdown_file_path": markdown_path,
         "report_file_path": report_path,
+        "docx_file_path": docx_path,
         "data_file_path": data_path,
     }
 

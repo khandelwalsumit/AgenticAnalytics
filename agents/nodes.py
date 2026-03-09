@@ -981,6 +981,11 @@ def _extract_formatting_state(
             updates["markdown_file_path"] = data["markdown_path"]
             logger.info("Formatting Agent: extracted markdown_file_path=%s", data["markdown_path"])
 
+        # export_to_docx returns {"docx_path": "..."}
+        if "docx_path" in data:
+            updates["docx_file_path"] = data["docx_path"]
+            logger.info("Formatting Agent: extracted docx_file_path=%s", data["docx_path"])
+
 
 def _extract_data_analyst_state(
     state: AnalyticsState, updates: dict[str, Any]

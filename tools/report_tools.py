@@ -9,6 +9,7 @@ from pathlib import Path
 from langchain_core.tools import tool
 
 from core.data_store import DataStore
+from utils.docx_export import markdown_to_docx
 from utils.pptx_export import generate_pptx_from_slides, markdown_to_pptx
 
 _data_store: DataStore | None = None
@@ -210,4 +211,33 @@ def export_filtered_csv(output_dir: str = "") -> str:
     })
 
 
-REPORT_TOOLS = [generate_markdown_report, export_to_pptx, export_filtered_csv]
+@tool
+def export_to_docx(
+    report_key: str = "report_markdown",
+    output_dir: str = "",
+) -> str:
+    """Export the markdown report as a professionally formatted Word document.
+
+    Converts the stored markdown report into a .docx file with branded headings,
+    formatted tables, bullet lists, and consistent typography.
+
+    Args:
+        report_key: DataStore key for the markdown report.
+        output_dir: Directory to save the .docx file. Uses default data dir if empty.
+
+    Returns:
+        JSON with the path to the generated .docx file.
+    """
+    store = _get_store()
+    _tmp_dir, default_out_dir, _thread_id = _get_artifact_dirs(store)
+
+    markdown_content = store.get_text(report_key)
+    out_dir = Path(output_dir) if output_dir else default_out_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    output_path = out_dir / "report.docx"
+
+    result_path = markdown_to_docx(markdown_content, str(output_path))
+    return json.dumps({"docx_path": result_path})
+
+
+REPORT_TOOLS = [generate_markdown_report, export_to_pptx, export_to_docx, export_filtered_csv]

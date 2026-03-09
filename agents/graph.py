@@ -1053,6 +1053,7 @@ def build_graph(
 
         Writes:
             report_file_path       - PPTX path on disk
+            docx_file_path         - Word (.docx) path on disk
             markdown_file_path     - .md path on disk
             data_file_path         - CSV path on disk
             analysis_complete      - True (pipeline done)
@@ -1085,14 +1086,15 @@ def build_graph(
         if artifact_errors:
             raise RuntimeError(f"artifact_writer failed validation: {artifact_errors}")
         logger.info(
-            "Artifact writer: created | report=%r markdown=%r data=%r",
+            "Artifact writer: created | report=%r docx=%r markdown=%r data=%r",
             artifact_result.get("report_file_path", ""),
+            artifact_result.get("docx_file_path", ""),
             artifact_result.get("markdown_file_path", ""),
             artifact_result.get("data_file_path", ""),
         )
 
         _set_sub_agent_status(sub_agents, "artifact_writer_node", status="done",
-                              detail="Created PPT, data and md files.")
+                              detail="Created PPTX, Word, CSV and markdown files.")
         tasks = await _set_task_sub_agents_and_emit(
             tasks, agent_name="artifact_writer", sub_agents=sub_agents, task_status="done",
         )

@@ -6,7 +6,8 @@
       "Read(//c/Users/SK92484/Documents/Projects/AI Playground/**)",
       "Bash(PYTHONPATH=. python -c \":*)",
       "Bash(python:*)",
-      "Bash(uv run:*)"
+      "Bash(uv run:*)",
+      "Bash(.venv/Scripts/python.exe:*)"
     ]
   }
 }
