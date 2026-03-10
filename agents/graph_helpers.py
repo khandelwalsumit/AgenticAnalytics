@@ -269,9 +269,17 @@ def _summarize_lens_buckets(
             bucket_name = raw_buckets[bk].get("bucket_name", bk)
 
         if bpath and _P(bpath).exists():
-            raw_content = _P(bpath).read_text(encoding="utf-8")
-            summary = _extract_bucket_summary(bk, bucket_name, raw_content)
-            parts.append(summary)
+            raw_content = _P(bpath).read_text(encoding="utf-8").strip()
+            if not raw_content:
+                logger.warning("Empty friction output file for %s / %s: %s", lens_id, bk, bpath)
+                parts.append(f"### {bucket_name}\n(No output — agent produced empty response)\n")
+                continue
+            try:
+                summary = _extract_bucket_summary(bk, bucket_name, raw_content)
+                parts.append(summary)
+            except ValueError as exc:
+                logger.error("Failed to parse friction output for %s / %s: %s", lens_id, bk, exc)
+                parts.append(f"### {bucket_name}\n(Parse error — partial output skipped)\n")
         else:
             parts.append(f"### {bucket_name}\n(No output)\n")
 
