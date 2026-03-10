@@ -1919,25 +1919,49 @@ def _build_fixed_deck_blueprint(
     for i, f in enumerate(sorted_findings, 1):
         finding_text = _s(f.get("finding", ""), f"Finding {i}")
         impact = _f(f.get("impact_score", 0))
-        driver = _s(f.get("dominant_driver", ""), "unknown")
         action = _s(f.get("recommended_action", ""), "To be determined")
         cc = _n(f.get("call_count", 0))
         cp = _f(f.get("call_percentage", 0))
+        # Shorten name to ~12 words for card title
+        words = finding_text.split()
+        short_name = " ".join(words[:12]) + ("..." if len(words) > 12 else "")
+        # Extract owner from [Bracket] prefix in action, or use dominant_driver
+        owner = _s(f.get("dominant_driver", ""), "unknown").replace("_", " ").title()
+        if action.startswith("["):
+            bracket_end = action.find("]")
+            if bracket_end > 0:
+                owner = action[1:bracket_end].strip()
+                action = action[bracket_end + 1:].strip()
         pain_cards.append({
-            "name": finding_text,
+            "name": f"{i}. {short_name}",
             "calls": cc,
             "pct": f"{cp}%" if cp > 0 else "",
             "impact": impact,
             "priority": impact,
             "issue": finding_text,
             "fix": action[:200],
-            "owner": driver.replace("_", " ").title(),
+            "owner": owner,
         })
 
-    # Build subtitle lines for executive summary
+    # Build subtitle lines for executive summary — verbose hook + 3 key pointers
     subtitle_lines: list[dict[str, Any]] = []
-    if total_calls > 0:
-        subtitle_lines.append({"text": f"Analysis of {total_calls:,} friction-related customer calls across {total_themes} themes.", "bold_part": None})
+    # Hook line: bold narrative
+    if exec_narrative and exec_narrative != "Friction analysis complete.":
+        subtitle_lines.append({"text": exec_narrative, "bold_part": None})
+    elif total_calls > 0:
+        subtitle_lines.append({"text": f"Analysis of {total_calls:,} friction-related customer calls across {total_themes} themes reveals significant self-service gaps and preventable call drivers.", "bold_part": None})
+    # 3 key pointers from top themes
+    for pi, t in enumerate(themes[:3]):
+        if not isinstance(t, dict):
+            continue
+        t_name = _theme_name(t)
+        t_calls = _n(t.get("call_count", 0))
+        t_pct = _f(t.get("call_percentage", 0))
+        t_impact = _f(t.get("impact_score", 0))
+        pct_str = f"{t_pct}%" if t_pct > 0 else ""
+        pointer = f"{t_name}: {t_calls:,} calls ({pct_str}) — Impact {t_impact}/10"
+        subtitle_lines.append({"text": f"  {pi + 1}. {pointer}", "bold_part": t_name})
+    # Preventability line
     if preventability > 0:
         pct_text = f"{preventability:.0%}"
         subtitle_lines.append({"text": f"{pct_text} of total volume is deflectable with easy implementations.", "bold_part": pct_text})
@@ -2026,47 +2050,56 @@ def _build_fixed_deck_blueprint(
             "theme": theme_name_s,
         })
 
-    # Build recommendations grouped by owning team
+    # Build recommendations grouped by owning team — use all_drivers with proper dimension
     driver_groups: dict[str, list[dict[str, Any]]] = {
         "digital": [],
         "operations": [],
         "communication": [],
         "policy": [],
     }
-    for f in findings[:30]:
-        if not isinstance(f, dict):
+    # Primary: use theme all_drivers grouped by their actual dimension
+    for t in themes:
+        if not isinstance(t, dict):
             continue
-        driver = _s(f.get("dominant_driver", "digital")).lower()
-        if driver not in driver_groups:
-            driver = "digital"
-        action = _s(f.get("recommended_action", ""))
-        if action:
-            driver_groups[driver].append(f)
-    # Fallback: use theme all_drivers grouped by dimension, then quick_wins
-    if not any(driver_groups.values()):
-        for t in themes:
-            if not isinstance(t, dict):
+        t_drivers = t.get("all_drivers", []) or []
+        for d in t_drivers:
+            if not isinstance(d, dict):
                 continue
-            t_drivers = t.get("all_drivers", []) or []
-            for d in t_drivers:
-                if not isinstance(d, dict):
-                    continue
-                dim = _s(d.get("dimension", "digital")).lower()
-                if dim not in driver_groups:
-                    dim = "digital"
-                sol = _s(d.get("recommended_solution", ""))
-                if sol:
-                    driver_groups[dim].append({
-                        "recommended_action": sol,
-                        "call_count": _n(d.get("call_count", 0)),
-                    })
-            # Also add quick_wins under dominant_driver if no all_drivers
-            if not t_drivers:
-                driver = _s(t.get("dominant_driver", "digital")).lower()
-                if driver not in driver_groups:
-                    driver = "digital"
-                for qw in (t.get("quick_wins", []) or [])[:2]:
-                    driver_groups[driver].append({"recommended_action": str(qw)})
+            dim = _s(d.get("dimension", "digital")).lower()
+            if dim not in driver_groups:
+                dim = "digital"
+            sol = _s(d.get("recommended_solution", ""))
+            if sol:
+                driver_groups[dim].append({
+                    "recommended_action": sol,
+                    "call_count": _n(d.get("call_count", 0)),
+                })
+        # Also add quick_wins under dominant_driver if no all_drivers
+        if not t_drivers:
+            driver = _s(t.get("dominant_driver", "digital")).lower()
+            if driver not in driver_groups:
+                driver = "digital"
+            for qw in (t.get("quick_wins", []) or [])[:2]:
+                driver_groups[driver].append({"recommended_action": str(qw)})
+    # Fallback: use findings grouped by dominant_driver
+    if not any(driver_groups.values()):
+        for f in findings[:30]:
+            if not isinstance(f, dict):
+                continue
+            action = _s(f.get("recommended_action", ""))
+            if not action:
+                continue
+            # Parse [Dimension] prefix from action text if present
+            dim = _s(f.get("dominant_driver", "digital")).lower()
+            if action.startswith("["):
+                bracket_end = action.find("]")
+                if bracket_end > 0:
+                    parsed_dim = action[1:bracket_end].strip().lower().replace(" / ux", "").replace(" ", "_")
+                    if parsed_dim in driver_groups:
+                        dim = parsed_dim
+            if dim not in driver_groups:
+                dim = "digital"
+            driver_groups[dim].append(f)
 
     rec_dimensions: list[dict[str, Any]] = []
     dim_color_map = {
@@ -2082,6 +2115,11 @@ def _build_fixed_deck_blueprint(
         dim_actions: list[dict[str, Any]] = []
         for item in items[:2]:
             action_text = _s(item.get("recommended_action", ""), "TBD")[:200]
+            # Strip [Dimension] prefix — dimension is already shown by the card
+            if action_text.startswith("["):
+                bracket_end = action_text.find("]")
+                if bracket_end > 0:
+                    action_text = action_text[bracket_end + 1:].strip()
             cc = _n(item.get("call_count", 0))
             detail = f"Resolves {cc} calls" if cc > 0 else ""
             dim_actions.append({"title": action_text, "detail": detail})
@@ -2198,28 +2236,39 @@ def _build_fixed_deck_blueprint(
                 dim = _s(t.get("dominant_driver", "Digital")).replace("_", " ").title()
                 solutions.append({"action": str(qw)[:200], "dimension": dim})
 
-        # Build driver table rows (simplified: Driver + Calls)
+        # Build driver table rows — always show call count (never %)
         simple_driver_rows: list[list[Any]] = []
         for d in (drivers if isinstance(drivers, list) else [])[:8]:
             if isinstance(d, str):
-                simple_driver_rows.append([d[:50], "?"])
+                simple_driver_rows.append([d[:50], 0])
                 continue
             if not isinstance(d, dict):
                 continue
             d_calls = _n(d.get("call_count", 0))
-            d_pct = _f(d.get("contribution_pct", 0))
             simple_driver_rows.append([
                 _driver_text(d)[:50] or "?",
-                d_calls if d_calls > 0 else f"{d_pct}%",
+                d_calls,
             ])
 
-        # Core issue: prefer top driver description, then contributing_factors, then fallback
-        top_driver_desc = ""
-        if isinstance(drivers, list) and drivers:
-            top_driver_desc = _driver_text(drivers[0])
-        factors = t.get("contributing_factors", [])
-        factors_text = "; ".join(_driver_text(cf)[:80] for cf in (factors if isinstance(factors, list) else [])[:3])
-        core_issue = top_driver_desc or factors_text or f"{theme_name} friction analysis"
+        # Core issue: bullet points summarizing top drivers (not just one line)
+        core_issue_points: list[str] = []
+        for d in (drivers if isinstance(drivers, list) else [])[:3]:
+            if isinstance(d, dict):
+                desc = _driver_text(d)
+                d_calls = _n(d.get("call_count", 0))
+                if desc:
+                    core_issue_points.append(f"{desc} ({d_calls} calls)" if d_calls > 0 else desc)
+            elif isinstance(d, str) and d.strip():
+                core_issue_points.append(d.strip())
+        if not core_issue_points:
+            factors = t.get("contributing_factors", [])
+            for cf in (factors if isinstance(factors, list) else [])[:3]:
+                txt = _driver_text(cf)[:80]
+                if txt:
+                    core_issue_points.append(txt)
+        if not core_issue_points:
+            core_issue_points = [f"{theme_name} friction analysis"]
+        core_issue = "\n".join(f"• {pt}" for pt in core_issue_points)
         primary_driver = _s(t.get("dominant_driver", ""), "").replace("_", " ").title()
 
         theme_slides.append({

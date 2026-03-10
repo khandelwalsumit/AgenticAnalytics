@@ -307,18 +307,18 @@ def _render_pain_points(prs, slide_data, layout_idx):
         # Card background
         _rect(slide, card_x + ACCENT_BAR_W, CARD_Y, CARD_W - ACCENT_BAR_W, CARD_H, BG_LIGHT)
 
-        # Card title: "Theme Name (X calls)"
+        # Card title: "1. Theme Name (X calls)" — 10pt bold blue to avoid overflow
         name = _strip_md(str(card.get("name", f"Pain Point {i+1}")))
         calls = card.get("calls", 0)
-        box = slide.shapes.add_textbox(Inches(inner_x), Inches(1.05), Inches(inner_w), Inches(0.35))
+        box = slide.shapes.add_textbox(Inches(inner_x), Inches(1.05), Inches(inner_w), Inches(0.40))
         tf = box.text_frame
         tf.word_wrap = True
         r1 = tf.paragraphs[0].add_run()
         r1.text = name
-        _apply(r1, _style(12, bold=True, color=NAVY))
+        _apply(r1, _style(10, bold=True, color=NAVY))
         r2 = tf.paragraphs[0].add_run()
         r2.text = f" ({calls} calls)" if calls else ""
-        _apply(r2, _style(12, bold=False, color=NAVY))
+        _apply(r2, _style(10, bold=False, color=NAVY))
 
         # Stats line
         impact = card.get("impact", card.get("impact_score", 0))
@@ -564,11 +564,23 @@ def _render_theme_card(prs, slide_data, layout_idx, chart_paths):
 
     # LEFT COLUMN (5.3" wide)
     if left_col:
-        # CORE ISSUE
+        # CORE ISSUE (supports bullet points via newlines)
         _tb(slide, 0.5, 0.95, 5.3, 0.25, "CORE ISSUE", H3_LABEL)
-        core_issue = _strip_md(str(left_col.get("core_issue", "")))
+        core_issue = str(left_col.get("core_issue", ""))
         if core_issue:
-            _tb(slide, 0.5, 1.22, 5.3, 0.65, core_issue, BODY_TEXT)
+            lines = [_strip_md(ln.strip()) for ln in core_issue.split("\n") if ln.strip()]
+            if len(lines) > 1:
+                box = slide.shapes.add_textbox(Inches(0.5), Inches(1.22), Inches(5.3), Inches(0.65))
+                tf = box.text_frame
+                tf.word_wrap = True
+                for li, line in enumerate(lines[:4]):
+                    p = tf.paragraphs[0] if li == 0 else tf.add_paragraph()
+                    p.space_after = Pt(2)
+                    r = p.add_run()
+                    r.text = line
+                    _apply(r, BODY_TEXT)
+            else:
+                _tb(slide, 0.5, 1.22, 5.3, 0.65, _strip_md(core_issue), BODY_TEXT)
 
         # PRIMARY DRIVER
         _tb(slide, 0.5, 1.95, 5.3, 0.25, "PRIMARY DRIVER", H3_LABEL)
