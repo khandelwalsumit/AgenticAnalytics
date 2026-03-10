@@ -34,11 +34,11 @@ logger = logging.getLogger("agenticanalytics.pptx_builder")
 # Global constants — from slide_improvement_plan.md
 # ═══════════════════════════════════════════════════════════════════════════
 
-SLIDE_W = 10.0
-SLIDE_H = 5.625
+SLIDE_W = 13.33
+SLIDE_H = 7.5
 MARGIN_L = 0.5
 MARGIN_R = 0.5
-CONTENT_W = 9.0  # 10 - 0.5 - 0.5
+CONTENT_W = 12.33  # 13.33 - 0.5 - 0.5
 
 # -- Color palette --
 NAVY        = RGBColor(0x00, 0x3B, 0x70)

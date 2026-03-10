@@ -41,97 +41,99 @@ _TEAM_LABELS = {
 
 
 def _extract_bucket_summary(bucket_key: str, bucket_name: str, raw_md: str) -> str:
-    """Parse a single bucket's raw markdown output into a compact structured summary.
+    """Extract structured summary from a friction agent's JSON output.
 
-    Extracts:
-      - Key issues / themes
-      - Call volume indicators
-      - Solutions broken down by responsible team
+    Friction agents output JSON in code fences with: top_drivers, findings,
+    ease_score, impact_score, priority_score. This function parses that JSON
+    and formats it as markdown for the synthesizer.
 
-    The same friction (e.g. "autopay notification failure") may appear with
-    different solutions per team (Digital: in-app alert; Communication: SMS
-    reminder). Both are preserved so each team can independently evaluate.
+    Fails loudly if the expected JSON structure is missing so broken agents
+    are immediately visible.
     """
     if not raw_md or not raw_md.strip():
-        return f"### {bucket_name}\n(No output)\n"
+        raise ValueError(
+            f"[_extract_bucket_summary] Empty output for bucket '{bucket_name}' "
+            f"(key={bucket_key}). The friction agent produced no response."
+        )
 
-    lines = raw_md.strip().splitlines()
-    issues: list[str] = []
-    solutions_by_team: dict[str, list[str]] = {}
-    call_volume_lines: list[str] = []
-    current_section = ""
+    data = _extract_json(raw_md)
 
-    for line in lines:
-        stripped = line.strip()
-        lower = stripped.lower()
-
-        # Detect section headers
-        if stripped.startswith("#"):
-            header_text = stripped.lstrip("#").strip().lower()
-            if any(kw in header_text for kw in ("issue", "finding", "friction", "problem", "pain", "theme", "root cause")):
-                current_section = "issues"
-            elif any(kw in header_text for kw in ("solution", "recommendation", "action", "fix", "remediation")):
-                current_section = "solutions"
-            elif any(kw in header_text for kw in ("volume", "call", "impact", "metric", "stat")):
-                current_section = "volume"
-            else:
-                current_section = ""
-            continue
-
-        if not stripped or stripped == "---":
-            continue
-
-        # Extract call volume indicators from anywhere
-        if any(kw in lower for kw in ("call", "volume", "row", "record", "instance", "occurrence")):
-            # Look for numbers
-            nums = re.findall(r'\d[\d,]*', stripped)
-            if nums:
-                call_volume_lines.append(stripped.lstrip("- ").strip()[:120])
-
-        # Extract issues
-        if current_section == "issues" and stripped.startswith(("-", "*", "•")):
-            issue_text = stripped.lstrip("-*• ").strip()
-            if issue_text and len(issues) < 8:
-                issues.append(issue_text[:150])
-
-        # Extract solutions — tag by team if mentioned
-        if current_section == "solutions" and stripped.startswith(("-", "*", "•")):
-            sol_text = stripped.lstrip("-*• ").strip()
-            if sol_text:
-                assigned_team = _detect_team_from_text(sol_text)
-                solutions_by_team.setdefault(assigned_team, [])
-                if len(solutions_by_team[assigned_team]) < 5:
-                    solutions_by_team[assigned_team].append(sol_text[:180])
-
-    # Fallback: if structured parsing found nothing, extract bullet points as issues
-    if not issues:
-        for line in lines:
-            stripped = line.strip()
-            if stripped.startswith(("-", "*", "•")) and len(stripped) > 10:
-                issues.append(stripped.lstrip("-*• ").strip()[:150])
-                if len(issues) >= 5:
+    # Handle array responses (some agents wrap output in a list)
+    if not data:
+        text = raw_md.strip()
+        if "```" in text:
+            for part in text.split("```")[1::2]:
+                part = part.strip()
+                if part.startswith("json"):
+                    part = part[4:].strip()
+                try:
+                    parsed = json.loads(part)
+                    if isinstance(parsed, list) and parsed:
+                        data = parsed[0] if isinstance(parsed[0], dict) else {}
+                    elif isinstance(parsed, dict):
+                        data = parsed
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if data:
                     break
 
-    # Build compact summary
+    if not data:
+        raise ValueError(
+            f"[_extract_bucket_summary] Could not parse JSON from friction agent "
+            f"output for bucket '{bucket_name}' (key={bucket_key}). "
+            f"Raw output starts with: {raw_md[:300]!r}"
+        )
+
+    # Required fields — fail if missing so we know which agent is broken
+    for required_key in ("top_drivers", "findings"):
+        if required_key not in data:
+            raise ValueError(
+                f"[_extract_bucket_summary] Missing required key '{required_key}' "
+                f"in friction output for bucket '{bucket_name}'. "
+                f"Got keys: {list(data.keys())}"
+            )
+
     parts = [f"### {bucket_name}"]
 
-    if call_volume_lines:
-        parts.append(f"**Volume**: {'; '.join(call_volume_lines[:3])}")
+    # Volume
+    call_count = data["call_count"]
+    call_pct = data["call_percentage"]
+    total_calls = data.get("total_dataset_calls", call_count)
+    parts.append(f"**Volume**: {call_count} calls ({call_pct:.1f}% of {total_calls} total)")
 
-    if issues:
-        parts.append("**Key Issues**:")
-        for issue in issues[:5]:
-            parts.append(f"  - {issue}")
+    # Scores
+    ease = data["ease_score"]
+    impact = data["impact_score"]
+    priority = data["priority_score"]
+    parts.append(f"**Scores**: Impact={impact}/10 | Ease={ease}/10 | Priority={priority}/10")
 
-    if solutions_by_team:
-        parts.append("**Solutions by Team**:")
-        for team_key, team_sols in solutions_by_team.items():
-            team_label = _TEAM_LABELS.get(team_key, team_key.replace("_", " ").title())
-            for sol in team_sols[:3]:
-                parts.append(f"  - [{team_label}] {sol}")
-    elif issues:
-        # No explicit solutions found — note it for synthesizer
-        parts.append("**Solutions**: (to be synthesized from issues)")
+    # Top drivers
+    for d in data["top_drivers"]:
+        parts.append(
+            f"  - [{d['type']}] {d['driver']} — "
+            f"{d['call_count']} calls ({d['contribution_pct']:.1f}%) "
+            f"→ {d['recommended_solution'][:150]}"
+        )
+
+    # Findings with scores
+    parts.append("**Findings**:")
+    for f in data["findings"]:
+        finding_text = f["finding"]
+        if not finding_text:
+            continue
+        preventable = f.get("preventable_call", f.get("preventable", False))
+        parts.append(
+            f"  - (impact={f['impact_score']}, ease={f['ease_score']}, "
+            f"conf={f['confidence']}, preventable={'yes' if preventable else 'no'}) "
+            f"{finding_text[:200]}"
+        )
+        action = (f.get("recommended_action", "")
+                  or f.get("recommended_product_fix", "")
+                  or f.get("recommended_process_fix", ""))
+        if action:
+            team = _detect_team_from_text(action)
+            team_label = _TEAM_LABELS.get(team, team.title())
+            parts.append(f"    → [{team_label}] {action[:180]}")
 
     return "\n".join(parts) + "\n"
 
