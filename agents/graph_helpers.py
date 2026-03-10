@@ -1843,6 +1843,22 @@ def _build_fixed_deck_blueprint(
             return f"{vol}% volume"
         return "See impact score"
 
+    def _theme_name(t: dict[str, Any], fallback: str = "Unnamed Theme") -> str:
+        """Extract theme name with multiple fallbacks."""
+        name = _s(t.get("theme", "")) or _s(t.get("theme_name", "")) or _s(t.get("bucket_name", ""))
+        if not name:
+            # Derive from top driver description
+            drivers = t.get("all_drivers", []) or []
+            if drivers and isinstance(drivers[0], dict):
+                name = _s(drivers[0].get("driver", ""))[:60]
+        return name or fallback
+
+    def _driver_text(d: Any) -> str:
+        """Extract driver description — handles dict or string."""
+        if isinstance(d, dict):
+            return _s(d.get("driver", ""))
+        return _s(d)
+
     total_calls = _n(summary.get("total_calls_analyzed", 0))
     total_themes = _n(summary.get("total_themes", len(themes)))
     exec_narrative = _s(
@@ -1851,14 +1867,20 @@ def _build_fixed_deck_blueprint(
     )
     preventability = _f(summary.get("overall_preventability", 0.0))
 
-    # Collect quick wins across all themes
+    # Collect quick wins across all themes (prefer quick_wins, fallback to driver solutions)
     all_quick_wins: list[str] = []
     for t in themes:
         if not isinstance(t, dict):
             continue
+        t_name = _theme_name(t)
         for qw in t.get("quick_wins", []) or []:
             if qw and len(all_quick_wins) < 5:
-                all_quick_wins.append(str(qw)[:200])
+                all_quick_wins.append(f"{str(qw)[:160]} — {t_name}")
+        # If no quick_wins, pull from all_drivers recommended_solution
+        if not (t.get("quick_wins", []) or []):
+            for d in (t.get("all_drivers", []) or [])[:2]:
+                if isinstance(d, dict) and d.get("recommended_solution") and len(all_quick_wins) < 5:
+                    all_quick_wins.append(f"{_s(d['recommended_solution'])[:160]} — {t_name}")
 
     # Sort findings by composite score — filter out findings with empty text
     sorted_findings = sorted(
@@ -1961,7 +1983,7 @@ def _build_fixed_deck_blueprint(
         if not isinstance(t, dict):
             continue
         impact_themes.append({
-            "name": _s(t.get("theme", ""), "?")[:40],
+            "name": _theme_name(t, "?")[:40],
             "calls": _n(t.get("call_count", 0)),
             "impact": _f(t.get("impact_score", 0)),
             "ease": _f(t.get("ease_score", 0)),
@@ -1977,10 +1999,25 @@ def _build_fixed_deck_blueprint(
     )[:3]
     lhf_items: list[dict[str, Any]] = []
     for t in ease_sorted:
-        theme_name_s = _s(t.get("theme", ""))
+        theme_name_s = _theme_name(t)
         t_qw = (t.get("quick_wins", []) or [])
-        sol_action = str(t_qw[0])[:200] if t_qw else f"Fix {theme_name_s} friction"
-        sol_detail = "; ".join(str(qw)[:80] for qw in t_qw[1:3]) if len(t_qw) > 1 else f"Ease score: {_f(t.get('ease_score', 0))}/10"
+        t_drivers = t.get("all_drivers", []) or []
+        # Action: prefer quick_wins, then top driver solution, then generic
+        if t_qw:
+            sol_action = str(t_qw[0])[:200]
+        elif t_drivers and isinstance(t_drivers[0], dict) and t_drivers[0].get("recommended_solution"):
+            sol_action = _s(t_drivers[0]["recommended_solution"])[:200]
+        else:
+            sol_action = f"Address {theme_name_s} friction"
+        # Detail: prefer additional quick_wins/solutions, then ease score
+        extra_solutions = []
+        for qw in t_qw[1:3]:
+            extra_solutions.append(str(qw)[:80])
+        if not extra_solutions:
+            for d in t_drivers[:2]:
+                if isinstance(d, dict) and d.get("recommended_solution"):
+                    extra_solutions.append(_s(d["recommended_solution"])[:80])
+        sol_detail = "; ".join(extra_solutions) if extra_solutions else f"Ease score: {_f(t.get('ease_score', 0))}/10"
         lhf_items.append({
             "action": sol_action,
             "detail": sol_detail,
@@ -2093,7 +2130,7 @@ def _build_fixed_deck_blueprint(
     for idx, t in enumerate(themes[:10], start=6):
         if not isinstance(t, dict):
             continue
-        theme_name = _s(t.get("theme", ""), f"Theme {idx - 5}")
+        theme_name = _theme_name(t, f"Theme {idx - 5}")
 
         # -- LEFT TABLE: Theme Metrics + Key Solutions --
         metrics_rows: list[list[str]] = [
@@ -2121,12 +2158,15 @@ def _build_fixed_deck_blueprint(
         driver_rows: list[list[str]] = []
         if isinstance(drivers, list):
             for d in drivers[:8]:
+                if isinstance(d, str):
+                    driver_rows.append([d[:50], "?", "?", "?", "-"])
+                    continue
                 if not isinstance(d, dict):
                     continue
                 d_calls = _n(d.get("call_count", 0))
                 d_pct = _f(d.get("contribution_pct", 0))
                 driver_rows.append([
-                    _s(d.get("driver", ""), "?")[:50],
+                    _driver_text(d)[:50] or "?",
                     str(d_calls) if d_calls > 0 else f"{d_pct}%",
                     _s(d.get("type", ""), "?").title(),
                     _s(d.get("dimension", ""), "?").replace("_", " ").title(),
@@ -2147,7 +2187,8 @@ def _build_fixed_deck_blueprint(
                 continue
             sol = _s(d.get("recommended_solution", ""))
             if sol:
-                dim = _s(d.get("dimension", t.get("dominant_driver", "digital"))).replace("_", " ").title()
+                dim_raw = d.get("dimension", t.get("dominant_driver", "digital"))
+                dim = _s(dim_raw).replace("_", " ").title() if isinstance(dim_raw, str) else "Digital"
                 solutions.append({"action": sol[:200], "dimension": dim})
         # Fill remaining slots from quick_wins if drivers didn't have solutions
         if len(solutions) < 3:
@@ -2160,21 +2201,24 @@ def _build_fixed_deck_blueprint(
         # Build driver table rows (simplified: Driver + Calls)
         simple_driver_rows: list[list[Any]] = []
         for d in (drivers if isinstance(drivers, list) else [])[:8]:
+            if isinstance(d, str):
+                simple_driver_rows.append([d[:50], "?"])
+                continue
             if not isinstance(d, dict):
                 continue
             d_calls = _n(d.get("call_count", 0))
             d_pct = _f(d.get("contribution_pct", 0))
             simple_driver_rows.append([
-                _s(d.get("driver", ""), "?")[:50],
+                _driver_text(d)[:50] or "?",
                 d_calls if d_calls > 0 else f"{d_pct}%",
             ])
 
         # Core issue: prefer top driver description, then contributing_factors, then fallback
         top_driver_desc = ""
-        if isinstance(drivers, list) and drivers and isinstance(drivers[0], dict):
-            top_driver_desc = _s(drivers[0].get("driver", ""))
+        if isinstance(drivers, list) and drivers:
+            top_driver_desc = _driver_text(drivers[0])
         factors = t.get("contributing_factors", [])
-        factors_text = "; ".join(str(cf)[:80] for cf in (factors if isinstance(factors, list) else [])[:3])
+        factors_text = "; ".join(_driver_text(cf)[:80] for cf in (factors if isinstance(factors, list) else [])[:3])
         core_issue = top_driver_desc or factors_text or f"{theme_name} friction analysis"
         primary_driver = _s(t.get("dominant_driver", ""), "").replace("_", " ").title()
 

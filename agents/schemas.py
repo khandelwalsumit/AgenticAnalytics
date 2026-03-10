@@ -310,9 +310,16 @@ class RankedFinding(BaseModel):
         dd = data.get("dominant_driver")
         if dd is not None:
             data["dominant_driver"] = _normalize_driver(dd)
-        for field in ("preventability_score", "confidence", "call_percentage", "volume"):
+        for field in ("preventability_score", "confidence"):
             if field in data:
                 data[field] = _coerce_probability(data[field], default=0.5)
+        # call_percentage and volume are 0-100 scale, NOT 0-1 probability
+        for field in ("call_percentage", "volume"):
+            if field in data:
+                try:
+                    data[field] = round(float(data[field]), 1)
+                except (TypeError, ValueError):
+                    data[field] = 0.0
         for field in ("impact_score", "ease_score"):
             if field in data:
                 raw = data[field]
@@ -371,18 +378,36 @@ class ThemeSummary(BaseModel):
     def _normalize(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
-        # LLM uses "theme_name" instead of "theme"
+        # LLM uses "theme_name" or "bucket_name" instead of "theme"
         if "theme_name" in data and "theme" not in data:
             data["theme"] = data.pop("theme_name")
+        if "bucket_name" in data and not data.get("theme"):
+            data["theme"] = data["bucket_name"]
+        # Coerce contributing_factors: LLM may put dicts instead of strings
+        cf = data.get("contributing_factors")
+        if isinstance(cf, list):
+            coerced = []
+            for item in cf:
+                if isinstance(item, dict):
+                    coerced.append(item.get("driver", item.get("factor", str(item))))
+                else:
+                    coerced.append(str(item))
+            data["contributing_factors"] = coerced
         pq = data.get("priority_quadrant")
         if isinstance(pq, str):
             data["priority_quadrant"] = _normalize_quadrant(pq)
         dd = data.get("dominant_driver")
         if dd is not None:
             data["dominant_driver"] = _normalize_driver(dd)
-        for field in ("preventability_score", "call_percentage"):
+        for field in ("preventability_score",):
             if field in data:
                 data[field] = _coerce_probability(data[field], default=0.5)
+        # call_percentage is 0-100 scale, NOT 0-1 probability
+        if "call_percentage" in data:
+            try:
+                data["call_percentage"] = round(float(data["call_percentage"]), 1)
+            except (TypeError, ValueError):
+                data["call_percentage"] = 0.0
         for field in ("impact_score", "ease_score", "priority_score"):
             if field in data:
                 raw = data[field]

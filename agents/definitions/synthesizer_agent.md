@@ -77,10 +77,16 @@ Just produce thorough, accurate content for all the required fields:
 ### Theme Detail Requirements
 
 Each theme MUST include:
-- Merged `all_drivers` list from all 4 agents, each tagged with `dimension`
-- At least 1-2 `quick_wins` if ease_score ≥ 7
-- Accurate `call_count` and `call_percentage`
+- `theme` — set this to the **bucket_name** from the input (e.g., "Rewards & Loyalty", "Authentication & Security"). This MUST NOT be empty.
+- Merged `all_drivers` list from all 4 agents, each tagged with `dimension` and `recommended_solution`
+- At least 1-2 `quick_wins` — specific, actionable fixes (e.g., "Add pending points tracker in app dashboard")
+- Accurate `call_count` and `call_percentage` (percentage of total calls, 0-100 scale)
 - `priority_quadrant` classification
+
+Each finding MUST include:
+- `finding` — a clear, specific description of the friction point (MUST NOT be empty)
+- `theme` — the bucket/theme name this finding belongs to
+- `recommended_action` — specific fix recommendation
 
 ## Important Rules
 
