@@ -1860,24 +1860,33 @@ def _build_fixed_deck_blueprint(
             if qw and len(all_quick_wins) < 5:
                 all_quick_wins.append(str(qw)[:200])
 
-    # Sort findings by composite score: call_count first, then impact_score
+    # Sort findings by composite score — filter out findings with empty text
     sorted_findings = sorted(
-        [f for f in findings if isinstance(f, dict)],
+        [f for f in findings if isinstance(f, dict) and _s(f.get("finding", ""))],
         key=lambda x: (_n(x.get("call_count", 0)) * 100 + _f(x.get("impact_score", 0))),
         reverse=True,
     )[:3]
-    # If no findings, fall back to top themes as pain points
+    # If no usable findings, build pain points from themes + their all_drivers
     if not sorted_findings and themes:
         for t in themes[:3]:
-            if isinstance(t, dict):
-                sorted_findings.append({
-                    "finding": _s(t.get("theme", ""), "Issue"),
-                    "call_count": _n(t.get("call_count", 0)),
-                    "call_percentage": _f(t.get("call_percentage", 0)),
-                    "impact_score": _f(t.get("impact_score", 5)),
-                    "dominant_driver": _s(t.get("dominant_driver", ""), "digital"),
-                    "recommended_action": "; ".join(str(qw) for qw in (t.get("quick_wins", []) or [])[:2]) or "Action to be determined",
-                })
+            if not isinstance(t, dict):
+                continue
+            # Use top driver description as the finding text (much richer than theme name alone)
+            t_drivers = t.get("all_drivers", []) or []
+            top_driver = t_drivers[0] if t_drivers and isinstance(t_drivers[0], dict) else {}
+            finding_text = _s(top_driver.get("driver", ""), _s(t.get("theme", ""), "Issue"))
+            action_text = _s(
+                top_driver.get("recommended_solution", ""),
+                "; ".join(str(qw) for qw in (t.get("quick_wins", []) or [])[:2]) or "Action to be determined",
+            )
+            sorted_findings.append({
+                "finding": finding_text,
+                "call_count": _n(top_driver.get("call_count", 0) if top_driver else t.get("call_count", 0)),
+                "call_percentage": _f(t.get("call_percentage", 0)),
+                "impact_score": _f(t.get("impact_score", 5)),
+                "dominant_driver": _s(t.get("dominant_driver", ""), "digital"),
+                "recommended_action": action_text,
+            })
 
 
     # ================================================================
@@ -1996,16 +2005,31 @@ def _build_fixed_deck_blueprint(
         action = _s(f.get("recommended_action", ""))
         if action:
             driver_groups[driver].append(f)
-    # Fallback: use theme quick_wins grouped by dominant_driver
+    # Fallback: use theme all_drivers grouped by dimension, then quick_wins
     if not any(driver_groups.values()):
         for t in themes:
             if not isinstance(t, dict):
                 continue
-            driver = _s(t.get("dominant_driver", "digital")).lower()
-            if driver not in driver_groups:
-                driver = "digital"
-            for qw in (t.get("quick_wins", []) or [])[:2]:
-                driver_groups[driver].append({"recommended_action": str(qw)})
+            t_drivers = t.get("all_drivers", []) or []
+            for d in t_drivers:
+                if not isinstance(d, dict):
+                    continue
+                dim = _s(d.get("dimension", "digital")).lower()
+                if dim not in driver_groups:
+                    dim = "digital"
+                sol = _s(d.get("recommended_solution", ""))
+                if sol:
+                    driver_groups[dim].append({
+                        "recommended_action": sol,
+                        "call_count": _n(d.get("call_count", 0)),
+                    })
+            # Also add quick_wins under dominant_driver if no all_drivers
+            if not t_drivers:
+                driver = _s(t.get("dominant_driver", "digital")).lower()
+                if driver not in driver_groups:
+                    driver = "digital"
+                for qw in (t.get("quick_wins", []) or [])[:2]:
+                    driver_groups[driver].append({"recommended_action": str(qw)})
 
     rec_dimensions: list[dict[str, Any]] = []
     dim_color_map = {
@@ -2116,11 +2140,22 @@ def _build_fixed_deck_blueprint(
         call_count = _n(t.get("call_count", 0))
         call_pct = _f(t.get("call_percentage", 0))
 
-        # Build solutions from quick_wins
+        # Build solutions from all_drivers recommended_solution, then quick_wins
         solutions: list[dict[str, Any]] = []
-        for qw in (t.get("quick_wins", []) or [])[:3]:
-            dim = _s(t.get("dominant_driver", "Digital")).replace("_", " ").title()
-            solutions.append({"action": str(qw)[:200], "dimension": dim})
+        for d in (drivers if isinstance(drivers, list) else [])[:3]:
+            if not isinstance(d, dict):
+                continue
+            sol = _s(d.get("recommended_solution", ""))
+            if sol:
+                dim = _s(d.get("dimension", t.get("dominant_driver", "digital"))).replace("_", " ").title()
+                solutions.append({"action": sol[:200], "dimension": dim})
+        # Fill remaining slots from quick_wins if drivers didn't have solutions
+        if len(solutions) < 3:
+            for qw in (t.get("quick_wins", []) or []):
+                if len(solutions) >= 3:
+                    break
+                dim = _s(t.get("dominant_driver", "Digital")).replace("_", " ").title()
+                solutions.append({"action": str(qw)[:200], "dimension": dim})
 
         # Build driver table rows (simplified: Driver + Calls)
         simple_driver_rows: list[list[Any]] = []
@@ -2134,9 +2169,13 @@ def _build_fixed_deck_blueprint(
                 d_calls if d_calls > 0 else f"{d_pct}%",
             ])
 
-        # Contributing factors as core issue
+        # Core issue: prefer top driver description, then contributing_factors, then fallback
+        top_driver_desc = ""
+        if isinstance(drivers, list) and drivers and isinstance(drivers[0], dict):
+            top_driver_desc = _s(drivers[0].get("driver", ""))
         factors = t.get("contributing_factors", [])
-        core_issue = "; ".join(str(cf)[:80] for cf in (factors if isinstance(factors, list) else [])[:3]) or f"{theme_name} friction analysis"
+        factors_text = "; ".join(str(cf)[:80] for cf in (factors if isinstance(factors, list) else [])[:3])
+        core_issue = top_driver_desc or factors_text or f"{theme_name} friction analysis"
         primary_driver = _s(t.get("dominant_driver", ""), "").replace("_", " ").title()
 
         theme_slides.append({
