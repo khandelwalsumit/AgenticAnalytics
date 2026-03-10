@@ -3,7 +3,7 @@ name: digital_friction_agent
 model: gemini-2.5-flash
 temperature: 0.2
 top_p: 0.95
-max_tokens: 8192
+max_tokens: 16384
 description: "Identifies where the digital journey failed before the call happened"
 tools:
   - analyze_bucket

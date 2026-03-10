@@ -40,6 +40,80 @@ _TEAM_LABELS = {
 }
 
 
+def _try_parse_json(text: str) -> Any:
+    """Parse JSON, repairing truncated output from LLMs that hit token limits.
+
+    LLMs sometimes produce JSON that ends mid-string because the response
+    was cut off at max_tokens.  This function tries json.loads first, then
+    progressively closes open brackets/braces from the truncation point.
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Count unclosed brackets and try to close them
+    # Walk the string tracking open/close state (ignore chars inside strings)
+    opens: list[str] = []
+    in_string = False
+    escape = False
+    for ch in text:
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"' and not escape:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch in ("{", "["):
+            opens.append(ch)
+        elif ch == "}" and opens and opens[-1] == "{":
+            opens.pop()
+        elif ch == "]" and opens and opens[-1] == "[":
+            opens.pop()
+
+    if not opens:
+        return None
+
+    # Truncate any trailing partial value (unfinished string, number, etc.)
+    # by finding the last complete key-value separator
+    repair = text.rstrip()
+    # Strip trailing partial tokens: commas, colons, partial strings
+    while repair and repair[-1] in (",", ":", " ", "\n", "\r", "\t"):
+        repair = repair[:-1]
+    # If we're inside an unclosed string, close it
+    # Count unescaped quotes — odd means we're mid-string
+    quote_count = 0
+    esc = False
+    for ch in repair:
+        if esc:
+            esc = False
+            continue
+        if ch == "\\":
+            esc = True
+            continue
+        if ch == '"':
+            quote_count += 1
+    if quote_count % 2 == 1:
+        repair += '"'
+
+    # Close all open brackets in reverse order
+    for bracket in reversed(opens):
+        repair += "]" if bracket == "[" else "}"
+
+    try:
+        return json.loads(repair)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
 def _extract_bucket_summary(bucket_key: str, bucket_name: str, raw_md: str) -> str:
     """Extract structured summary from a friction agent's JSON output.
 
@@ -56,26 +130,32 @@ def _extract_bucket_summary(bucket_key: str, bucket_name: str, raw_md: str) -> s
             f"(key={bucket_key}). The friction agent produced no response."
         )
 
-    data = _extract_json(raw_md)
+    data: dict[str, Any] = {}
 
-    # Handle array responses (some agents wrap output in a list)
-    if not data:
-        text = raw_md.strip()
-        if "```" in text:
-            for part in text.split("```")[1::2]:
-                part = part.strip()
-                if part.startswith("json"):
-                    part = part[4:].strip()
-                try:
-                    parsed = json.loads(part)
-                    if isinstance(parsed, list) and parsed:
-                        data = parsed[0] if isinstance(parsed[0], dict) else {}
-                    elif isinstance(parsed, dict):
-                        data = parsed
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                if data:
-                    break
+    # full_response is a concat of multiple AI messages — scan ALL code fences
+    # and pick the one that contains friction output keys (top_drivers/findings).
+    # The last valid match wins (final agent output is typically last).
+    candidates: list[str] = []
+    if "```" in raw_md:
+        for part in raw_md.split("```")[1::2]:
+            part = part.strip()
+            if part.startswith("json"):
+                part = part[4:].strip()
+            candidates.append(part)
+
+    # Also try raw brace extraction
+    if "{" in raw_md:
+        start = raw_md.find("{")
+        end = raw_md.rfind("}")
+        if start < end:
+            candidates.append(raw_md[start:end + 1])
+
+    for candidate in candidates:
+        parsed = _try_parse_json(candidate)
+        if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+            parsed = parsed[0]
+        if isinstance(parsed, dict) and ("top_drivers" in parsed or "findings" in parsed):
+            data = parsed
 
     if not data:
         raise ValueError(
@@ -96,44 +176,50 @@ def _extract_bucket_summary(bucket_key: str, bucket_name: str, raw_md: str) -> s
     parts = [f"### {bucket_name}"]
 
     # Volume
-    call_count = data["call_count"]
-    call_pct = data["call_percentage"]
+    call_count = data.get("call_count", 0)
+    call_pct = data.get("call_percentage", 0.0)
     total_calls = data.get("total_dataset_calls", call_count)
     parts.append(f"**Volume**: {call_count} calls ({call_pct:.1f}% of {total_calls} total)")
 
     # Scores
-    ease = data["ease_score"]
-    impact = data["impact_score"]
-    priority = data["priority_score"]
+    ease = data.get("ease_score", 0)
+    impact = data.get("impact_score", 0)
+    priority = data.get("priority_score", 0)
     parts.append(f"**Scores**: Impact={impact}/10 | Ease={ease}/10 | Priority={priority}/10")
 
     # Top drivers
-    for d in data["top_drivers"]:
+    for d in data.get("top_drivers", []):
+        if not isinstance(d, dict) or "driver" not in d:
+            continue
         parts.append(
-            f"  - [{d['type']}] {d['driver']} — "
-            f"{d['call_count']} calls ({d['contribution_pct']:.1f}%) "
-            f"→ {d['recommended_solution'][:150]}"
+            f"  - [{d.get('type', 'secondary')}] {d['driver']} — "
+            f"{d.get('call_count', 0)} calls ({d.get('contribution_pct', 0):.1f}%) "
+            f"→ {d.get('recommended_solution', 'N/A')[:150]}"
         )
 
-    # Findings with scores
-    parts.append("**Findings**:")
-    for f in data["findings"]:
-        finding_text = f["finding"]
-        if not finding_text:
-            continue
-        preventable = f.get("preventable_call", f.get("preventable", False))
-        parts.append(
-            f"  - (impact={f['impact_score']}, ease={f['ease_score']}, "
-            f"conf={f['confidence']}, preventable={'yes' if preventable else 'no'}) "
-            f"{finding_text[:200]}"
-        )
-        action = (f.get("recommended_action", "")
-                  or f.get("recommended_product_fix", "")
-                  or f.get("recommended_process_fix", ""))
-        if action:
-            team = _detect_team_from_text(action)
-            team_label = _TEAM_LABELS.get(team, team.title())
-            parts.append(f"    → [{team_label}] {action[:180]}")
+    # Findings with scores (may be truncated — skip incomplete entries)
+    findings = data.get("findings", [])
+    if findings:
+        parts.append("**Findings**:")
+        for f in findings:
+            if not isinstance(f, dict):
+                continue
+            finding_text = f.get("finding", "")
+            if not finding_text:
+                continue
+            preventable = f.get("preventable_call", f.get("preventable", False))
+            parts.append(
+                f"  - (impact={f.get('impact_score', 0)}, ease={f.get('ease_score', 0)}, "
+                f"conf={f.get('confidence', 0)}, preventable={'yes' if preventable else 'no'}) "
+                f"{finding_text[:200]}"
+            )
+            action = (f.get("recommended_action", "")
+                      or f.get("recommended_product_fix", "")
+                      or f.get("recommended_process_fix", ""))
+            if action:
+                team = _detect_team_from_text(action)
+                team_label = _TEAM_LABELS.get(team, team.title())
+                parts.append(f"    → [{team_label}] {action[:180]}")
 
     return "\n".join(parts) + "\n"
 

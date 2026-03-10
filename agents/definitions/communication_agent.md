@@ -3,7 +3,7 @@ name: communication_agent
 model: gemini-2.5-flash
 temperature: 0.2
 top_p: 0.95
-max_tokens: 8192
+max_tokens: 16384
 description: "Determines if proactive or contextual communication could have prevented the call"
 tools:
   - analyze_bucket
