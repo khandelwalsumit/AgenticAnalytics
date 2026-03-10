@@ -1843,20 +1843,48 @@ def _build_fixed_deck_blueprint(
             return f"{vol}% volume"
         return "See impact score"
 
+    def _norm_driver(d: Any) -> dict[str, Any]:
+        """Normalize a single driver entry to a dict with 'driver' key."""
+        if isinstance(d, str):
+            # Try JSON parse first
+            try:
+                parsed = json.loads(d)
+                if isinstance(parsed, dict):
+                    d = parsed
+                else:
+                    return {"driver": d}
+            except (json.JSONDecodeError, ValueError):
+                return {"driver": d}
+        if not isinstance(d, dict):
+            return {"driver": str(d) if d else ""}
+        # Map alternate field names → 'driver'
+        if not d.get("driver"):
+            d["driver"] = (
+                d.get("driver_description", "")
+                or d.get("finding", "")
+                or d.get("description", "")
+                or ""
+            )
+        return d
+
+    def _norm_drivers(t: dict[str, Any]) -> list[dict[str, Any]]:
+        """Normalize all_drivers from a theme dict."""
+        raw = t.get("all_drivers", []) or []
+        return [_norm_driver(d) for d in raw if d]
+
     def _theme_name(t: dict[str, Any], fallback: str = "Unnamed Theme") -> str:
         """Extract theme name with multiple fallbacks."""
         name = _s(t.get("theme", "")) or _s(t.get("theme_name", "")) or _s(t.get("bucket_name", ""))
         if not name:
-            # Derive from top driver description
-            drivers = t.get("all_drivers", []) or []
-            if drivers and isinstance(drivers[0], dict):
+            drivers = _norm_drivers(t)
+            if drivers:
                 name = _s(drivers[0].get("driver", ""))[:60]
         return name or fallback
 
     def _driver_text(d: Any) -> str:
         """Extract driver description — handles dict or string."""
         if isinstance(d, dict):
-            return _s(d.get("driver", ""))
+            return _s(d.get("driver", "") or d.get("driver_description", ""))
         return _s(d)
 
     total_calls = _n(summary.get("total_calls_analyzed", 0))
@@ -1878,8 +1906,8 @@ def _build_fixed_deck_blueprint(
                 all_quick_wins.append(f"{str(qw)[:160]} — {t_name}")
         # If no quick_wins, pull from all_drivers recommended_solution
         if not (t.get("quick_wins", []) or []):
-            for d in (t.get("all_drivers", []) or [])[:2]:
-                if isinstance(d, dict) and d.get("recommended_solution") and len(all_quick_wins) < 5:
+            for d in _norm_drivers(t)[:2]:
+                if d.get("recommended_solution") and len(all_quick_wins) < 5:
                     all_quick_wins.append(f"{_s(d['recommended_solution'])[:160]} — {t_name}")
 
     # Sort findings by composite score — filter out findings with empty text
@@ -1894,8 +1922,8 @@ def _build_fixed_deck_blueprint(
             if not isinstance(t, dict):
                 continue
             # Use top driver description as the finding text (much richer than theme name alone)
-            t_drivers = t.get("all_drivers", []) or []
-            top_driver = t_drivers[0] if t_drivers and isinstance(t_drivers[0], dict) else {}
+            t_drivers = _norm_drivers(t)
+            top_driver = t_drivers[0] if t_drivers else {}
             finding_text = _s(top_driver.get("driver", ""), _s(t.get("theme", ""), "Issue"))
             action_text = _s(
                 top_driver.get("recommended_solution", ""),
@@ -2025,11 +2053,11 @@ def _build_fixed_deck_blueprint(
     for t in ease_sorted:
         theme_name_s = _theme_name(t)
         t_qw = (t.get("quick_wins", []) or [])
-        t_drivers = t.get("all_drivers", []) or []
+        t_drivers = _norm_drivers(t)
         # Action: prefer quick_wins, then top driver solution, then generic
         if t_qw:
             sol_action = str(t_qw[0])[:200]
-        elif t_drivers and isinstance(t_drivers[0], dict) and t_drivers[0].get("recommended_solution"):
+        elif t_drivers and t_drivers[0].get("recommended_solution"):
             sol_action = _s(t_drivers[0]["recommended_solution"])[:200]
         else:
             sol_action = f"Address {theme_name_s} friction"
@@ -2039,7 +2067,7 @@ def _build_fixed_deck_blueprint(
             extra_solutions.append(str(qw)[:80])
         if not extra_solutions:
             for d in t_drivers[:2]:
-                if isinstance(d, dict) and d.get("recommended_solution"):
+                if d.get("recommended_solution"):
                     extra_solutions.append(_s(d["recommended_solution"])[:80])
         sol_detail = "; ".join(extra_solutions) if extra_solutions else f"Ease score: {_f(t.get('ease_score', 0))}/10"
         lhf_items.append({
@@ -2061,10 +2089,8 @@ def _build_fixed_deck_blueprint(
     for t in themes:
         if not isinstance(t, dict):
             continue
-        t_drivers = t.get("all_drivers", []) or []
+        t_drivers = _norm_drivers(t)
         for d in t_drivers:
-            if not isinstance(d, dict):
-                continue
             dim = _s(d.get("dimension", "digital")).lower()
             if dim not in driver_groups:
                 dim = "digital"
@@ -2192,24 +2218,17 @@ def _build_fixed_deck_blueprint(
                 metrics_rows.append([f"Solution {qi}", str(qw)[:80]])
 
         # -- RIGHT TABLE: Driver Breakdown --
-        drivers = t.get("all_drivers", [])
+        drivers = _norm_drivers(t)
         driver_rows: list[list[str]] = []
-        if isinstance(drivers, list):
-            for d in drivers[:8]:
-                if isinstance(d, str):
-                    driver_rows.append([d[:50], "?", "?", "?", "-"])
-                    continue
-                if not isinstance(d, dict):
-                    continue
-                d_calls = _n(d.get("call_count", 0))
-                d_pct = _f(d.get("contribution_pct", 0))
-                driver_rows.append([
-                    _driver_text(d)[:50] or "?",
-                    str(d_calls) if d_calls > 0 else f"{d_pct}%",
-                    _s(d.get("type", ""), "?").title(),
-                    _s(d.get("dimension", ""), "?").replace("_", " ").title(),
-                    _s(d.get("recommended_solution", ""), "-")[:60],
-                ])
+        for d in drivers[:8]:
+            d_calls = _n(d.get("call_count", 0))
+            driver_rows.append([
+                _driver_text(d)[:50] or "?",
+                str(d_calls),
+                _s(d.get("type", ""), "?").title(),
+                _s(d.get("dimension", ""), "?").replace("_", " ").title(),
+                _s(d.get("recommended_solution", ""), "-")[:60],
+            ])
 
         # Build structured theme card
         impact_score = _f(t.get("impact_score", 0))
@@ -2220,9 +2239,7 @@ def _build_fixed_deck_blueprint(
 
         # Build solutions from all_drivers recommended_solution, then quick_wins
         solutions: list[dict[str, Any]] = []
-        for d in (drivers if isinstance(drivers, list) else [])[:3]:
-            if not isinstance(d, dict):
-                continue
+        for d in drivers[:3]:
             sol = _s(d.get("recommended_solution", ""))
             if sol:
                 dim_raw = d.get("dimension", t.get("dominant_driver", "digital"))
@@ -2238,12 +2255,7 @@ def _build_fixed_deck_blueprint(
 
         # Build driver table rows — always show call count (never %)
         simple_driver_rows: list[list[Any]] = []
-        for d in (drivers if isinstance(drivers, list) else [])[:8]:
-            if isinstance(d, str):
-                simple_driver_rows.append([d[:50], 0])
-                continue
-            if not isinstance(d, dict):
-                continue
+        for d in drivers[:8]:
             d_calls = _n(d.get("call_count", 0))
             simple_driver_rows.append([
                 _driver_text(d)[:50] or "?",
@@ -2252,14 +2264,11 @@ def _build_fixed_deck_blueprint(
 
         # Core issue: bullet points summarizing top drivers (not just one line)
         core_issue_points: list[str] = []
-        for d in (drivers if isinstance(drivers, list) else [])[:3]:
-            if isinstance(d, dict):
-                desc = _driver_text(d)
-                d_calls = _n(d.get("call_count", 0))
-                if desc:
-                    core_issue_points.append(f"{desc} ({d_calls} calls)" if d_calls > 0 else desc)
-            elif isinstance(d, str) and d.strip():
-                core_issue_points.append(d.strip())
+        for d in drivers[:3]:
+            desc = _driver_text(d)
+            d_calls = _n(d.get("call_count", 0))
+            if desc:
+                core_issue_points.append(f"{desc} ({d_calls} calls)" if d_calls > 0 else desc)
         if not core_issue_points:
             factors = t.get("contributing_factors", [])
             for cf in (factors if isinstance(factors, list) else [])[:3]:

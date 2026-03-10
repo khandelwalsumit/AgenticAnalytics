@@ -349,6 +349,14 @@ class ThemeDriver(BaseModel):
         if isinstance(data, str):
             return {"driver": data, "dimension": "digital"}
         if isinstance(data, dict):
+            # Map alternate field names → 'driver'
+            if not data.get("driver"):
+                data["driver"] = (
+                    data.pop("driver_description", "")
+                    or data.pop("finding", "")
+                    or data.pop("description", "")
+                    or ""
+                )
             dim = data.get("dimension")
             if dim is not None:
                 data["dimension"] = _normalize_driver(dim)
