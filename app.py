@@ -289,6 +289,8 @@ async def _restore_resume_ui(thread_id: str, state: dict[str, Any]) -> None:
             state.get("analysis_complete"),
         )
 
+    # Download elements are ephemeral — always re-send on resume.
+    state["downloads_sent"] = False
     await _maybe_send_downloads(thread_id, state)
 
 
