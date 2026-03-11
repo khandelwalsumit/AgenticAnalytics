@@ -13,7 +13,7 @@ Slide types supported:
   5. recommendations — 2x2 dimension grid
   6. theme_card — stats bar + two-column narrative/table
 
-Canvas: 10 x 5.625 inches (standard 16:9)
+Canvas: 13.33 x 7.5 inches (widescreen 16:9)
 """
 
 from __future__ import annotations
@@ -139,8 +139,8 @@ def _rect(slide, x, y, w, h, color):
 
 def _title_block(slide, title_text):
     """Shared title block: title at y=0.3, rule at y=0.72. Content starts at y=0.85."""
-    _tb(slide, 0.5, 0.3, 9.0, 0.4, title_text, SLIDE_TITLE)
-    _rule(slide, 0.5, 0.72, 9.0)
+    _tb(slide, MARGIN_L, 0.3, CONTENT_W, 0.4, title_text, SLIDE_TITLE)
+    _rule(slide, MARGIN_L, 0.72, CONTENT_W)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -185,7 +185,7 @@ def _add_table(slide, headers, rows, x=0.5, y=1.0, w=9.0, col_widths=None, row_h
                     _apply(r, TABLE_CELL)
 
 
-def _add_chart_image(slide, chart_key, chart_paths, x=6.2, y=0.85, w=3.5):
+def _add_chart_image(slide, chart_key, chart_paths, x=8.0, y=0.85, w=4.83):
     clean_key = chart_key
     m = re.search(r"\{\{\s*chart\.([a-zA-Z0-9_-]+)\s*\}\}", chart_key)
     if m:
@@ -205,10 +205,10 @@ def _render_executive_summary(prs, slide_data, layout_idx):
     slide = prs.slides.add_slide(prs.slide_layouts[min(layout_idx, len(prs.slide_layouts) - 1)])
 
     # 1. Title
-    _tb(slide, 0.5, 0.3, 9.0, 0.4, slide_data.get("title", "EXECUTIVE SUMMARY"), SLIDE_TITLE)
+    _tb(slide, MARGIN_L, 0.3, CONTENT_W, 0.4, slide_data.get("title", "EXECUTIVE SUMMARY"), SLIDE_TITLE)
 
     # 2. Rule below title
-    _rule(slide, 0.5, 0.72, 9.0)
+    _rule(slide, MARGIN_L, 0.72, CONTENT_W)
 
     # 3. Subtitle block — supports subtitle_lines (rich) or subtitle (plain string)
     subtitle_lines = slide_data.get("subtitle_lines", [])
@@ -216,7 +216,7 @@ def _render_executive_summary(prs, slide_data, layout_idx):
 
     y = 0.85
     if subtitle_lines:
-        box = slide.shapes.add_textbox(Inches(0.5), Inches(y), Inches(9.0), Inches(0.85))
+        box = slide.shapes.add_textbox(Inches(MARGIN_L), Inches(y), Inches(CONTENT_W), Inches(0.85))
         tf = box.text_frame
         tf.word_wrap = True
         for li, line_obj in enumerate(subtitle_lines):
@@ -242,18 +242,18 @@ def _render_executive_summary(prs, slide_data, layout_idx):
                 r.text = line_text
                 _apply(r, SUBTITLE_TEXT)
     elif subtitle_plain:
-        _tb(slide, 0.5, y, 9.0, 0.85, subtitle_plain, SUBTITLE_TEXT)
+        _tb(slide, MARGIN_L, y, CONTENT_W, 0.85, subtitle_plain, SUBTITLE_TEXT)
 
     # 4. Rule below subtitle
-    _rule(slide, 0.5, 1.72, 9.0)
+    _rule(slide, MARGIN_L, 1.72, CONTENT_W)
 
     # 5. "Quick Wins:" label
     quick_wins = slide_data.get("quick_wins", [])
     if quick_wins:
-        _tb(slide, 0.5, 1.88, 9.0, 0.3, "Quick Wins:", H3_LABEL)
+        _tb(slide, MARGIN_L, 1.88, CONTENT_W, 0.3, "Quick Wins:", H3_LABEL)
 
         # 6. Quick win items as rich text
-        box = slide.shapes.add_textbox(Inches(0.5), Inches(2.20), Inches(9.0), Inches(2.8))
+        box = slide.shapes.add_textbox(Inches(MARGIN_L), Inches(2.20), Inches(CONTENT_W), Inches(4.8))
         tf = box.text_frame
         tf.word_wrap = True
         for qi, qw in enumerate(quick_wins[:5]):
@@ -288,26 +288,26 @@ def _render_pain_points(prs, slide_data, layout_idx):
     cards = slide_data.get("cards", [])
     accent_colors = [ACCENT_RED, ACCENT_AMBER, ACCENT_GREEN]
 
-    # Card layout: 3 cards, each 2.75" wide, 0.25 gap, centered
-    CARD_W = 2.75
-    CARD_H = 4.0
-    CARD_GAP = 0.25
+    # Card layout: 3 cards filling 13.33" canvas with 0.5" margins
+    CARD_W = 3.77
+    CARD_H = 5.5
+    CARD_GAP = 0.35
     CARD_Y = 0.95
-    CARD_X_START = 0.625  # (10 - 3*2.75 - 2*0.25) / 2
+    CARD_X_START = (SLIDE_W - 3 * CARD_W - 2 * CARD_GAP) / 2  # ~0.66
     ACCENT_BAR_W = 0.06
 
     for i, card in enumerate(cards[:3]):
         card_x = CARD_X_START + i * (CARD_W + CARD_GAP)
         accent = accent_colors[i % 3]
         inner_x = card_x + 0.22
-        inner_w = 2.38
+        inner_w = CARD_W - 0.37  # 3.40
 
         # Accent bar
         _rect(slide, card_x, CARD_Y, ACCENT_BAR_W, CARD_H, accent)
         # Card background
         _rect(slide, card_x + ACCENT_BAR_W, CARD_Y, CARD_W - ACCENT_BAR_W, CARD_H, BG_LIGHT)
 
-        # Card title: "1. Theme Name (X calls)" — 10pt bold blue to avoid overflow
+        # Card title: "1. Theme Name (X calls)"
         name = _strip_md(str(card.get("name", f"Pain Point {i+1}")))
         calls = card.get("calls", 0)
         box = slide.shapes.add_textbox(Inches(inner_x), Inches(1.05), Inches(inner_w), Inches(0.40))
@@ -315,7 +315,7 @@ def _render_pain_points(prs, slide_data, layout_idx):
         tf.word_wrap = True
         r1 = tf.paragraphs[0].add_run()
         r1.text = name
-        _apply(r1, _style(10, bold=True, color=NAVY))
+        _apply(r1, _style(11, bold=True, color=NAVY))
         r2 = tf.paragraphs[0].add_run()
         r2.text = f" ({calls} calls)" if calls else ""
         _apply(r2, _style(10, bold=False, color=NAVY))
@@ -323,13 +323,13 @@ def _render_pain_points(prs, slide_data, layout_idx):
         # Stats line
         impact = card.get("impact", card.get("impact_score", 0))
         priority = card.get("priority", 0)
-        _tb(slide, inner_x, 1.40, inner_w, 0.25, f"Impact: {impact} | Priority: {priority}", _style(9, color=MID_GRAY))
+        _tb(slide, inner_x, 1.45, inner_w, 0.25, f"Impact: {impact} | Priority: {priority}", _style(9, color=MID_GRAY))
 
         # Separator
-        _rule(slide, inner_x, 1.65, inner_w)
+        _rule(slide, inner_x, 1.72, inner_w)
 
         # Issue: label + text
-        box = slide.shapes.add_textbox(Inches(inner_x), Inches(1.75), Inches(inner_w), Inches(1.05))
+        box = slide.shapes.add_textbox(Inches(inner_x), Inches(1.85), Inches(inner_w), Inches(1.6))
         tf = box.text_frame
         tf.word_wrap = True
         r_lbl = tf.paragraphs[0].add_run()
@@ -340,7 +340,7 @@ def _render_pain_points(prs, slide_data, layout_idx):
         _apply(r_txt, _style(10, color=BLACK))
 
         # Fix: label + text + (owner)
-        box = slide.shapes.add_textbox(Inches(inner_x), Inches(2.85), Inches(inner_w), Inches(0.95))
+        box = slide.shapes.add_textbox(Inches(inner_x), Inches(3.55), Inches(inner_w), Inches(1.6))
         tf = box.text_frame
         tf.word_wrap = True
         r_fix_lbl = tf.paragraphs[0].add_run()
@@ -365,9 +365,14 @@ def _render_impact_ease(prs, slide_data, layout_idx, chart_paths):
 
     themes = slide_data.get("themes", [])
 
+    # Layout: LEFT 58% | gap | RIGHT 38%
+    LEFT_W = 7.15
+    RIGHT_X = MARGIN_L + LEFT_W + 0.3
+    RIGHT_W = SLIDE_W - RIGHT_X - MARGIN_R  # ~4.88
+
     # LEFT SIDE — theme summary list
     if themes:
-        box = slide.shapes.add_textbox(Inches(0.5), Inches(0.95), Inches(5.5), Inches(4.2))
+        box = slide.shapes.add_textbox(Inches(MARGIN_L), Inches(0.95), Inches(LEFT_W), Inches(6.0))
         tf = box.text_frame
         tf.word_wrap = True
 
@@ -408,13 +413,13 @@ def _render_impact_ease(prs, slide_data, layout_idx, chart_paths):
         table_data = slide_data.get("table", {})
         if table_data and table_data.get("headers"):
             _add_table(slide, table_data["headers"], table_data.get("rows", []),
-                       x=0.5, y=0.95, w=5.5, row_h=0.28)
+                       x=MARGIN_L, y=0.95, w=LEFT_W, row_h=0.28)
 
     # RIGHT SIDE — chart image
     chart_ph = slide_data.get("chart_placeholder", {})
     if chart_ph:
         _add_chart_image(slide, chart_ph.get("chart_key", "impact_ease_scatter"),
-                         chart_paths, x=6.2, y=0.85, w=3.5)
+                         chart_paths, x=RIGHT_X, y=0.85, w=RIGHT_W)
 
 
 def _render_low_hanging_fruit(prs, slide_data, layout_idx):
@@ -426,7 +431,7 @@ def _render_low_hanging_fruit(prs, slide_data, layout_idx):
     # Support both 'items' (new plan) and 'solutions' (legacy)
     items = slide_data.get("items", slide_data.get("solutions", []))
 
-    box = slide.shapes.add_textbox(Inches(0.5), Inches(0.95), Inches(9.0), Inches(4.0))
+    box = slide.shapes.add_textbox(Inches(MARGIN_L), Inches(0.95), Inches(CONTENT_W), Inches(6.0))
     tf = box.text_frame
     tf.word_wrap = True
 
@@ -475,14 +480,18 @@ def _render_recommendations(prs, slide_data, layout_idx):
     if not dimensions:
         return
 
-    CARD_W = 4.15
-    CARD_H = 2.05
+    # 2x2 grid filling 13.33" canvas
+    CARD_W = 5.9
+    CARD_H = 2.7
+    CARD_GAP_X = CONTENT_W - 2 * CARD_W  # ~0.53
+    CARD_GAP_Y = 0.3
     positions = [
-        (0.75, 0.95),   # top-left
-        (5.10, 0.95),   # top-right
-        (0.75, 3.15),   # bottom-left
-        (5.10, 3.15),   # bottom-right
+        (MARGIN_L, 0.95),                                       # top-left
+        (MARGIN_L + CARD_W + CARD_GAP_X, 0.95),                 # top-right
+        (MARGIN_L, 0.95 + CARD_H + CARD_GAP_Y),                 # bottom-left
+        (MARGIN_L + CARD_W + CARD_GAP_X, 0.95 + CARD_H + CARD_GAP_Y),  # bottom-right
     ]
+    INNER_W = CARD_W - 0.4  # text area inside card
 
     for i, dim in enumerate(dimensions[:4]):
         if i >= len(positions):
@@ -500,7 +509,7 @@ def _render_recommendations(prs, slide_data, layout_idx):
         _rect(slide, cx, cy, 0.05, CARD_H, accent)
 
         # Dimension title: ■ Name
-        box = slide.shapes.add_textbox(Inches(cx + 0.2), Inches(cy + 0.1), Inches(3.75), Inches(0.3))
+        box = slide.shapes.add_textbox(Inches(cx + 0.2), Inches(cy + 0.1), Inches(INNER_W), Inches(0.3))
         tf = box.text_frame
         tf.word_wrap = True
         r_sq = tf.paragraphs[0].add_run()
@@ -512,7 +521,7 @@ def _render_recommendations(prs, slide_data, layout_idx):
 
         # Action bullets
         actions = dim.get("actions", [])
-        box = slide.shapes.add_textbox(Inches(cx + 0.2), Inches(cy + 0.5), Inches(3.75), Inches(1.45))
+        box = slide.shapes.add_textbox(Inches(cx + 0.2), Inches(cy + 0.5), Inches(INNER_W), Inches(CARD_H - 0.65))
         tf = box.text_frame
         tf.word_wrap = True
         for ai, act in enumerate(actions[:2]):
@@ -541,8 +550,13 @@ def _render_theme_card(prs, slide_data, layout_idx, chart_paths):
     left_col = slide_data.get("left_column", {})
     right_col = slide_data.get("right_column", {})
 
+    # Layout: LEFT 57% | gap | RIGHT 40%
+    LEFT_W = 7.0
+    RIGHT_X = MARGIN_L + LEFT_W + 0.5
+    RIGHT_W = SLIDE_W - RIGHT_X - MARGIN_R  # ~4.83
+
     # 1. Theme title (22pt, NAVY)
-    _tb(slide, 0.5, 0.3, 9.0, 0.35, title, SLIDE_TITLE)
+    _tb(slide, MARGIN_L, 0.3, CONTENT_W, 0.35, title, SLIDE_TITLE)
 
     # 2. Stats bar (10pt, MID_GRAY)
     if stats_bar:
@@ -557,20 +571,20 @@ def _render_theme_card(prs, slide_data, layout_idx, chart_paths):
             parts.append(f"Ease: {stats_bar['ease']}")
         if stats_bar.get("priority"):
             parts.append(f"Priority: {stats_bar['priority']}")
-        _tb(slide, 0.5, 0.62, 9.0, 0.2, "  |  ".join(parts), STATS_TEXT)
+        _tb(slide, MARGIN_L, 0.62, CONTENT_W, 0.2, "  |  ".join(parts), STATS_TEXT)
 
     # 3. Rule
-    _rule(slide, 0.5, 0.82, 9.0)
+    _rule(slide, MARGIN_L, 0.82, CONTENT_W)
 
-    # LEFT COLUMN (5.3" wide)
+    # LEFT COLUMN
     if left_col:
         # CORE ISSUE (supports bullet points via newlines)
-        _tb(slide, 0.5, 0.95, 5.3, 0.25, "CORE ISSUE", H3_LABEL)
+        _tb(slide, MARGIN_L, 0.95, LEFT_W, 0.25, "CORE ISSUE", H3_LABEL)
         core_issue = str(left_col.get("core_issue", ""))
         if core_issue:
             lines = [_strip_md(ln.strip()) for ln in core_issue.split("\n") if ln.strip()]
             if len(lines) > 1:
-                box = slide.shapes.add_textbox(Inches(0.5), Inches(1.22), Inches(5.3), Inches(0.65))
+                box = slide.shapes.add_textbox(Inches(MARGIN_L), Inches(1.22), Inches(LEFT_W), Inches(0.85))
                 tf = box.text_frame
                 tf.word_wrap = True
                 for li, line in enumerate(lines[:4]):
@@ -580,20 +594,20 @@ def _render_theme_card(prs, slide_data, layout_idx, chart_paths):
                     r.text = line
                     _apply(r, BODY_TEXT)
             else:
-                _tb(slide, 0.5, 1.22, 5.3, 0.65, _strip_md(core_issue), BODY_TEXT)
+                _tb(slide, MARGIN_L, 1.22, LEFT_W, 0.85, _strip_md(core_issue), BODY_TEXT)
 
         # PRIMARY DRIVER
-        _tb(slide, 0.5, 1.95, 5.3, 0.25, "PRIMARY DRIVER", H3_LABEL)
+        _tb(slide, MARGIN_L, 2.15, LEFT_W, 0.25, "PRIMARY DRIVER", H3_LABEL)
         driver = _strip_md(str(left_col.get("primary_driver", "")))
         if driver:
-            _tb(slide, 0.5, 2.22, 5.3, 0.55, driver, BODY_TEXT)
+            _tb(slide, MARGIN_L, 2.42, LEFT_W, 0.55, driver, BODY_TEXT)
 
         # SOLUTIONS
         solutions = left_col.get("solutions", [])
         if solutions:
-            _tb(slide, 0.5, 2.85, 5.3, 0.25, "SOLUTIONS", H3_LABEL)
+            _tb(slide, MARGIN_L, 3.05, LEFT_W, 0.25, "SOLUTIONS", H3_LABEL)
 
-            box = slide.shapes.add_textbox(Inches(0.5), Inches(3.12), Inches(5.3), Inches(1.8))
+            box = slide.shapes.add_textbox(Inches(MARGIN_L), Inches(3.32), Inches(LEFT_W), Inches(3.7))
             tf = box.text_frame
             tf.word_wrap = True
             for si, sol in enumerate(solutions[:3]):
@@ -612,13 +626,13 @@ def _render_theme_card(prs, slide_data, layout_idx, chart_paths):
                     r_dim.text = f"[{dim}]"
                     _apply(r_dim, _style(9, bold=True, color=BLUE_ACCENT))
 
-    # RIGHT COLUMN — driver table (3.6" wide at x=6.1)
+    # RIGHT COLUMN — driver table
     if right_col:
         headers = right_col.get("headers", ["Driver", "Calls"])
         rows = right_col.get("rows", [])
         if headers and rows:
-            _add_table(slide, headers, rows, x=6.1, y=0.95, w=3.6,
-                       col_widths=[2.5, 1.1], row_h=0.28)
+            _add_table(slide, headers, rows, x=RIGHT_X, y=0.95, w=RIGHT_W,
+                       col_widths=[RIGHT_W - 1.3, 1.3], row_h=0.28)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -675,7 +689,7 @@ def build_pptx_from_sections(
     else:
         prs = Presentation()
 
-    # Canvas: 10 x 5.625 (standard 16:9)
+    # Canvas: 13.33 x 7.5 (widescreen 16:9)
     prs.slide_width = Inches(SLIDE_W)
     prs.slide_height = Inches(SLIDE_H)
 
