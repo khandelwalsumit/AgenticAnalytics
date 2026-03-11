@@ -307,17 +307,7 @@ def _verbose_details(messages: list) -> dict[str, Any]:
     return {"tool_calls": tool_calls, "ai_messages": ai_msgs, "message_count": len(messages)}
 
 
-# ------------------------------------------------------------------
-# Node I/O trace (graph contract)
-# ------------------------------------------------------------------
 
-
-def _trace_io(state: AnalyticsState, node: str, inp: dict, out: dict) -> dict[str, Any]:
-    entry = {"node": node, "input": inp, "output": {k: v for k, v in out.items() if k != "messages"}}
-    return {
-        "io_trace": state.get("io_trace", []) + [entry],
-        "last_completed_node": node,
-    }
 
 
 # ------------------------------------------------------------------
@@ -361,7 +351,7 @@ async def _run_structured_node(
     ``base_updates`` contains the boilerplate every node needs:
       - ``messages``         – new messages only (input messages filtered out)
       - ``execution_trace``  – appended ExecutionTrace entry
-      - ``io_trace`` / ``node_io`` / ``last_completed_node``
+      - ``last_completed_node``
       - checkpoint field resets
 
     The CALLER writes: reasoning, next_agent, plan_tasks, and all other
@@ -405,17 +395,13 @@ async def _run_structured_node(
 
     base: dict[str, Any] = {
         "messages": new_msgs,
-        "execution_trace": state.get("execution_trace", []) + [ExecutionTrace(
+        "execution_trace": [ExecutionTrace(
             step_id=step_id, agent=agent_name, input_summary=input_summary,
             output_summary=summary, tools_used=tools_used, latency_ms=elapsed, success=True,
         )],
+        "last_completed_node": agent_name,
         **_clear_checkpoint_fields(),
     }
-    base.update(_trace_io(
-        state, agent_name,
-        {"messages_count": len(state["messages"]), "plan_steps_completed": state.get("plan_steps_completed", 0)},
-        {"output_summary": summary, "tools_used": tools_used, "elapsed_ms": elapsed},
-    ))
     logger.info(
         "[NODE][DONE ] %s elapsed_ms=%d structured=%s tools=%s new_msgs=%d",
         agent_name,
@@ -437,7 +423,7 @@ async def _run_react_node(
 
     Returns ``(base_updates, last_new_msg)``.
 
-    ``base_updates`` contains: messages (all new), execution_trace, io_trace,
+    ``base_updates`` contains: messages (all new), execution_trace,
     last_completed_node, and checkpoint field resets.
 
     The CALLER writes: reasoning and all agent-specific state field updates.
@@ -476,17 +462,13 @@ async def _run_react_node(
 
     base: dict[str, Any] = {
         "messages": new_msgs,
-        "execution_trace": state.get("execution_trace", []) + [ExecutionTrace(
+        "execution_trace": [ExecutionTrace(
             step_id=step_id, agent=agent_name, input_summary=input_summary,
             output_summary=summary, tools_used=tools_used, latency_ms=elapsed, success=True,
         )],
+        "last_completed_node": agent_name,
         **_clear_checkpoint_fields(),
     }
-    base.update(_trace_io(
-        state, agent_name,
-        {"messages_count": len(state["messages"]), "plan_steps_completed": state.get("plan_steps_completed", 0)},
-        {"output_summary": summary, "tools_used": tools_used, "elapsed_ms": elapsed},
-    ))
     logger.info(
         "[NODE][DONE ] %s elapsed_ms=%d tools=%s new_msgs=%d",
         agent_name,

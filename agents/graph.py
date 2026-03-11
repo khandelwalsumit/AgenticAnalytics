@@ -288,6 +288,8 @@ def build_graph(
             summary = json.dumps(summary, indent=2, default=str)
 
         base["reasoning"] = [{"step_name": "Data Analyst", "step_text": summary}]
+        # Keep the full summary in reasoning only (collapsible in UI).
+        # The user-facing message and interrupt use a concise version.
         if summary:
             base["messages"] = [AIMessage(content=summary)]
 
@@ -295,10 +297,27 @@ def build_graph(
         has_buckets = base.get("data_buckets") or state.get("data_buckets")
         already_confirmed = state.get("analysis_scope_reply")
         if has_buckets and not already_confirmed:
+            # Build a concise bucket summary (names + row counts only)
+            buckets = base.get("data_buckets") or state.get("data_buckets") or {}
+            filters = base.get("filters_applied") or state.get("filters_applied") or {}
+            filter_desc = " and ".join(f"{k}={v}" for k, v in filters.items()) if filters else "all data"
+            bucket_lines = []
+            total_rows = 0
+            for binfo in buckets.values():
+                if isinstance(binfo, dict):
+                    bname = binfo.get("bucket_name", "?")
+                    bcount = binfo.get("row_count", 0)
+                    total_rows += bcount
+                    bucket_lines.append(f"- **{bname}** ({bcount} rows)")
+            concise_summary = (
+                f"Filtered to **{total_rows} rows** on {filter_desc}. "
+                f"Created **{len(bucket_lines)} buckets**:\n"
+                + "\n".join(bucket_lines)
+            )
             user_reply = interrupt({
                 "type": "analysis_dimension_confirmation",
                 "message": (
-                    f"{summary}\n\n"
+                    f"{concise_summary}\n\n"
                     "Before starting multi-lens friction analysis, please confirm "
                     "which dimensions to analyse:\n"
                     "\u2022 **Digital Friction** \u2014 app failures, self-service gaps, web/UX issues\n"
@@ -772,6 +791,9 @@ def build_graph(
         for lens_id in lens_ids:
             for bucket_key in bucket_keys:
                 focused_state = dict(state)
+                # Clear cumulative traces so each run produces ONLY its own
+                # new trace entry. _merge_parallel_outputs will collect them.
+                focused_state["execution_trace"] = []
                 focused_state["_focus_bucket"] = bucket_key
                 # Single targeted message — bucket data is already in extra_context
                 bucket_name = raw_buckets.get(bucket_key, {}).get("bucket_name", bucket_key) if isinstance(raw_buckets.get(bucket_key), dict) else bucket_key
@@ -872,6 +894,8 @@ def build_graph(
         for k, v in merged.items():
             if k != "messages":
                 synth_state[k] = v
+        # Clear cumulative traces so synthesizer produces only its own entry
+        synth_state["execution_trace"] = []
         # Single targeted message — lens data is already in extra_context
         synth_state["messages"] = [HumanMessage(content=(
             "Synthesize the friction lens analyses into themes. "
@@ -920,7 +944,7 @@ def build_graph(
 
         final = _merge_state_deltas(
             merged, synth_result,
-            list_keys={"execution_trace", "io_trace"},
+            list_keys={"execution_trace"},
             skip_keys={"messages"},
         )
         final["reasoning"]   = _build_friction_reasoning_entries(lens_ids, state, synth_result)
@@ -975,6 +999,8 @@ def build_graph(
 
         # --- Step 1: Narrative agent (ReAct) ---
         narrative_state = dict(state)
+        # Clear cumulative traces so narrative produces only its own entry
+        narrative_state["execution_trace"] = []
         narrative_state["messages"] = [HumanMessage(content=(
             "Generate the narrative markdown now with explicit slide boundary tags. "
             "You must call get_findings_summary before finalizing."
@@ -1027,7 +1053,7 @@ def build_graph(
         }
         final = _merge_state_deltas(
             narrative_result, fmt_summary,
-            list_keys={"execution_trace", "io_trace"},
+            list_keys={"execution_trace"},
             skip_keys={"messages"},
         )
         final["reasoning"]  = _build_report_reasoning_entries()

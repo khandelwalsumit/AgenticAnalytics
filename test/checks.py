@@ -332,7 +332,7 @@ try:
         "plan_tasks",
         "checkpoint_message",
         "checkpoint_prompt", "pending_input_for",
-        "execution_trace", "reasoning", "io_trace",
+        "execution_trace", "reasoning",
         "last_completed_node", "dataset_path", "dataset_schema",
         "data_buckets", "findings",
         "digital_analysis", "operations_analysis",

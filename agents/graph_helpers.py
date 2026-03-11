@@ -1406,12 +1406,11 @@ def _merge_parallel_outputs(outputs: list[dict[str, Any]]) -> dict[str, Any]:
     - messages: concatenate all
     - reasoning: concatenate all
     - execution_trace: concatenate all
-    - io_trace: concatenate all
     - Dedicated state fields (digital_analysis, etc.): take from whichever output has them
     - Other fields: last writer wins
     """
     merged: dict[str, Any] = {}
-    list_fields = {"messages", "reasoning", "execution_trace", "io_trace"}
+    list_fields = {"messages", "reasoning", "execution_trace"}
     for output in outputs:
         for key, value in output.items():
             if key in list_fields:

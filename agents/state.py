@@ -47,7 +47,6 @@ class AnalyticsState(TypedDict):
 
     # Node telemetry for UI (graph contract)
     reasoning: list[dict[str, Any]]
-    io_trace: list[dict[str, Any]]
     last_completed_node: str
 
     # Data — METADATA ONLY (raw data lives in cache files)

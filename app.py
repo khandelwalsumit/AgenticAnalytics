@@ -357,7 +357,7 @@ def make_initial_state() -> dict[str, Any]:
         "pending_input_for": "",
         "analysis_scope_reply": "",
         "execution_trace": [], "reasoning": [],
-        "io_trace": [], "last_completed_node": "",
+        "last_completed_node": "",
         "dataset_path": "", "dataset_schema": {},
         "data_buckets": {},
         "filtered_parquet_path": "", "bucket_paths": {},
@@ -698,10 +698,8 @@ async def on_message(message: cl.Message):
                         state.setdefault("messages", []).extend(v if isinstance(v, list) else [v])
                     elif k == "reasoning" and isinstance(v, list):
                         state.setdefault(k, []).extend(v)
-                    elif k in ("execution_trace", "io_trace") and isinstance(v, list):
-                        # Nodes already return cumulative traces (state + new entry).
-                        # Replacing avoids duplicate growth on every streamed update.
-                        state[k] = v
+                    elif k == "execution_trace" and isinstance(v, list):
+                        state.setdefault(k, []).extend(v)
                     else:
                         state[k] = v
 
