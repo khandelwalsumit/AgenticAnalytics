@@ -207,43 +207,61 @@ def bucket_data(group_by: str = "", focus: str = "") -> str:
             "available": list(df.columns),
         })
 
-    # Determine the next column in hierarchy for sub-bucketing oversized groups
+    # Determine hierarchy columns available for recursive sub-bucketing
     available_cols = [c for c in GROUP_BY_COLUMNS if c in df.columns]
     current_idx = available_cols.index(group_by) if group_by in available_cols else -1
-    next_col = available_cols[current_idx + 1] if current_idx + 1 < len(available_cols) else None
 
-    # --- Group and apply min/max logic ---
+    # --- Group and apply min/max logic (recursive sub-bucketing) ---
     grouped = df.groupby(group_by, dropna=False)
     regular_buckets: dict[str, pd.DataFrame] = {}
     tail_rows: list[pd.DataFrame] = []
 
-    for name, group_df in grouped:
-        bucket_name = str(name) if pd.notna(name) else "Unknown"
-        count = len(group_df)
+    def _sub_bucket(
+        parent_name: str,
+        parent_df: pd.DataFrame,
+        remaining_cols: list[str],
+    ) -> None:
+        """Recursively split oversized buckets by the next column in hierarchy."""
+        count = len(parent_df)
 
         if TAIL_BUCKET_ENABLED and count < MIN_BUCKET_SIZE:
-            # Collect into tail
-            tail_rows.append(group_df)
-        elif count > MAX_BUCKET_SIZE and next_col:
-            # Sub-bucket by next column in hierarchy
-            sub_grouped = group_df.groupby(next_col, dropna=False)
+            tail_rows.append(parent_df)
+            return
+
+        if count > MAX_BUCKET_SIZE and remaining_cols:
+            split_col = remaining_cols[0]
+            deeper_cols = remaining_cols[1:]
+            sub_grouped = parent_df.groupby(split_col, dropna=False)
             sub_tail: list[pd.DataFrame] = []
+
             for sub_name, sub_df in sub_grouped:
-                sub_bucket_name = f"{bucket_name} > {sub_name}" if pd.notna(sub_name) else f"{bucket_name} > Unknown"
+                sub_bucket_name = (
+                    f"{parent_name} > {sub_name}" if pd.notna(sub_name)
+                    else f"{parent_name} > Unknown"
+                )
                 if TAIL_BUCKET_ENABLED and len(sub_df) < MIN_BUCKET_SIZE:
                     sub_tail.append(sub_df)
+                elif len(sub_df) > MAX_BUCKET_SIZE and deeper_cols:
+                    # Still oversized — recurse into next level
+                    _sub_bucket(sub_bucket_name, sub_df, deeper_cols)
                 else:
                     regular_buckets[sub_bucket_name] = sub_df
 
-            # Merge sub-tails into parent-level tail
             if sub_tail:
                 merged_sub_tail = pd.concat(sub_tail, ignore_index=True)
                 if len(merged_sub_tail) >= MIN_BUCKET_SIZE:
-                    regular_buckets[f"{bucket_name} > Other"] = merged_sub_tail
+                    regular_buckets[f"{parent_name} > Other"] = merged_sub_tail
                 else:
                     tail_rows.append(merged_sub_tail)
         else:
-            regular_buckets[bucket_name] = group_df
+            regular_buckets[parent_name] = parent_df
+
+    # Columns available for deeper splits after the current group_by
+    deeper_cols = available_cols[current_idx + 1:] if current_idx >= 0 else []
+
+    for name, group_df in grouped:
+        bucket_name = str(name) if pd.notna(name) else "Unknown"
+        _sub_bucket(bucket_name, group_df, deeper_cols)
 
     # Merge all tail rows into "Other" bucket
     if tail_rows:
