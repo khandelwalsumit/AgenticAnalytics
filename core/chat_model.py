@@ -39,11 +39,23 @@ from core.auth import authenticate_vertexai
 logger = logging.getLogger(__name__)
 
 try:
-    from google.api_core.exceptions import ResourceExhausted, TooManyRequests
+    from google.api_core.exceptions import (
+        BadGateway,
+        GatewayTimeout,
+        ResourceExhausted,
+        ServiceUnavailable,
+        TooManyRequests,
+    )
 
-    _RATE_LIMIT_EXCEPTIONS: tuple[type[Exception], ...] = (TooManyRequests, ResourceExhausted)
+    _RATE_LIMIT_EXCEPTIONS: tuple[type[Exception], ...] = (
+        TooManyRequests, ResourceExhausted,
+    )
+    _TRANSIENT_EXCEPTIONS: tuple[type[Exception], ...] = (
+        BadGateway, ServiceUnavailable, GatewayTimeout,
+    )
 except Exception:
     _RATE_LIMIT_EXCEPTIONS = ()
+    _TRANSIENT_EXCEPTIONS = ()
 
 from vertexai.generative_models import (
     Content,
@@ -279,19 +291,22 @@ class VertexAIChatModel(BaseChatModel):
         return contents, extracted_system_instruction
 
     def _call_with_backoff(self, func: Any, *args: Any, **kwargs: Any) -> Any:
-        if BACKOFF_MAX_DELAY <= 0 or not _RATE_LIMIT_EXCEPTIONS:
+        retryable = _RATE_LIMIT_EXCEPTIONS + _TRANSIENT_EXCEPTIONS
+        if BACKOFF_MAX_DELAY <= 0 or not retryable:
             return func(*args, **kwargs)
 
         delay = 1.0
         for attempt in range(10):
             try:
                 return func(*args, **kwargs)
-            except _RATE_LIMIT_EXCEPTIONS as exc:
+            except retryable as exc:
                 if attempt >= 9:
-                    raise RuntimeError(f"Rate limit exceeded after retries: {exc}") from exc
+                    raise RuntimeError(f"LLM call failed after 10 retries: {exc}") from exc
                 actual_delay = delay * (0.7 + random.random() * 0.3)
+                exc_name = type(exc).__name__
                 logger.warning(
-                    "Rate limit hit (attempt %d/10). Retrying in %.1fs",
+                    "%s (attempt %d/10). Retrying in %.1fs",
+                    exc_name,
                     attempt + 1,
                     actual_delay,
                 )

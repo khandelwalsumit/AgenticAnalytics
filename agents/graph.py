@@ -73,6 +73,8 @@ from agents.graph_helpers import (
     _set_task_sub_agents_and_emit,
     _should_summarize_lens_outputs,
     _summarize_lens_buckets,
+    _summarize_lens_buckets_with_llm,
+    L2_BATCH_SIZE,
     _validate_artifact_paths,
     _validate_narrative,
 )
@@ -844,10 +846,14 @@ def build_graph(
         lens_synthesis_paths: dict[str, str] = {}
         for i, lid in enumerate(lens_ids):
             bucket_path_dict = nested_md_paths[lid]
+            num_buckets = len(bucket_path_dict)
 
-            if use_summarization:
-                # Structured summarization: extract issues, call volume,
-                # solutions by team from each bucket's raw output
+            if use_summarization and num_buckets > L2_BATCH_SIZE:
+                # >10 buckets: intermediate LLM grouping (batch ~10 buckets,
+                # LLM per batch to consolidate, then assemble)
+                lens_md = await _summarize_lens_buckets_with_llm(lid, bucket_path_dict, raw_buckets)
+            elif use_summarization:
+                # ≤10 buckets: direct tiered extraction (no LLM, text-only)
                 lens_md = _summarize_lens_buckets(lid, bucket_path_dict, raw_buckets)
             else:
                 # Raw concatenation (small context — no summarization needed)
@@ -864,7 +870,9 @@ def build_graph(
 
             lens_path = _write_versioned_md(
                 f"lens_synthesis_{lid}", lens_md,
-                {"lens": lid, "bucket_count": len(bucket_path_dict), "summarized": use_summarization},
+                {"lens": lid, "bucket_count": num_buckets,
+                 "summarized": use_summarization,
+                 "intermediate_llm": use_summarization and num_buckets > L2_BATCH_SIZE},
             )
             if lens_path:
                 lens_synthesis_paths[lid] = lens_path

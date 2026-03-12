@@ -261,28 +261,22 @@ def _detect_team_from_text(text: str) -> str:
     return best_team if scores[best_team] > 0 else "operations"
 
 
-def _summarize_lens_buckets(
+L2_BATCH_SIZE = 10  # Group ~10 buckets per intermediate LLM summary
+
+
+def _extract_bucket_entries(
     lens_id: str,
     bucket_path_dict: dict[str, str],
     raw_buckets: dict[str, Any],
-) -> str:
-    """Summarize all bucket outputs for one lens using volume-weighted L2 compression.
+) -> list[dict[str, Any]]:
+    """Extract structured summaries from all bucket files for one lens.
 
-    Three-tier approach to keep synthesizer context manageable:
-      - **Tier 1** (top buckets covering ~80% of total call volume): full extracted
-        summary with all findings, drivers, and solutions.
-      - **Tier 2** (remaining buckets): condensed to one line each — bucket name,
-        call count, top driver, and scores.
-      - **Volume header**: total calls, bucket count, and tier split so the
-        synthesizer understands the data distribution.
-
-    Each team gets its own solution entries so they can independently evaluate
-    based on their budget and solution complexity.
+    Returns a list of dicts sorted by volume descending, each containing:
+      key, name, volume, summary (full markdown), condensed (one-liner), parsed (bool).
     """
     from pathlib import Path as _P
 
-    # ── Step 1: extract per-bucket summaries and parse call volumes ──
-    bucket_entries: list[dict[str, Any]] = []
+    entries: list[dict[str, Any]] = []
     for bk in sorted(bucket_path_dict.keys()):
         bpath = bucket_path_dict[bk]
         bucket_name = bk
@@ -292,7 +286,7 @@ def _summarize_lens_buckets(
             row_count = int(raw_buckets[bk].get("row_count", 0) or 0)
 
         if not (bpath and _P(bpath).exists()):
-            bucket_entries.append({
+            entries.append({
                 "key": bk, "name": bucket_name, "volume": row_count,
                 "summary": f"### {bucket_name}\n(No output)\n",
                 "condensed": f"- {bucket_name}: no output",
@@ -303,7 +297,7 @@ def _summarize_lens_buckets(
         raw_content = _P(bpath).read_text(encoding="utf-8").strip()
         if not raw_content:
             logger.warning("Empty friction output for %s / %s: %s", lens_id, bk, bpath)
-            bucket_entries.append({
+            entries.append({
                 "key": bk, "name": bucket_name, "volume": row_count,
                 "summary": f"### {bucket_name}\n(No output — empty response)\n",
                 "condensed": f"- {bucket_name}: empty output",
@@ -313,10 +307,9 @@ def _summarize_lens_buckets(
 
         try:
             full_summary = _extract_bucket_summary(bk, bucket_name, raw_content)
-            # Parse volume from the extracted summary for accurate sorting
             parsed_volume = _parse_volume_from_summary(full_summary, row_count)
             condensed = _condense_bucket_one_liner(bk, bucket_name, raw_content, parsed_volume)
-            bucket_entries.append({
+            entries.append({
                 "key": bk, "name": bucket_name, "volume": parsed_volume,
                 "summary": full_summary, "condensed": condensed, "parsed": True,
             })
@@ -324,17 +317,46 @@ def _summarize_lens_buckets(
             logger.warning("Skipping bucket %s / %s — summary extraction failed: %s", lens_id, bk, exc)
             continue
 
-    # ── Step 2: sort by volume descending, split into tiers ──
-    bucket_entries.sort(key=lambda e: e["volume"], reverse=True)
+    entries.sort(key=lambda e: e["volume"], reverse=True)
+    return entries
+
+
+def _summarize_lens_buckets(
+    lens_id: str,
+    bucket_path_dict: dict[str, str],
+    raw_buckets: dict[str, Any],
+) -> str:
+    """Summarize all bucket outputs for one lens using volume-weighted L2 compression.
+
+    Used when bucket count ≤ 10. For >10 buckets, use
+    ``_summarize_lens_buckets_with_llm`` which adds intermediate LLM grouping.
+
+    Three-tier approach to keep synthesizer context manageable:
+      - **Tier 1** (top buckets covering ~80% of total call volume): full extracted
+        summary with all findings, drivers, and solutions.
+      - **Tier 2** (remaining buckets): condensed to one line each — bucket name,
+        call count, top driver, and scores.
+      - **Volume header**: total calls, bucket count, and tier split so the
+        synthesizer understands the data distribution.
+    """
+    bucket_entries = _extract_bucket_entries(lens_id, bucket_path_dict, raw_buckets)
+    return _build_tiered_lens_output(lens_id, bucket_entries)
+
+
+def _build_tiered_lens_output(
+    lens_id: str,
+    bucket_entries: list[dict[str, Any]],
+) -> str:
+    """Build the final lens output from extracted bucket entries using tier1/tier2 split."""
     total_volume = sum(e["volume"] for e in bucket_entries)
 
     # Tier 1: top buckets covering ~80% of volume (min 5, max 20)
     cumulative = 0
-    tier1_cutoff = max(5, min(20, len(bucket_entries)))  # bounds
+    tier1_cutoff = max(5, min(20, len(bucket_entries)))
     volume_threshold = total_volume * 0.80 if total_volume > 0 else 0
     for idx, entry in enumerate(bucket_entries):
         cumulative += entry["volume"]
-        if cumulative >= volume_threshold and idx >= 4:  # at least 5 in tier 1
+        if cumulative >= volume_threshold and idx >= 4:
             tier1_cutoff = idx + 1
             break
 
@@ -344,7 +366,6 @@ def _summarize_lens_buckets(
     tier1_volume = sum(e["volume"] for e in tier1)
     tier2_volume = sum(e["volume"] for e in tier2)
 
-    # ── Step 3: build L2 output ──
     parts = [
         f"# {lens_id} — Lens Summary (L2)\n",
         f"**{len(bucket_entries)} buckets analyzed** | "
@@ -378,7 +399,7 @@ def _summarize_lens_buckets(
 
     result = "\n".join(parts)
 
-    # ── Step 4: hard cap to prevent context explosion ──
+    # Hard cap to prevent context explosion
     if len(result) > SYNTHESIZER_MAX_LENS_CHARS:
         truncated_at = SYNTHESIZER_MAX_LENS_CHARS - 200
         result = (
@@ -394,6 +415,149 @@ def _summarize_lens_buckets(
     logger.info(
         "L2 summary for %s: %d buckets (tier1=%d, tier2=%d), %d chars",
         lens_id, len(bucket_entries), len(tier1), len(tier2), len(result),
+    )
+    return result
+
+
+def _group_buckets_into_batches(
+    entries: list[dict[str, Any]],
+    batch_size: int = L2_BATCH_SIZE,
+) -> list[list[dict[str, Any]]]:
+    """Group bucket entries into batches of ~batch_size, sorted by volume descending.
+
+    Buckets are already sorted by volume. We create batches so each intermediate
+    summary covers a manageable set of themes.
+    """
+    if not entries:
+        return []
+    batches: list[list[dict[str, Any]]] = []
+    for i in range(0, len(entries), batch_size):
+        batches.append(entries[i:i + batch_size])
+    return batches
+
+
+async def _llm_summarize_batch(
+    lens_id: str,
+    batch_idx: int,
+    batch: list[dict[str, Any]],
+    total_volume: int,
+) -> str:
+    """Call the LLM to produce an intermediate L2 summary for a batch of buckets.
+
+    Each batch gets a focused prompt asking the LLM to consolidate the bucket
+    analyses into key themes, preserving volume data and actionable solutions.
+    """
+    from langchain_core.messages import HumanMessage as _HM, SystemMessage as _SM
+    from core.chat_model import VertexAILLM
+
+    batch_volume = sum(e["volume"] for e in batch)
+    bucket_texts = []
+    for entry in batch:
+        bucket_texts.append(entry["summary"])
+
+    combined_input = "\n\n".join(bucket_texts)
+
+    system_prompt = (
+        "You are a friction analysis summarizer. You receive detailed analyses "
+        "of multiple customer call buckets from the same analytical lens. "
+        "Your job is to consolidate them into a concise intermediate summary that:\n"
+        "1. Identifies the TOP 3-5 cross-cutting themes across these buckets\n"
+        "2. Preserves exact call volumes and percentages\n"
+        "3. Ranks themes by total call volume (highest first)\n"
+        "4. For each theme: state the problem, combined call volume, "
+        "top drivers, impact/ease scores, and recommended solutions\n"
+        "5. Notes which original buckets contribute to each theme\n\n"
+        "Keep it structured and concise. Use markdown headers and bullet points. "
+        "Do NOT invent data — only summarize what is provided."
+    )
+
+    user_prompt = (
+        f"Lens: {lens_id}\n"
+        f"Batch {batch_idx + 1}: {len(batch)} buckets, "
+        f"{batch_volume:,} calls ({batch_volume / max(total_volume, 1) * 100:.0f}% of total)\n\n"
+        f"Summarize the following bucket analyses into consolidated themes:\n\n"
+        f"{combined_input}"
+    )
+
+    try:
+        llm = VertexAILLM(temperature=0.1, max_output_tokens=4096)
+        response = await llm.ainvoke([_SM(content=system_prompt), _HM(content=user_prompt)])
+        summary = response.content if hasattr(response, "content") else str(response)
+        logger.info(
+            "L2 intermediate summary for %s batch %d: %d buckets -> %d chars",
+            lens_id, batch_idx + 1, len(batch), len(summary),
+        )
+        return f"## Batch {batch_idx + 1} ({len(batch)} buckets, {batch_volume:,} calls)\n\n{summary}\n"
+    except Exception as exc:
+        logger.error("L2 intermediate LLM call failed for %s batch %d: %s", lens_id, batch_idx + 1, exc)
+        # Fallback: return raw extracted summaries without LLM consolidation
+        fallback_parts = [f"## Batch {batch_idx + 1} ({len(batch)} buckets, {batch_volume:,} calls)\n"]
+        for entry in batch:
+            fallback_parts.append(entry["summary"])
+        return "\n".join(fallback_parts)
+
+
+async def _summarize_lens_buckets_with_llm(
+    lens_id: str,
+    bucket_path_dict: dict[str, str],
+    raw_buckets: dict[str, Any],
+) -> str:
+    """Summarize bucket outputs with intermediate LLM grouping for >10 buckets.
+
+    Pipeline:
+      1. Extract per-bucket structured summaries (text-only, no LLM)
+      2. Group into batches of ~10 buckets sorted by volume
+      3. LLM call per batch to produce intermediate consolidated summary
+      4. Assemble final lens output from batch summaries + hard cap
+    """
+    import asyncio as _aio
+
+    bucket_entries = _extract_bucket_entries(lens_id, bucket_path_dict, raw_buckets)
+
+    if len(bucket_entries) <= L2_BATCH_SIZE:
+        # ≤10 buckets: use direct tiered output (no LLM needed)
+        return _build_tiered_lens_output(lens_id, bucket_entries)
+
+    total_volume = sum(e["volume"] for e in bucket_entries)
+    batches = _group_buckets_into_batches(bucket_entries, L2_BATCH_SIZE)
+
+    logger.info(
+        "L2 intermediate summarization for %s: %d buckets -> %d batches (batch_size=%d)",
+        lens_id, len(bucket_entries), len(batches), L2_BATCH_SIZE,
+    )
+
+    # Run all batch LLM calls in parallel
+    batch_coros = [
+        _llm_summarize_batch(lens_id, i, batch, total_volume)
+        for i, batch in enumerate(batches)
+    ]
+    batch_summaries = await _aio.gather(*batch_coros)
+
+    # Assemble final lens output
+    parts = [
+        f"# {lens_id} — Lens Summary (L2, Intermediate Grouped)\n",
+        f"**{len(bucket_entries)} buckets analyzed** | "
+        f"Total calls: {total_volume:,} | "
+        f"Grouped into {len(batches)} intermediate summaries\n",
+    ]
+    for summary in batch_summaries:
+        parts.append(summary)
+
+    result = "\n".join(parts)
+
+    # Hard cap
+    if len(result) > SYNTHESIZER_MAX_LENS_CHARS:
+        truncated_at = SYNTHESIZER_MAX_LENS_CHARS - 200
+        result = (
+            result[:truncated_at]
+            + f"\n\n---\n*[Truncated: lens output exceeded {SYNTHESIZER_MAX_LENS_CHARS:,} char limit. "
+            f"{len(result):,} total chars.]*\n"
+        )
+        logger.warning("Lens %s output truncated: %d chars", lens_id, len(result))
+
+    logger.info(
+        "L2 grouped summary for %s: %d buckets, %d batches, %d chars",
+        lens_id, len(bucket_entries), len(batches), len(result),
     )
     return result
 
