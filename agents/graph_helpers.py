@@ -21,7 +21,7 @@ from ui.components import sync_task_list
 logger = logging.getLogger("agenticanalytics.graph")
 
 
-from config import SUMMARIZE_THRESHOLD_CHARS
+from config import SUMMARIZE_THRESHOLD_CHARS, SYNTHESIZER_MAX_LENS_CHARS
 
 MAX_REPORT_RETRIES = 3
 
@@ -251,39 +251,201 @@ def _summarize_lens_buckets(
     bucket_path_dict: dict[str, str],
     raw_buckets: dict[str, Any],
 ) -> str:
-    """Summarize all bucket outputs for one lens into a compact structured format.
+    """Summarize all bucket outputs for one lens using volume-weighted L2 compression.
 
-    Returns a markdown string with per-bucket summaries containing key issues,
-    call volumes, and solutions tagged by responsible team.
+    Three-tier approach to keep synthesizer context manageable:
+      - **Tier 1** (top buckets covering ~80% of total call volume): full extracted
+        summary with all findings, drivers, and solutions.
+      - **Tier 2** (remaining buckets): condensed to one line each — bucket name,
+        call count, top driver, and scores.
+      - **Volume header**: total calls, bucket count, and tier split so the
+        synthesizer understands the data distribution.
 
     Each team gets its own solution entries so they can independently evaluate
     based on their budget and solution complexity.
     """
     from pathlib import Path as _P
 
-    parts = [f"# {lens_id} — Summarized Bucket Analysis\n"]
+    # ── Step 1: extract per-bucket summaries and parse call volumes ──
+    bucket_entries: list[dict[str, Any]] = []
     for bk in sorted(bucket_path_dict.keys()):
         bpath = bucket_path_dict[bk]
         bucket_name = bk
+        row_count = 0
         if isinstance(raw_buckets.get(bk), dict):
             bucket_name = raw_buckets[bk].get("bucket_name", bk)
+            row_count = int(raw_buckets[bk].get("row_count", 0) or 0)
 
-        if bpath and _P(bpath).exists():
-            raw_content = _P(bpath).read_text(encoding="utf-8").strip()
-            if not raw_content:
-                logger.warning("Empty friction output file for %s / %s: %s", lens_id, bk, bpath)
-                parts.append(f"### {bucket_name}\n(No output — agent produced empty response)\n")
-                continue
-            try:
-                summary = _extract_bucket_summary(bk, bucket_name, raw_content)
-                parts.append(summary)
-            except ValueError as exc:
-                logger.error("Failed to parse friction output for %s / %s: %s", lens_id, bk, exc)
-                parts.append(f"### {bucket_name}\n(Parse error — partial output skipped)\n")
-        else:
-            parts.append(f"### {bucket_name}\n(No output)\n")
+        if not (bpath and _P(bpath).exists()):
+            bucket_entries.append({
+                "key": bk, "name": bucket_name, "volume": row_count,
+                "summary": f"### {bucket_name}\n(No output)\n",
+                "condensed": f"- {bucket_name}: no output",
+                "parsed": False,
+            })
+            continue
 
-    return "\n".join(parts)
+        raw_content = _P(bpath).read_text(encoding="utf-8").strip()
+        if not raw_content:
+            logger.warning("Empty friction output for %s / %s: %s", lens_id, bk, bpath)
+            bucket_entries.append({
+                "key": bk, "name": bucket_name, "volume": row_count,
+                "summary": f"### {bucket_name}\n(No output — empty response)\n",
+                "condensed": f"- {bucket_name}: empty output",
+                "parsed": False,
+            })
+            continue
+
+        try:
+            full_summary = _extract_bucket_summary(bk, bucket_name, raw_content)
+            # Parse volume from the extracted summary for accurate sorting
+            parsed_volume = _parse_volume_from_summary(full_summary, row_count)
+            condensed = _condense_bucket_one_liner(bk, bucket_name, raw_content, parsed_volume)
+            bucket_entries.append({
+                "key": bk, "name": bucket_name, "volume": parsed_volume,
+                "summary": full_summary, "condensed": condensed, "parsed": True,
+            })
+        except ValueError as exc:
+            logger.error("Failed to parse friction output for %s / %s: %s", lens_id, bk, exc)
+            bucket_entries.append({
+                "key": bk, "name": bucket_name, "volume": row_count,
+                "summary": f"### {bucket_name}\n(Parse error — skipped)\n",
+                "condensed": f"- {bucket_name}: parse error",
+                "parsed": False,
+            })
+
+    # ── Step 2: sort by volume descending, split into tiers ──
+    bucket_entries.sort(key=lambda e: e["volume"], reverse=True)
+    total_volume = sum(e["volume"] for e in bucket_entries)
+
+    # Tier 1: top buckets covering ~80% of volume (min 5, max 20)
+    cumulative = 0
+    tier1_cutoff = max(5, min(20, len(bucket_entries)))  # bounds
+    volume_threshold = total_volume * 0.80 if total_volume > 0 else 0
+    for idx, entry in enumerate(bucket_entries):
+        cumulative += entry["volume"]
+        if cumulative >= volume_threshold and idx >= 4:  # at least 5 in tier 1
+            tier1_cutoff = idx + 1
+            break
+
+    tier1 = bucket_entries[:tier1_cutoff]
+    tier2 = bucket_entries[tier1_cutoff:]
+
+    tier1_volume = sum(e["volume"] for e in tier1)
+    tier2_volume = sum(e["volume"] for e in tier2)
+
+    # ── Step 3: build L2 output ──
+    parts = [
+        f"# {lens_id} — Lens Summary (L2)\n",
+        f"**{len(bucket_entries)} buckets analyzed** | "
+        f"Total calls: {total_volume:,} | "
+        f"Tier 1 (detailed): {len(tier1)} buckets ({tier1_volume:,} calls, "
+        f"{tier1_volume / total_volume * 100:.0f}% of volume)" if total_volume > 0 else
+        f"Tier 1 (detailed): {len(tier1)} buckets",
+    ]
+    if tier2:
+        parts.append(
+            f"Tier 2 (condensed): {len(tier2)} buckets ({tier2_volume:,} calls, "
+            f"{tier2_volume / total_volume * 100:.0f}% of volume)" if total_volume > 0 else
+            f"Tier 2 (condensed): {len(tier2)} buckets"
+        )
+    parts.append("")
+
+    # Tier 1: full summaries
+    parts.append("## High-Volume Themes (Detailed)\n")
+    for entry in tier1:
+        parts.append(entry["summary"])
+
+    # Tier 2: one-liner condensed
+    if tier2:
+        parts.append("\n## Lower-Volume Themes (Condensed)\n")
+        parts.append(
+            "The following themes had lower call volumes. "
+            "Key details are condensed to top driver and scores:\n"
+        )
+        for entry in tier2:
+            parts.append(entry["condensed"])
+
+    result = "\n".join(parts)
+
+    # ── Step 4: hard cap to prevent context explosion ──
+    if len(result) > SYNTHESIZER_MAX_LENS_CHARS:
+        truncated_at = SYNTHESIZER_MAX_LENS_CHARS - 200
+        result = (
+            result[:truncated_at]
+            + f"\n\n---\n*[Truncated: lens output exceeded {SYNTHESIZER_MAX_LENS_CHARS:,} char limit. "
+            f"{len(result):,} total chars, showing top themes by volume.]*\n"
+        )
+        logger.warning(
+            "Lens %s output truncated: %d -> %d chars",
+            lens_id, len("\n".join(parts)), len(result),
+        )
+
+    logger.info(
+        "L2 summary for %s: %d buckets (tier1=%d, tier2=%d), %d chars",
+        lens_id, len(bucket_entries), len(tier1), len(tier2), len(result),
+    )
+    return result
+
+
+def _parse_volume_from_summary(summary: str, fallback: int = 0) -> int:
+    """Extract call count from a bucket summary's **Volume** line."""
+    m = re.search(r"\*\*Volume\*\*:\s*(\d[\d,]*)\s*calls", summary)
+    if m:
+        return int(m.group(1).replace(",", ""))
+    return fallback
+
+
+def _condense_bucket_one_liner(
+    bucket_key: str, bucket_name: str, raw_md: str, volume: int,
+) -> str:
+    """Produce a single-line condensed summary for a low-volume bucket.
+
+    Format: - BucketName: N calls | Impact=X Ease=Y | Top driver: ...
+    """
+    data = _extract_json_from_friction_output(raw_md)
+    if not data:
+        return f"- {bucket_name}: {volume} calls (could not parse details)"
+
+    impact = data.get("impact_score", 0)
+    ease = data.get("ease_score", 0)
+    top_driver = ""
+    for d in data.get("top_drivers", []):
+        if isinstance(d, dict) and d.get("driver"):
+            top_driver = str(d["driver"])[:100]
+            break
+
+    line = f"- **{bucket_name}**: {volume:,} calls | Impact={impact}/10 Ease={ease}/10"
+    if top_driver:
+        line += f" | Top driver: {top_driver}"
+    return line
+
+
+def _extract_json_from_friction_output(raw_md: str) -> dict[str, Any]:
+    """Extract the friction agent's JSON payload from raw markdown output.
+
+    Shared parser used by both _extract_bucket_summary and _condense_bucket_one_liner.
+    """
+    data: dict[str, Any] = {}
+    candidates: list[str] = []
+    if "```" in raw_md:
+        for part in raw_md.split("```")[1::2]:
+            part = part.strip()
+            if part.startswith("json"):
+                part = part[4:].strip()
+            candidates.append(part)
+    if "{" in raw_md:
+        start = raw_md.find("{")
+        end = raw_md.rfind("}")
+        if start < end:
+            candidates.append(raw_md[start:end + 1])
+    for candidate in candidates:
+        parsed = _try_parse_json(candidate)
+        if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+            parsed = parsed[0]
+        if isinstance(parsed, dict) and ("top_drivers" in parsed or "findings" in parsed):
+            data = parsed
+    return data
 
 
 def _should_summarize_lens_outputs(

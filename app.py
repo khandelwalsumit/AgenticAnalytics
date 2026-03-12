@@ -289,9 +289,14 @@ async def _restore_resume_ui(thread_id: str, state: dict[str, Any]) -> None:
             state.get("analysis_complete"),
         )
 
-    # Download elements are ephemeral — always re-send on resume.
-    state["downloads_sent"] = False
-    await _maybe_send_downloads(thread_id, state)
+    # Download elements are ephemeral (cl.File path= lives in memory).
+    # Sending during on_chat_resume causes flash-and-vanish because Chainlit
+    # settles the UI after the handler returns, invalidating in-memory files.
+    # Instead, defer to the first on_message interaction.
+    if _collect_output_files(thread_id):
+        state["downloads_sent"] = False
+        state["_downloads_pending_resume"] = True
+        log.info("Resume UI: deferred download buttons to first interaction")
 
 
 async def _maybe_send_downloads(thread_id: str, state: dict[str, Any]) -> bool:
@@ -572,6 +577,11 @@ async def on_message(message: cl.Message):
                 state["dataset_schema"] = LLM_ANALYSIS_CONTEXT
                 log.info("File uploaded and saved as parquet: %s", dest)
                 break
+
+    # Send deferred download buttons from chat resume (must happen after UI settles)
+    if state.get("_downloads_pending_resume"):
+        state.pop("_downloads_pending_resume", None)
+        await _maybe_send_downloads(thread_id, state)
 
     user_text = message.content or "Proceed"
     log.info("User message: %s", user_text[:80])

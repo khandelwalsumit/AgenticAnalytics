@@ -146,6 +146,12 @@ MAX_MULTITHREADING_WORKERS = int(os.getenv("MAX_MULTITHREADING_WORKERS", "8"))
 MAX_SUPERVISOR_MSGS = int(os.getenv("MAX_SUPERVISOR_MSGS", "6"))
 SUMMARIZE_THRESHOLD_CHARS = int(os.getenv("SUMMARIZE_THRESHOLD_CHARS", "40000"))
 
+# Hard cap on per-lens synthesis text fed to the synthesizer (chars).
+# After L2 volume-weighted compression, if a lens output still exceeds this
+# limit it is truncated with a note. Default 80K → total synthesizer context
+# stays under ~200K even with 4 lenses active.
+SYNTHESIZER_MAX_LENS_CHARS = int(os.getenv("SYNTHESIZER_MAX_LENS_CHARS", "80000"))
+
 
 
 ##########################################################################

@@ -153,7 +153,7 @@ def build_graph(
         slim_state["messages"] = slim_msgs
 
         base, structured, last_msg = await _run_structured_node(
-            "supervisor", supervisor_chain, SupervisorOutput, sys_prompt, slim_state, extra_context=ctx
+            "supervisor", supervisor_chain, SupervisorOutput, sys_prompt, slim_state,
         )
 
         if isinstance(structured, SupervisorOutput):
@@ -213,7 +213,7 @@ def build_graph(
         planner_state["messages"] = [HumanMessage(content=planner_msg)]
 
         base, structured, last_msg = await _run_structured_node(
-            "planner", planner_chain, PlannerOutput, sys_prompt, planner_state, extra_context=ctx
+            "planner", planner_chain, PlannerOutput, sys_prompt, planner_state,
         )
 
         if not isinstance(structured, PlannerOutput):
@@ -481,8 +481,10 @@ def build_graph(
         ctx = _build_extra_context("synthesizer_agent", state, None)
         sys_prompt = agent_factory.parse_agent_md("synthesizer_agent").system_prompt + ctx
 
+        # Note: ctx is already embedded in sys_prompt — pass empty extra_context
+        # to avoid double-counting in the LLM input signature log.
         base, structured, last_msg = await _run_structured_node(
-            "synthesizer_agent", synthesizer_chain, SynthesizerOutput, sys_prompt, state, extra_context=ctx
+            "synthesizer_agent", synthesizer_chain, SynthesizerOutput, sys_prompt, state,
         )
 
         if isinstance(structured, SynthesizerOutput):
