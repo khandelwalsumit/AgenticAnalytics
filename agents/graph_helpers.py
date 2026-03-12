@@ -175,47 +175,62 @@ def _extract_bucket_summary(bucket_key: str, bucket_name: str, raw_md: str) -> s
 
     parts = [f"### {bucket_name}"]
 
+    def _num(val: Any, default: int | float = 0) -> int | float:
+        """Coerce a possibly-None value to a number."""
+        if val is None:
+            return default
+        try:
+            return type(default)(val)
+        except (TypeError, ValueError):
+            return default
+
     # Volume
-    call_count = data.get("call_count", 0)
-    call_pct = data.get("call_percentage", 0.0)
-    total_calls = data.get("total_dataset_calls", call_count)
+    call_count = int(_num(data.get("call_count"), 0))
+    call_pct = float(_num(data.get("call_percentage"), 0.0))
+    total_calls = int(_num(data.get("total_dataset_calls"), call_count))
     parts.append(f"**Volume**: {call_count} calls ({call_pct:.1f}% of {total_calls} total)")
 
     # Scores
-    ease = data.get("ease_score", 0)
-    impact = data.get("impact_score", 0)
-    priority = data.get("priority_score", 0)
+    ease = _num(data.get("ease_score"), 0)
+    impact = _num(data.get("impact_score"), 0)
+    priority = _num(data.get("priority_score"), 0)
     parts.append(f"**Scores**: Impact={impact}/10 | Ease={ease}/10 | Priority={priority}/10")
 
     # Top drivers
-    for d in data.get("top_drivers", []):
+    for d in data.get("top_drivers") or []:
         if not isinstance(d, dict) or "driver" not in d:
             continue
+        d_count = int(_num(d.get("call_count"), 0))
+        d_pct = float(_num(d.get("contribution_pct"), 0.0))
+        d_solution = str(d.get("recommended_solution") or "N/A")[:150]
         parts.append(
-            f"  - [{d.get('type', 'secondary')}] {d['driver']} — "
-            f"{d.get('call_count', 0)} calls ({d.get('contribution_pct', 0):.1f}%) "
-            f"→ {d.get('recommended_solution', 'N/A')[:150]}"
+            f"  - [{d.get('type') or 'secondary'}] {d['driver']} — "
+            f"{d_count} calls ({d_pct:.1f}%) "
+            f"→ {d_solution}"
         )
 
     # Findings with scores (may be truncated — skip incomplete entries)
-    findings = data.get("findings", [])
+    findings = data.get("findings") or []
     if findings:
         parts.append("**Findings**:")
         for f in findings:
             if not isinstance(f, dict):
                 continue
-            finding_text = f.get("finding", "")
+            finding_text = str(f.get("finding") or "")
             if not finding_text:
                 continue
             preventable = f.get("preventable_call", f.get("preventable", False))
+            f_impact = _num(f.get("impact_score"), 0)
+            f_ease = _num(f.get("ease_score"), 0)
+            f_conf = _num(f.get("confidence"), 0)
             parts.append(
-                f"  - (impact={f.get('impact_score', 0)}, ease={f.get('ease_score', 0)}, "
-                f"conf={f.get('confidence', 0)}, preventable={'yes' if preventable else 'no'}) "
+                f"  - (impact={f_impact}, ease={f_ease}, "
+                f"conf={f_conf}, preventable={'yes' if preventable else 'no'}) "
                 f"{finding_text[:200]}"
             )
-            action = (f.get("recommended_action", "")
-                      or f.get("recommended_product_fix", "")
-                      or f.get("recommended_process_fix", ""))
+            action = (str(f.get("recommended_action") or "")
+                      or str(f.get("recommended_product_fix") or "")
+                      or str(f.get("recommended_process_fix") or ""))
             if action:
                 team = _detect_team_from_text(action)
                 team_label = _TEAM_LABELS.get(team, team.title())
@@ -305,14 +320,9 @@ def _summarize_lens_buckets(
                 "key": bk, "name": bucket_name, "volume": parsed_volume,
                 "summary": full_summary, "condensed": condensed, "parsed": True,
             })
-        except ValueError as exc:
-            logger.error("Failed to parse friction output for %s / %s: %s", lens_id, bk, exc)
-            bucket_entries.append({
-                "key": bk, "name": bucket_name, "volume": row_count,
-                "summary": f"### {bucket_name}\n(Parse error — skipped)\n",
-                "condensed": f"- {bucket_name}: parse error",
-                "parsed": False,
-            })
+        except Exception as exc:
+            logger.warning("Skipping bucket %s / %s — summary extraction failed: %s", lens_id, bk, exc)
+            continue
 
     # ── Step 2: sort by volume descending, split into tiers ──
     bucket_entries.sort(key=lambda e: e["volume"], reverse=True)
