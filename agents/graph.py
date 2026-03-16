@@ -363,11 +363,19 @@ def build_graph(
         base, last_msg = await _run_react_node(agent_id, agent_factory, ctx, focused_state)
         summary = _trunc(_text(last_msg.content), 200) if last_msg else ""
 
-        # Collect full response from messages
-        full_response = "\n\n".join(
-            _text(m.content) for m in base.get("messages", [])
-            if hasattr(m, "content") and _text(m.content).strip()
-        ) or summary
+        # Write only the final AI analysis message — tool call results (including
+        # raw apply_skill/analyze_bucket JSON with full skill_content) are LLM
+        # context only and must not be persisted to the lens output files.
+        final_ai_content = ""
+        for m in reversed(base.get("messages", [])):
+            if (
+                isinstance(m, AIMessage)
+                and not getattr(m, "tool_calls", None)
+                and _text(m.content).strip()
+            ):
+                final_ai_content = _text(m.content).strip()
+                break
+        full_response = final_ai_content or summary
 
         # Write to lens_outputs_dir
         lens_outputs_dir = focused_state.get("lens_outputs_dir", "")

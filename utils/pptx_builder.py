@@ -54,6 +54,7 @@ ACCENT_RED    = RGBColor(0xC0, 0x39, 0x2B)
 ACCENT_AMBER  = RGBColor(0xE6, 0x7E, 0x22)
 ACCENT_GREEN  = RGBColor(0x27, 0xAE, 0x60)
 ACCENT_PURPLE = RGBColor(0x8E, 0x44, 0xAD)
+ACCENT_BLUE   = RGBColor(0x00, 0x6B, 0xA6)
 
 DIMENSION_COLORS = {
     "Digital / UX":   BLUE_ACCENT,
@@ -79,8 +80,8 @@ STATS_TEXT   = _style(10, bold=False, color=MID_GRAY)
 SMALL_MUTED  = _style(9,  bold=False, color=MID_GRAY)
 TABLE_HEADER = _style(10, bold=True,  color=WHITE)
 TABLE_CELL   = _style(9,  bold=False, color=BLACK)
-BULLET_TITLE = _style(12, bold=True,  color=BLUE_ACCENT)
-BULLET_BODY  = _style(11, bold=False, color=BLACK)
+BULLET_TITLE = _style(12, bold=True,  color=BLACK)
+BULLET_BODY  = _style(10, bold=False, color=MID_GRAY)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -245,24 +246,24 @@ def _render_executive_summary(prs, slide_data, layout_idx):
         _tb(slide, MARGIN_L, y, CONTENT_W, 0.85, subtitle_plain, SUBTITLE_TEXT)
 
     # 4. Rule below subtitle
-    _rule(slide, MARGIN_L, 1.72, CONTENT_W)
+    _rule(slide, MARGIN_L, 3, CONTENT_W)
 
     # 5. "Quick Wins:" label
     quick_wins = slide_data.get("quick_wins", [])
     if quick_wins:
-        _tb(slide, MARGIN_L, 1.88, CONTENT_W, 0.3, "Quick Wins:", H3_LABEL)
+        _tb(slide, MARGIN_L, 3.05, CONTENT_W, 0.3, "Quick Wins:", H3_LABEL)
 
         # 6. Quick win items as rich text
-        box = slide.shapes.add_textbox(Inches(MARGIN_L), Inches(2.20), Inches(CONTENT_W), Inches(4.8))
+        box = slide.shapes.add_textbox(Inches(MARGIN_L), Inches(3.45), Inches(CONTENT_W), Inches(3.5))
         tf = box.text_frame
         tf.word_wrap = True
         for qi, qw in enumerate(quick_wins[:5]):
             if isinstance(qw, dict):
-                action = _strip_md(str(qw.get("action", "")))
+                action = " - " + _strip_md(str(qw.get("action", "")))
                 detail = _strip_md(str(qw.get("detail", "")))
             else:
                 # Plain string: split at " — " or use whole string
-                action = _strip_md(str(qw))
+                action = " - " + _strip_md(str(qw))
                 detail = ""
 
             p = tf.paragraphs[0] if qi == 0 else tf.add_paragraph()
@@ -273,10 +274,9 @@ def _render_executive_summary(prs, slide_data, layout_idx):
             _apply(r_title, BULLET_TITLE)
             # Detail on next line
             if detail:
-                p_detail = tf.add_paragraph()
-                r_det = p_detail.add_run()
-                r_det.text = f"    {detail}"
-                _apply(r_det, BODY_TEXT)
+                r_det = p.add_run()
+                r_det.text = f" - [{detail}]"
+                _apply(r_det, BULLET_BODY)
 
 
 def _render_pain_points(prs, slide_data, layout_idx):
@@ -286,7 +286,7 @@ def _render_pain_points(prs, slide_data, layout_idx):
     _title_block(slide, slide_data.get("title", "Key Pain Points"))
 
     cards = slide_data.get("cards", [])
-    accent_colors = [ACCENT_RED, ACCENT_AMBER, ACCENT_GREEN]
+    accent_colors = [ACCENT_BLUE, ACCENT_BLUE, ACCENT_BLUE]
 
     # Card layout: 3 cards filling 13.33" canvas with 0.5" margins
     CARD_W = 3.77
@@ -323,13 +323,13 @@ def _render_pain_points(prs, slide_data, layout_idx):
         # Stats line
         impact = card.get("impact", card.get("impact_score", 0))
         priority = card.get("priority", 0)
-        _tb(slide, inner_x, 1.45, inner_w, 0.25, f"Impact: {impact} | Priority: {priority}", _style(9, color=MID_GRAY))
+        _tb(slide, inner_x, 1.75, inner_w, 0.25, f"Impact: {impact} | Priority: {priority}", _style(9, color=MID_GRAY))
 
         # Separator
-        _rule(slide, inner_x, 1.72, inner_w)
+        _rule(slide, inner_x, 2.05, inner_w)
 
         # Issue: label + text
-        box = slide.shapes.add_textbox(Inches(inner_x), Inches(1.85), Inches(inner_w), Inches(1.6))
+        box = slide.shapes.add_textbox(Inches(inner_x), Inches(2.15), Inches(inner_w), Inches(1.6))
         tf = box.text_frame
         tf.word_wrap = True
         r_lbl = tf.paragraphs[0].add_run()
