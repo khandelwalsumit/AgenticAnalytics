@@ -728,7 +728,10 @@ def build_graph(
         synth_state["messages"] = [HumanMessage(content=(
             "Synthesize the friction lens analyses into themes. "
             "Produce executive narrative, ranked findings, and impact×ease scores. "
-            f"Analysis objective: {state.get('analysis_objective', 'Identify friction drivers')}"
+            f"Analysis objective: {state.get('analysis_objective', 'Identify friction drivers')}. "
+            f"Selected lenses for this run: {lens_ids}. "
+            "These are the ONLY lenses in scope — completeness is evaluated against this list only. "
+            "If all lenses in this list produced output, set decision='complete' regardless of how many total lenses exist."
         ))]
 
         logger.info("Friction analysis Phase 2: running synthesizer | lens_outputs_dir=%s", lens_outputs_dir)
@@ -979,7 +982,17 @@ def build_graph(
         if not findings and isinstance(synthesis, dict):
             findings = synthesis.get("findings", [])
 
-        section_blueprints = _build_fixed_deck_blueprint(synthesis, findings)
+        # Load classified solutions for richer blueprint recommendations and theme slides
+        classified_solutions: list[dict[str, Any]] = []
+        cs_path = state.get("classified_solutions_path", "")
+        if cs_path and Path(cs_path).exists():
+            try:
+                cs_data = json.loads(Path(cs_path).read_text(encoding="utf-8"))
+                classified_solutions = cs_data.get("classified_solutions", [])
+            except Exception:
+                pass
+
+        section_blueprints = _build_fixed_deck_blueprint(synthesis, findings, classified_solutions)
         total_slides = sum(len(s.get("slides", [])) for s in section_blueprints)
         logger.info(
             "Report drafts: fixed deck blueprint built | %d slides across %d sections",

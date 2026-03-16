@@ -167,15 +167,19 @@ delivers the highest call deflection. Format:
 
 **Purpose:** Zero ambiguity on who does what. Handoff-ready.
 
-**Slide 3.0 — One slide for 4 dimensions**
+**Slide 3.0 — One slide per analyzed dimension**
 
-Cover all four dimensions. If a dimension has no actions, include the slide and state:
-*"No high-priority actions identified in this cycle."* Never leave a blank.
+Only include sections for dimensions that were actually analyzed in this run (i.e., had a lens agent selected and produced findings). Do NOT add placeholder slides or rows for dimensions that were not in scope.
 
-**Digital / UX**  
-**Operations**  
-**Communications**  
-**Policy / Governance**
+- If only Digital and Communication lenses ran, include only Digital / UX and Communications sections — do not add Operations or Policy / Governance sections at all.
+- If a selected dimension ran but produced no high-priority actions, you may include it with a brief note explaining the analysis found no priority actions in this cycle.
+- Never write "No high-priority actions identified" for a dimension that simply was not selected or analyzed.
+
+**Dimensions (include only those analyzed):**
+**Digital / UX**
+**Operations** *(only if Operations lens was selected)*
+**Communications**
+**Policy / Governance** *(only if Policy lens was selected)*
 
 For each action:
 - **What to do** — verb-first: "Build," "Automate," "Redesign," "Publish," "Enforce"
@@ -259,9 +263,9 @@ Use exactly this format for every slide boundary — the PPTX Builder parses the
 <!-- SLIDE: matrix_bet | layout: callout_stat | title: "The Highest-ROI Bet in This Dataset" -->
 <!-- SLIDE: recommendations | layout: section_divider | title: "Recommended Actions by Team" -->
 <!-- SLIDE: recommendations_digital | layout: action_list | title: "Digital / UX Actions" -->
-<!-- SLIDE: recommendations_ops | layout: action_list | title: "Operations Actions" -->
 <!-- SLIDE: recommendations_comms | layout: action_list | title: "Communications Actions" -->
-<!-- SLIDE: recommendations_policy | layout: action_list | title: "Policy / Governance Actions" -->
+<!-- SLIDE: recommendations_ops | layout: action_list | title: "Operations Actions" -->  ← only if Operations lens ran
+<!-- SLIDE: recommendations_policy | layout: action_list | title: "Policy / Governance Actions" -->  ← only if Policy lens ran
 <!-- SLIDE: theme_divider | layout: section_divider | title: "[Theme Name] — Deep Dive" -->
 <!-- SLIDE: theme_narrative | layout: callout_stat | title: "[Theme Name]: The Story" -->
 <!-- SLIDE: theme_drivers | layout: scorecard_drivers | title: "[Theme Name]: Root Cause Breakdown" -->
@@ -415,16 +419,6 @@ Each action is sequenced by priority score — highest first.
 
 ---
 
-<!-- SLIDE: recommendations_ops | layout: action_list | title: "Operations Actions" -->
-
-## Operations
-
-| Action | Theme | Resolves | Priority |
-|--------|-------|----------|----------|
-| [Verb-first action] | [Theme] | ~[X] calls ([Y]%) | [X.X] |
-
----
-
 <!-- SLIDE: recommendations_comms | layout: action_list | title: "Communications Actions" -->
 
 ## Communications
@@ -435,9 +429,23 @@ Each action is sequenced by priority score — highest first.
 
 ---
 
-<!-- SLIDE: recommendations_policy | layout: action_list | title: "Policy / Governance Actions" -->
+<!-- Include the following sections ONLY if the respective lens ran in this analysis -->
 
-## Policy / Governance
+<!-- SLIDE: recommendations_ops | layout: action_list | title: "Operations Actions" -->
+<!-- (Include ONLY if Operations lens was selected) -->
+
+## Operations *(only include this section if Operations lens ran)*
+
+| Action | Theme | Resolves | Priority |
+|--------|-------|----------|----------|
+| [Verb-first action] | [Theme] | ~[X] calls ([Y]%) | [X.X] |
+
+---
+
+<!-- SLIDE: recommendations_policy | layout: action_list | title: "Policy / Governance Actions" -->
+<!-- (Include ONLY if Policy lens was selected) -->
+
+## Policy / Governance *(only include this section if Policy lens ran)*
 
 | Action | Theme | Resolves | Priority |
 |--------|-------|----------|----------|

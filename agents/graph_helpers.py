@@ -2101,6 +2101,7 @@ def _build_fallback_section_blueprint(
 def _build_fixed_deck_blueprint(
     synthesis_result: dict[str, Any],
     findings: list[dict[str, Any]],
+    classified_solutions: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Build a fixed-structure deck blueprint directly from synthesis data.
 
@@ -2218,6 +2219,21 @@ def _build_fixed_deck_blueprint(
         if isinstance(d, dict):
             return _s(d.get("driver", "") or d.get("driver_description", ""))
         return _s(d)
+
+    def _findings_for_theme(theme_name: str) -> list[dict[str, Any]]:
+        """Return findings matching a theme name (case-insensitive, substring match)."""
+        tn = theme_name.lower().strip()
+        return [
+            f for f in findings
+            if isinstance(f, dict) and tn in _s(f.get("theme", "")).lower()
+        ]
+
+    def _cs_for_theme(theme_name: str) -> list[dict[str, Any]]:
+        """Return classified solutions matching a theme name (case-insensitive)."""
+        if not classified_solutions:
+            return []
+        tn = theme_name.lower().strip()
+        return [s for s in classified_solutions if tn in _s(s.get("theme", "")).lower()]
 
     total_calls = _n(summary.get("total_calls_analyzed", 0))
     total_themes = _n(summary.get("total_themes", len(themes)))
@@ -2432,13 +2448,36 @@ def _build_fixed_deck_blueprint(
                     "recommended_action": sol,
                     "call_count": _n(d.get("call_count", 0)),
                 })
-        # Also add quick_wins under dominant_driver if no all_drivers
+        # Also add quick_wins under dominant_driver if no all_drivers provided solutions
         if not t_drivers:
             driver = _s(t.get("dominant_driver", "digital")).lower()
             if driver not in driver_groups:
                 driver = "digital"
             for qw in (t.get("quick_wins", []) or [])[:2]:
                 driver_groups[driver].append({"recommended_action": str(qw)})
+    # Supplement with classified_solutions (curated, have explicit dimension ownership)
+    for cs in (classified_solutions or []):
+        if not isinstance(cs, dict):
+            continue
+        dim_raw = _s(cs.get("dimension", "digital")).lower()
+        # Normalize common dimension variants
+        if "digital" in dim_raw or "ux" in dim_raw:
+            dim = "digital"
+        elif "oper" in dim_raw:
+            dim = "operations"
+        elif "comm" in dim_raw:
+            dim = "communication"
+        elif "polic" in dim_raw:
+            dim = "policy"
+        else:
+            dim = "digital"
+        action = _s(cs.get("recommended_action", ""))
+        if action:
+            driver_groups[dim].append({
+                "recommended_action": action,
+                "call_count": 0,
+                "classification": _s(cs.get("classification", "")),
+            })
     # Fallback: use findings grouped by dominant_driver
     if not any(driver_groups.values()):
         for f in findings[:30]:
@@ -2549,68 +2588,57 @@ def _build_fixed_deck_blueprint(
             for qi, qw in enumerate(theme_qw[:3], 1):
                 metrics_rows.append([f"Solution {qi}", str(qw)[:80]])
 
-        # -- RIGHT TABLE: Driver Breakdown --
-        drivers = _norm_drivers(t)
-        driver_rows: list[list[str]] = []
-        for d in drivers[:8]:
-            d_calls = _n(d.get("call_count", 0))
-            driver_rows.append([
-                _driver_text(d)[:50] or "?",
-                str(d_calls),
-                _s(d.get("type", ""), "?").title(),
-                _s(d.get("dimension", ""), "?").replace("_", " ").title(),
-                _s(d.get("recommended_solution", ""), "-")[:60],
-            ])
-
         # Build structured theme card
         impact_score = _f(t.get("impact_score", 0))
         ease_score = _f(t.get("ease_score", 0))
         priority_score = _f(t.get("priority_score", 0))
         call_count = _n(t.get("call_count", 0))
         call_pct = _f(t.get("call_percentage", 0))
+        primary_driver = _s(t.get("dominant_driver", ""), "").replace("_", " ").title()
 
-        # Build solutions from all_drivers recommended_solution, then quick_wins
-        solutions: list[dict[str, Any]] = []
-        for d in drivers[:3]:
-            sol = _s(d.get("recommended_solution", ""))
-            if sol:
-                dim_raw = d.get("dimension", t.get("dominant_driver", "digital"))
-                dim = _s(dim_raw).replace("_", " ").title() if isinstance(dim_raw, str) else "Digital"
-                solutions.append({"action": sol[:200], "dimension": dim})
-        # Fill remaining slots from quick_wins if drivers didn't have solutions
-        if len(solutions) < 3:
-            for qw in (t.get("quick_wins", []) or []):
-                if len(solutions) >= 3:
-                    break
-                dim = _s(t.get("dominant_driver", "Digital")).replace("_", " ").title()
-                solutions.append({"action": str(qw)[:200], "dimension": dim})
-
-        # Build driver table rows — always show call count (never %)
-        simple_driver_rows: list[list[Any]] = []
-        for d in drivers[:8]:
-            d_calls = _n(d.get("call_count", 0))
-            simple_driver_rows.append([
-                _driver_text(d)[:50] or "?",
-                d_calls,
-            ])
-
-        # Core issue: bullet points summarizing top drivers (not just one line)
+        # Core issue: use findings (full narrative sentences with real call counts)
+        theme_findings = _findings_for_theme(theme_name)
         core_issue_points: list[str] = []
-        for d in drivers[:3]:
-            desc = _driver_text(d)
-            d_calls = _n(d.get("call_count", 0))
+        for f in theme_findings[:3]:
+            desc = _s(f.get("finding", ""))
+            fc = _n(f.get("call_count", 0))
             if desc:
-                core_issue_points.append(f"{desc} ({d_calls} calls)" if d_calls > 0 else desc)
+                core_issue_points.append(f"{desc} ({fc} calls)" if fc > 0 else desc)
         if not core_issue_points:
+            # Fallback: contributing_factors, then generic label
             factors = t.get("contributing_factors", [])
             for cf in (factors if isinstance(factors, list) else [])[:3]:
-                txt = _driver_text(cf)[:80]
+                txt = _s(cf)[:80]
                 if txt:
                     core_issue_points.append(txt)
         if not core_issue_points:
-            core_issue_points = [f"{theme_name} friction analysis"]
+            core_issue_points = [f"{theme_name} friction identified"]
         core_issue = "\n".join(f"• {pt}" for pt in core_issue_points)
-        primary_driver = _s(t.get("dominant_driver", ""), "").replace("_", " ").title()
+
+        # Solutions: classified_solutions first (curated, have dimension + classification),
+        # then quick_wins as fallback
+        dim_label = _s(t.get("dominant_driver", "Digital")).replace("_", " ").title()
+        solutions: list[dict[str, Any]] = []
+        for cs in _cs_for_theme(theme_name)[:3]:
+            action = _s(cs.get("recommended_action", ""))
+            if action:
+                dim = _s(cs.get("dimension", dim_label)).replace("_", " ").title()
+                classification = _s(cs.get("classification", ""))
+                solutions.append({"action": action[:200], "dimension": dim, "classification": classification})
+        for qw in (t.get("quick_wins", []) or []):
+            if len(solutions) >= 3:
+                break
+            solutions.append({"action": str(qw)[:200], "dimension": dim_label})
+
+        # Evidence table: findings with real call counts
+        evidence_rows: list[list[Any]] = []
+        for f in theme_findings[:6]:
+            evidence_rows.append([
+                _s(f.get("finding", ""))[:65] or "?",
+                _n(f.get("call_count", 0)),
+                _s(f.get("dominant_driver", ""), "?").replace("_", " ").title(),
+                _s(f.get("recommended_action", ""), "-")[:60],
+            ])
 
         theme_slides.append({
             "slide_number": idx,
@@ -2630,9 +2658,9 @@ def _build_fixed_deck_blueprint(
                 "solutions": solutions,
             },
             "right_column": {
-                "type": "driver_table",
-                "headers": ["Driver", "Calls"],
-                "rows": simple_driver_rows,
+                "type": "evidence_table",
+                "headers": ["Evidence / Finding", "Calls", "Dimension", "Recommended Action"],
+                "rows": evidence_rows,
             },
         })
 

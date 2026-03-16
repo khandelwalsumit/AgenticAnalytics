@@ -8,7 +8,8 @@
       "Bash(python:*)",
       "Bash(uv run:*)",
       "Bash(.venv/Scripts/python.exe:*)",
-      "Bash(cd \"D:/Workspace/AgenticAnalytics\" && .venv/Scripts/python test/test_artifacts.py --skip-charts 2>&1)"
+      "Bash(cd \"D:/Workspace/AgenticAnalytics\" && .venv/Scripts/python test/test_artifacts.py --skip-charts 2>&1)",
+      "Bash(.venv/Scripts/python -c \"import sys; sys.path.insert\\(0, ''''.''''\\); exec\\(open\\(''''test/checks.py''''\\).read\\(\\)\\)\")"
     ]
   }
 }

@@ -613,6 +613,7 @@ def _render_theme_card(prs, slide_data, layout_idx, chart_paths):
             for si, sol in enumerate(solutions[:3]):
                 action = _strip_md(str(sol.get("action", "")))
                 dim = sol.get("dimension", "")
+                classification = sol.get("classification", "")
                 p = tf.paragraphs[0] if si == 0 else tf.add_paragraph()
                 p.space_after = Pt(4)
                 r_num = p.add_run()
@@ -622,17 +623,24 @@ def _render_theme_card(prs, slide_data, layout_idx, chart_paths):
                 r_act.text = f"{action} "
                 _apply(r_act, _style(11, color=BLACK))
                 if dim:
+                    badge = f"[{dim}" + (f" · {classification}" if classification else "") + "]"
                     r_dim = p.add_run()
-                    r_dim.text = f"[{dim}]"
+                    r_dim.text = badge
                     _apply(r_dim, _style(9, bold=True, color=BLUE_ACCENT))
 
-    # RIGHT COLUMN — driver table
+    # RIGHT COLUMN — evidence/driver table
     if right_col:
         headers = right_col.get("headers", ["Driver", "Calls"])
         rows = right_col.get("rows", [])
         if headers and rows:
+            n_cols = len(headers)
+            if n_cols == 4:
+                # Evidence table: Finding(55%) | Calls(10%) | Dimension(15%) | Action(20%)
+                col_widths = [RIGHT_W * 0.55, RIGHT_W * 0.10, RIGHT_W * 0.15, RIGHT_W * 0.20]
+            else:
+                col_widths = [RIGHT_W - 1.3, 1.3]
             _add_table(slide, headers, rows, x=RIGHT_X, y=0.95, w=RIGHT_W,
-                       col_widths=[RIGHT_W - 1.3, 1.3], row_h=0.28)
+                       col_widths=col_widths, row_h=0.28)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
