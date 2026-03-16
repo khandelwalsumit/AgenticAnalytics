@@ -11,6 +11,12 @@ Usage:
     # Use a specific state file:
     python test/test_artifacts.py --state data/.cache/states/007a6944.json
 
+    # Load directly from a synthesis JSON (no full state needed):
+    python test/test_artifacts.py --synthesis data/tmp/.cache/<thread_id>/synthesis_v1.json
+
+    # Load by cache thread directory (auto-finds synthesis_v1.json inside):
+    python test/test_artifacts.py --cache data/tmp/.cache/2f40f909-c2b9-498f-b513-3469e80fa441
+
     # Override output directory:
     python test/test_artifacts.py --output data/output/test_run
 
@@ -49,7 +55,7 @@ logger = logging.getLogger("test_artifacts")
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 1. State loader
+# 1. State / synthesis loader
 # ══════════════════════════════════════════════════════════════════════
 
 def _latest_state_file() -> Path:
@@ -72,22 +78,53 @@ def load_state(path: Path) -> dict:
     return raw
 
 
+def load_synthesis(synthesis_path: str | None, state: dict) -> dict:
+    """Resolve synthesis JSON from an explicit path, state["synthesis_path"], or empty dict.
+
+    The synthesis data lives in a versioned file (synthesis_v1.json) written by the
+    synthesizer node — it is NOT stored inline in the state dict. This function
+    resolves the right file and returns the parsed dict.
+    """
+    # 1. Explicit --synthesis argument wins
+    if synthesis_path:
+        p = Path(synthesis_path)
+        if not p.is_absolute():
+            p = ROOT / p
+        if p.exists():
+            logger.info("Synthesis loaded from explicit path: %s", p)
+            return json.loads(p.read_text(encoding="utf-8"))
+        logger.warning("--synthesis path not found: %s", p)
+
+    # 2. state["synthesis_path"] (written by synthesizer node)
+    sp = state.get("synthesis_path", "")
+    if sp:
+        p = Path(sp)
+        if p.exists():
+            logger.info("Synthesis loaded from state['synthesis_path']: %s", p)
+            return json.loads(p.read_text(encoding="utf-8"))
+        logger.warning("state['synthesis_path'] not found: %s", sp)
+
+    logger.warning("No synthesis data found — charts and blueprint will be empty.")
+    return {}
+
+
+def find_synthesis_in_cache(cache_dir: Path) -> Path | None:
+    """Find the most recent synthesis_vN.json in a cache thread directory."""
+    candidates = sorted(cache_dir.glob("synthesis_v*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return candidates[0] if candidates else None
+
+
 # ══════════════════════════════════════════════════════════════════════
 # 2. Chart generation (dataviz)
 # ══════════════════════════════════════════════════════════════════════
 
-def generate_charts(state: dict, output_dir: Path) -> dict[str, str]:
-    """Run deterministic chart scripts and return {chart_type: path} map.
-
-    This is a standalone version of _build_deterministic_dataviz_output
-    that does NOT need Chainlit or TOOL_REGISTRY.
-    """
+def generate_charts(synthesis: dict, output_dir: Path) -> dict[str, str]:
+    """Run deterministic chart scripts and return {chart_type: path} map."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import numpy as np  # noqa: F401 — used in exec'd code
 
-    synthesis = state.get("synthesis_result", {}) or {}
     themes_raw = synthesis.get("themes", []) if isinstance(synthesis, dict) else []
 
     themes: list[str] = []
@@ -114,6 +151,7 @@ def generate_charts(state: dict, output_dir: Path) -> dict[str, str]:
                 primary += dc
             else:
                 secondary += dc
+        # Safety fallback: if synthesizer still produced 0s, use theme total
         if primary == 0 and secondary == 0:
             primary = total_calls
 
@@ -225,15 +263,14 @@ def generate_charts(state: dict, output_dir: Path) -> dict[str, str]:
 # 3. Deck blueprint (deterministic, no LLM)
 # ══════════════════════════════════════════════════════════════════════
 
-def build_deck_blueprint(state: dict) -> list[dict]:
-    """Build section blueprints from synthesis_result + findings.
+def build_deck_blueprint(synthesis: dict) -> list[dict]:
+    """Build section blueprints from synthesis JSON (themes + findings).
 
-    This calls the real _build_fixed_deck_blueprint from graph_helpers.
+    Calls the real _build_fixed_deck_blueprint from graph_helpers.
     """
     from agents.graph_helpers import _build_fixed_deck_blueprint
 
-    synthesis = state.get("synthesis_result", {}) or {}
-    findings = state.get("findings", []) or []
+    findings = synthesis.get("findings", []) or []
     return _build_fixed_deck_blueprint(synthesis, findings)
 
 
@@ -312,11 +349,20 @@ def generate_docx(narrative_markdown: str, output_dir: Path) -> str:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Re-generate PPTX/DOCX artifacts from a saved graph state.",
+        description="Re-generate PPTX/DOCX artifacts from a saved graph state or synthesis JSON.",
     )
     parser.add_argument(
         "--state", type=str, default="",
         help="Path to state JSON. Default: most recent in data/.cache/states/",
+    )
+    parser.add_argument(
+        "--synthesis", type=str, default="",
+        help="Path to synthesis_v1.json (skips state lookup; useful for testing synthesizer output directly).",
+    )
+    parser.add_argument(
+        "--cache", type=str, default="",
+        help="Path to a cache thread directory (e.g. data/tmp/.cache/<thread_id>). "
+             "Auto-finds synthesis_vN.json inside.",
     )
     parser.add_argument(
         "--output", type=str, default="",
@@ -332,18 +378,41 @@ def main():
     )
     args = parser.parse_args()
 
-    # ── Resolve state file ──
-    if args.state:
-        state_path = Path(args.state)
-        if not state_path.is_absolute():
-            state_path = ROOT / state_path
-    else:
-        state_path = _latest_state_file()
-    logger.info("Loading state: %s", state_path)
-    state = load_state(state_path)
+    # ── Resolve synthesis source ──
+    synthesis_arg = args.synthesis
 
-    # ── Derive thread_id from filename ──
-    thread_id = state_path.stem
+    # --cache: point to a thread cache dir and auto-find synthesis file
+    if args.cache and not synthesis_arg:
+        cache_dir = Path(args.cache)
+        if not cache_dir.is_absolute():
+            cache_dir = ROOT / cache_dir
+        found = find_synthesis_in_cache(cache_dir)
+        if found:
+            synthesis_arg = str(found)
+            logger.info("Auto-found synthesis in cache dir: %s", found)
+        else:
+            logger.warning("No synthesis_v*.json found in --cache dir: %s", cache_dir)
+
+    # ── Resolve state file (only needed when not using --synthesis/--cache directly) ──
+    state: dict = {}
+    thread_id = "test_artifacts"
+
+    if not synthesis_arg:
+        if args.state:
+            state_path = Path(args.state)
+            if not state_path.is_absolute():
+                state_path = ROOT / state_path
+        else:
+            state_path = _latest_state_file()
+        logger.info("Loading state: %s", state_path)
+        state = load_state(state_path)
+        thread_id = state_path.stem
+    else:
+        # Derive thread_id from synthesis path (parent dir name)
+        thread_id = Path(synthesis_arg).parent.name or "test_artifacts"
+
+    # ── Load synthesis data (from file, not state dict) ──
+    synthesis = load_synthesis(synthesis_arg, state)
 
     # ── Resolve output dir ──
     if args.output:
@@ -355,9 +424,19 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     logger.info("Output dir: %s", output_dir)
 
+    # Log synthesis summary
+    themes = synthesis.get("themes", [])
+    findings = synthesis.get("findings", [])
+    logger.info(
+        "Synthesis: %d themes, %d findings, decision=%s, confidence=%s",
+        len(themes), len(findings),
+        synthesis.get("decision", "n/a"),
+        synthesis.get("confidence", "n/a"),
+    )
+
     # ── 1. Deck blueprint ──
-    logger.info("Building deck blueprint from synthesis_result + findings...")
-    blueprints = build_deck_blueprint(state)
+    logger.info("Building deck blueprint from synthesis...")
+    blueprints = build_deck_blueprint(synthesis)
     bp_path = output_dir / "deck_blueprint.json"
     bp_path.write_text(json.dumps(blueprints, indent=2, default=str), encoding="utf-8")
     logger.info("Blueprint JSON -> %s  (%d sections, %d total slides)",
@@ -380,7 +459,7 @@ def main():
         logger.info("Reusing %d existing chart(s): %s", len(chart_paths), list(chart_paths.keys()))
     else:
         logger.info("Generating charts...")
-        chart_paths = generate_charts(state, output_dir)
+        chart_paths = generate_charts(synthesis, output_dir)
 
     # ── 3. Narrative markdown ──
     narrative = get_narrative_markdown(state, thread_id)
@@ -400,7 +479,7 @@ def main():
     print("\n" + "=" * 60)
     print("ARTIFACT GENERATION COMPLETE")
     print("=" * 60)
-    print(f"  State source : {state_path}")
+    print(f"  Synthesis    : {synthesis_arg or state.get('synthesis_path', 'from state')}")
     print(f"  Blueprint    : {bp_path}")
     print(f"  Charts       : {len(chart_paths)} files in {output_dir / 'charts'}")
     print(f"  Narrative MD : {md_path}")

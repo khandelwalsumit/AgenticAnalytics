@@ -27,12 +27,11 @@ from chainlit.types import (
 )
 from chainlit.user import PersistedUser, User
 
-from config import DATA_CACHE_DIR
+from config import DATA_TMP_DIR
 
 # Storage root
-_STORAGE_DIR = DATA_CACHE_DIR / "data_layer"
-_THREADS_DIR = _STORAGE_DIR / "threads"
-_USERS_DIR = _STORAGE_DIR / "users"
+_THREADS_DIR = DATA_TMP_DIR / "threads"
+_USERS_DIR = DATA_TMP_DIR / "users"
 
 
 def _ensure_dirs() -> None:

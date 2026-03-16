@@ -43,8 +43,10 @@ from agents.nodes import (
     _text,
     _trunc,
     _parse_json,
-    # file writing
-    _write_versioned_md,
+    # file I/O
+    _write_versioned,
+    _read_json,
+    _read_text,
     _write_file,
     # guard helpers
     _enforce_analysis_start_guard,
@@ -431,9 +433,9 @@ def build_graph(
 
             top_theme_names = [t.theme for t in structured.themes[:5]] if structured.themes else []
 
-            synthesis_md = json.dumps(synthesis_data, indent=2, default=str)
-            synthesis_path = _write_versioned_md(
-                "synthesis", synthesis_md, {"agent": "synthesizer_agent"}
+            synthesis_path = _write_versioned(
+                "synthesis", json.dumps(synthesis_data, indent=2, default=str),
+                {"agent": "synthesizer_agent"}, ext="json",
             )
 
             base.update({
@@ -454,9 +456,9 @@ def build_graph(
             for key in ("decision", "confidence", "reasoning", "themes", "findings"):
                 if key in data:
                     synthesis_data[key] = data[key]
-            synthesis_md = json.dumps(synthesis_data, indent=2, default=str)
-            synthesis_path = _write_versioned_md(
-                "synthesis", synthesis_md, {"agent": "synthesizer_agent"}
+            synthesis_path = _write_versioned(
+                "synthesis", json.dumps(synthesis_data, indent=2, default=str),
+                {"agent": "synthesizer_agent"}, ext="json",
             )
             base["synthesis_path"] = synthesis_path
             narrative = synthesis_data.get("executive_narrative", "")
@@ -770,8 +772,6 @@ def build_graph(
             classified_solutions_path – path to classified_solutions.json
             messages                  – brief summary
         """
-        import chainlit as cl
-
         ctx = _build_extra_context("solutioning_agent", state, None)
         base, last_msg = await _run_react_node("solutioning_agent", agent_factory, ctx, state)
 
@@ -783,18 +783,10 @@ def build_graph(
             if not classified_data:
                 # Try to use raw content as JSON payload
                 classified_data = {"raw_output": content}
-            data_store = cl.user_session.get("data_store")
-            if data_store:
-                classified_path = data_store.store_json(
-                    "classified_solutions", classified_data,
-                    {"agent": "solutioning_agent"},
-                )
-            else:
-                classified_path = _write_versioned_md(
-                    "classified_solutions",
-                    json.dumps(classified_data, indent=2),
-                    {"agent": "solutioning_agent"},
-                )
+            classified_path = _write_versioned(
+                "classified_solutions", json.dumps(classified_data, indent=2, default=str),
+                {"agent": "solutioning_agent"}, ext="json",
+            )
 
         summary = _trunc(_text(last_msg.content), 200) if last_msg else "Solution classification complete."
         base["classified_solutions_path"] = classified_path
@@ -831,8 +823,8 @@ def build_graph(
             if hasattr(m, "content") and _text(m.content).strip()
         ) or summary
 
-        narrative_path = _write_versioned_md(
-            "narrative", full_narrative, {"agent": "narrative_agent"}
+        narrative_path = _write_versioned(
+            "narrative", full_narrative, {"agent": "narrative_agent"}, ext="md",
         )
         base["narrative_path"] = narrative_path
         base["reasoning"] = [{"step_name": "Narrative Agent", "step_text": summary}]
@@ -995,10 +987,9 @@ def build_graph(
         )
 
         # Write blueprint to file
-        blueprint_path = _write_versioned_md(
-            "blueprint",
-            json.dumps(section_blueprints, indent=2, default=str),
-            {"agent": "formatting_agent", "total_slides": total_slides},
+        blueprint_path = _write_versioned(
+            "blueprint", json.dumps(section_blueprints, indent=2, default=str),
+            {"agent": "formatting_agent", "total_slides": total_slides}, ext="json",
         )
 
         _set_sub_agent_status(sub_agents, "formatting_agent", status="done",

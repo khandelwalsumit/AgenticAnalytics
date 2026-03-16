@@ -461,20 +461,37 @@ async def _run_react_node(
     return base, last_msg
 
 
-def _write_versioned_md(base_name: str, content: str, metadata: dict) -> str:
-    """Write content to a versioned markdown file in the session cache.
+def _write_versioned(base_name: str, content: str, metadata: dict, ext: str = "md") -> str:
+    """Write content to a versioned file in the session cache.
 
-    Uses the session DataStore (keyed to thread_id) so the file lands in
-    data/.cache/<thread_id>/<base_name>_v<n>.md.
+    File lands in data/.cache/<thread_id>/<base_name>_v<n>.<ext>.
+    Pass ext="json" for JSON data, ext="md" for markdown.
 
     Returns the absolute file path (use as completion flag).
     """
     import chainlit as cl
     data_store = cl.user_session.get("data_store")
     if data_store:
-        _key, path = data_store.store_versioned_md(base_name, content, metadata)
+        _key, path = data_store.store_versioned(base_name, content, metadata, ext=ext)
         return path
     return ""
+
+
+def _read_text(path: str | Path) -> str:
+    """Read a text or markdown file. Returns empty string if path is missing."""
+    p = Path(path)
+    return p.read_text(encoding="utf-8") if p.exists() else ""
+
+
+def _read_json(path: str | Path) -> Any:
+    """Read and parse a JSON file. Returns empty dict if path is missing or invalid."""
+    p = Path(path)
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, ValueError):
+        return {}
 
 
 def _write_file(dest_path: str | Path, content: str) -> str:

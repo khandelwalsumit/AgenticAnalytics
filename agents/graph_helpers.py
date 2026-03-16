@@ -10,6 +10,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage
 
+from agents.nodes import _read_json, _read_text
 from agents.state import AnalyticsState
 from config import DATA_DIR, DATA_OUTPUT_DIR, DATA_CACHE_DIR
 from tools import TOOL_REGISTRY
@@ -713,14 +714,12 @@ def _thread_output_dir() -> Path:
 
 
 def _validate_narrative(result: dict[str, Any]) -> list[str]:
-    # New model: narrative is written to narrative_path file
     narrative_path = result.get("narrative_path", "")
     if not narrative_path:
         return ["narrative_path missing from narrative node result."]
-    p = Path(narrative_path)
-    if not p.exists():
+    if not Path(narrative_path).exists():
         return [f"narrative_path file not found: {narrative_path}"]
-    full = p.read_text(encoding="utf-8").strip()
+    full = _read_text(narrative_path).strip()
     if not full:
         return [f"narrative_path file is empty: {narrative_path}"]
 
@@ -784,13 +783,9 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 def _build_deterministic_dataviz_output(state: dict[str, Any]) -> dict[str, Any]:
     """Generate required charts deterministically via Python chart scripts."""
     synthesis: dict[str, Any] = {}
-    # New model: read synthesis from synthesis_path file
     synthesis_path = state.get("synthesis_path", "")
-    if synthesis_path and Path(synthesis_path).exists():
-        try:
-            synthesis = json.loads(Path(synthesis_path).read_text(encoding="utf-8"))
-        except Exception:
-            pass
+    if synthesis_path:
+        synthesis = _read_json(synthesis_path)
 
     themes_raw = synthesis.get("themes", []) if isinstance(synthesis, dict) else []
 
@@ -1348,7 +1343,7 @@ def _run_artifact_writer_node(
     report_key = "report_markdown"
     data_store = cl.user_session.get("data_store")
     if data_store is not None:
-        report_key = data_store.store_text(
+        report_key = data_store.store_md(
             "report_markdown",
             narrative_markdown,
             {"agent": "narrative_agent", "type": "report_markdown"},
@@ -1454,9 +1449,7 @@ def _build_executive_summary_message(narrative_path_or_payload: Any) -> str:
     # New model: narrative_path_or_payload is a file path string
     full = ""
     if isinstance(narrative_path_or_payload, str) and narrative_path_or_payload:
-        p = Path(narrative_path_or_payload)
-        if p.exists():
-            full = p.read_text(encoding="utf-8").strip()
+        full = _read_text(narrative_path_or_payload).strip()
     if not full:
         return "Executive summary is ready in the final report artifacts."
 
@@ -2195,6 +2188,15 @@ def _build_fixed_deck_blueprint(
                 or d.get("description", "")
                 or ""
             )
+        if not d.get("call_count"):
+            d["call_count"] = (
+                d.get("calls")
+                or d.get("call_volume")
+                or d.get("n_calls")
+                or d.get("volume_calls")
+                or d.get("count")
+                or 0
+            )
         return d
 
     def _norm_drivers(t: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2656,20 +2658,15 @@ def _run_section_artifact_writer(
 
     # 1. Read narrative markdown from narrative_path file
     narrative_path = state.get("narrative_path", "")
-    narrative_markdown = ""
-    if narrative_path and Path(narrative_path).exists():
-        narrative_markdown = Path(narrative_path).read_text(encoding="utf-8").strip()
+    narrative_markdown = _read_text(narrative_path).strip() if narrative_path else ""
     if not narrative_markdown:
         narrative_markdown = "# Analysis Report\n\nNo narrative markdown was generated."
 
     # 2. Read section blueprints from blueprint_path file
     blueprint_path = state.get("blueprint_path", "")
-    section_blueprints: list[dict[str, Any]] = []
-    if blueprint_path and Path(blueprint_path).exists():
-        try:
-            section_blueprints = json.loads(Path(blueprint_path).read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, ValueError):
-            section_blueprints = []
+    section_blueprints: list[dict[str, Any]] = _read_json(blueprint_path) if blueprint_path else []
+    if not isinstance(section_blueprints, list):
+        section_blueprints = []
 
     # 4. Load template catalog for visual hierarchy
     catalog_path = Path(__file__).resolve().parent.parent / "data" / "input" / "template_catalog.json"

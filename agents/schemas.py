@@ -357,6 +357,16 @@ class ThemeDriver(BaseModel):
                     or data.pop("description", "")
                     or ""
                 )
+            # Map alternate field names → 'call_count'
+            if not data.get("call_count"):
+                data["call_count"] = (
+                    data.pop("calls", None)
+                    or data.pop("call_volume", None)
+                    or data.pop("n_calls", None)
+                    or data.pop("volume_calls", None)
+                    or data.pop("count", None)
+                    or 0
+                )
             dim = data.get("dimension")
             if dim is not None:
                 data["dimension"] = _normalize_driver(dim)

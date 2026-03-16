@@ -83,32 +83,35 @@ class DataStore:
             raise KeyError(f"JSON '{key}' not found in DataStore")
         return json.loads(Path(entry["path"]).read_text(encoding="utf-8"))
 
-    def store_text(self, key: str, content: str, metadata: dict | None = None) -> str:
-        """Store large text to file (.txt extension, legacy)."""
-        path = self.base_dir / f"{key}.txt"
+    def store_md(self, key: str, content: str, metadata: dict | None = None) -> str:
+        """Store markdown/text content to ``{key}.md`` and register it.
+
+        Returns the registry key (use with get_md).
+        """
+        path = self.base_dir / f"{key}.md"
         path.write_text(content, encoding="utf-8")
         self._registry[key] = {
-            "type": "text",
+            "type": "md",
             "path": str(path),
             "metadata": metadata or {},
         }
         self._save_registry()
         return key
 
-    def get_text(self, key: str) -> str:
-        """Retrieve text content by key."""
+    def get_md(self, key: str) -> str:
+        """Retrieve markdown/text content by key."""
         entry = self._registry.get(key)
-        if not entry or entry["type"] not in ("text", "markdown"):
-            raise KeyError(f"Text '{key}' not found in DataStore")
+        if not entry or entry["type"] != "md":
+            raise KeyError(f"Markdown '{key}' not found in DataStore")
         return Path(entry["path"]).read_text(encoding="utf-8")
 
     def next_version(self, base_name: str) -> int:
-        """Return the next version number for a versioned markdown file.
+        """Return the next version number for a versioned file.
 
-        Scans base_dir for ``{base_name}_v*.md`` and returns max_existing + 1.
+        Scans base_dir for ``{base_name}_v*.*`` and returns max_existing + 1.
         Returns 1 if no versions exist yet.
         """
-        existing = sorted(self.base_dir.glob(f"{base_name}_v*.md"))
+        existing = sorted(self.base_dir.glob(f"{base_name}_v*.*"))
         if not existing:
             return 1
         versions: list[int] = []
@@ -120,19 +123,21 @@ class DataStore:
                 pass
         return (max(versions) + 1) if versions else 1
 
-    def store_versioned_md(
+    def store_versioned(
         self,
         base_name: str,
         content: str,
         metadata: dict,
+        ext: str = "md",
         version: int | None = None,
     ) -> tuple[str, str]:
-        """Write content to ``{base_name}_v{n}.md`` and register it.
+        """Write content to ``{base_name}_v{n}.{ext}`` and register it.
 
         Args:
-            base_name: Logical name (e.g. ``"synthesis"``, ``"digital_friction_agent"``).
-            content:   Markdown text to write.
+            base_name: Logical name (e.g. ``"synthesis"``, ``"narrative"``).
+            content:   Text content to write (pre-serialised JSON or markdown).
             metadata:  Arbitrary metadata dict stored in registry.
+            ext:       File extension — ``"md"`` for markdown, ``"json"`` for JSON data.
             version:   Explicit version number. Auto-increments from existing files if None.
 
         Returns:
@@ -140,10 +145,10 @@ class DataStore:
         """
         v = version if version is not None else self.next_version(base_name)
         key = f"{base_name}_v{v}"
-        path = self.base_dir / f"{key}.md"
+        path = self.base_dir / f"{key}.{ext}"
         path.write_text(content, encoding="utf-8")
         self._registry[key] = {
-            "type": "markdown",
+            "type": ext,
             "path": str(path),
             "version": v,
             "metadata": metadata,

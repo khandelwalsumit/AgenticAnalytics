@@ -411,14 +411,14 @@ try:
     assert meta["rows"] == 3
     ok("get_metadata()")
 
-    # Store text
-    store.store_text("test_text", "hello world", metadata={"type": "test"})
-    assert store.get_text("test_text") == "hello world"
-    ok("store_text() / get_text()")
+    # Store markdown
+    store.store_md("test_md", "hello world", metadata={"type": "test"})
+    assert store.get_md("test_md") == "hello world"
+    ok("store_md() / get_md()")
 
     # List keys
     keys = store.list_keys()
-    assert "test_key" in keys and "test_text" in keys
+    assert "test_key" in keys and "test_md" in keys
     ok(f"list_keys(): {keys}")
 
     # Cleanup (Windows can keep parquet handles briefly; do not hard-fail checks)
