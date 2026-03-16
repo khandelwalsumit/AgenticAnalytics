@@ -78,7 +78,15 @@ def analyze_bucket(bucket: str, questions: list[str]) -> str:
     from config import LLM_ANALYSIS_FOCUS, GROUP_BY_COLUMNS
 
     df_all = store.get_dataframe("bucketed_data")
-    df = df_all[df_all["_bucket_key"] == bucket]
+    # Support both _bucket_id (new) and _bucket_key (legacy)
+    if "_bucket_id" in df_all.columns:
+        df = df_all[df_all["_bucket_id"] == bucket]
+        if df.empty and "_bucket_key" in df_all.columns:
+            df = df_all[df_all["_bucket_key"] == bucket]
+    elif "_bucket_key" in df_all.columns:
+        df = df_all[df_all["_bucket_key"] == bucket]
+    else:
+        df = df_all
     bucket_meta = store.get_metadata("bucketed_data").get("buckets", {})
     meta = bucket_meta.get(bucket, {})
 
@@ -111,7 +119,7 @@ def analyze_bucket(bucket: str, questions: list[str]) -> str:
     # Sample rows -- only LLM_ANALYSIS_FOCUS + grouping columns
     relevant_cols = list(dict.fromkeys(LLM_ANALYSIS_FOCUS + GROUP_BY_COLUMNS))
     available_cols = [c for c in relevant_cols if c in df.columns]
-    df_slim = df[available_cols] if available_cols else df.drop(columns=["_bucket_key"], errors="ignore")
+    df_slim = df[available_cols] if available_cols else df.drop(columns=["_bucket_id", "_bucket_key"], errors="ignore")
 
     sample = df_slim.sample(n=min(10, len(df_slim)), random_state=42) if len(df_slim) > 0 else df_slim
     rows = []
@@ -147,7 +155,15 @@ def apply_skill(skill_name: str, bucket: str) -> str:
     from config import LLM_ANALYSIS_FOCUS
 
     df_all = _data_store_ref.get_dataframe("bucketed_data")
-    df = df_all[df_all["_bucket_key"] == bucket]
+    # Support both _bucket_id (new) and _bucket_key (legacy)
+    if "_bucket_id" in df_all.columns:
+        df = df_all[df_all["_bucket_id"] == bucket]
+        if df.empty and "_bucket_key" in df_all.columns:
+            df = df_all[df_all["_bucket_key"] == bucket]
+    elif "_bucket_key" in df_all.columns:
+        df = df_all[df_all["_bucket_key"] == bucket]
+    else:
+        df = df_all
     bucket_meta = _data_store_ref.get_metadata("bucketed_data").get("buckets", {})
     meta = bucket_meta.get(bucket, {})
 

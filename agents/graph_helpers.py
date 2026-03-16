@@ -10,7 +10,6 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage
 
-from agents.nodes import AGENT_STATE_FIELDS
 from agents.state import AnalyticsState
 from config import DATA_DIR, DATA_OUTPUT_DIR, DATA_CACHE_DIR
 from tools import TOOL_REGISTRY
@@ -314,7 +313,7 @@ def _extract_bucket_entries(
                 "summary": full_summary, "condensed": condensed, "parsed": True,
             })
         except Exception as exc:
-            logger.warning("Skipping bucket %s / %s — summary extraction failed: %s", lens_id, bk, exc)
+            logger.warning("Skipping bucket %s / %s - summary extraction failed: %s", lens_id, bk, exc)
             continue
 
     entries.sort(key=lambda e: e["volume"], reverse=True)
@@ -714,18 +713,29 @@ def _thread_output_dir() -> Path:
 
 
 def _validate_narrative(result: dict[str, Any]) -> list[str]:
-    errors: list[str] = []
-    payload = result.get("narrative_output", {})
-    full = str(payload.get("full_response", "") if isinstance(payload, dict) else "").strip()
+    # New model: narrative is written to narrative_path file
+    narrative_path = result.get("narrative_path", "")
+    if not narrative_path:
+        return ["narrative_path missing from narrative node result."]
+    p = Path(narrative_path)
+    if not p.exists():
+        return [f"narrative_path file not found: {narrative_path}"]
+    full = p.read_text(encoding="utf-8").strip()
     if not full:
-        return ["narrative_output.full_response is empty."]
+        return [f"narrative_path file is empty: {narrative_path}"]
 
+    errors: list[str] = []
     slide_tag_pattern = r"<!--\s*SLIDE\s*:\s*.+?-->"
     tags = re.findall(slide_tag_pattern, full, flags=re.IGNORECASE | re.DOTALL)
     if len(tags) < 3:
         errors.append("Narrative markdown must include at least 3 `<!-- SLIDE: ... -->` tags.")
 
-    if _extract_json(full):
+    # Only flag as JSON-like if the entire output is predominantly JSON
+    # (starts with '{' or '[') AND lacks slide tags.  A small JSON preamble
+    # before valid markdown is acceptable — the LLM sometimes emits a
+    # structured summary before the narrative.
+    stripped = full.lstrip()
+    if stripped.startswith(("{", "[")) and len(tags) < 3:
         errors.append("Narrative output appears JSON-like; expected pure markdown with slide tags.")
 
     return errors
@@ -773,17 +783,14 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 
 def _build_deterministic_dataviz_output(state: dict[str, Any]) -> dict[str, Any]:
     """Generate required charts deterministically via Python chart scripts."""
-    synthesis = state.get("synthesis_result", {})
-    if not synthesis and state.get("synthesis_output_file"):
+    synthesis: dict[str, Any] = {}
+    # New model: read synthesis from synthesis_path file
+    synthesis_path = state.get("synthesis_path", "")
+    if synthesis_path and Path(synthesis_path).exists():
         try:
-            import chainlit as cl
-            data_store = cl.user_session.get("data_store")
-            if data_store:
-                    loaded = data_store.get_text(state["synthesis_output_file"])
-                    if loaded:
-                        synthesis = json.loads(loaded)
+            synthesis = json.loads(Path(synthesis_path).read_text(encoding="utf-8"))
         except Exception:
-            pass  # Thread-pool context — synthesis_result should be in state
+            pass
 
     themes_raw = synthesis.get("themes", []) if isinstance(synthesis, dict) else []
 
@@ -1442,9 +1449,14 @@ def _build_chart_paths_map(dataviz_json: dict[str, Any]) -> dict[str, str]:
     return chart_paths
 
 
-def _build_executive_summary_message(narrative_payload: dict[str, Any]) -> str:
-    """Build a concise user-facing summary from narrative markdown."""
-    full = str(narrative_payload.get("full_response", "") if isinstance(narrative_payload, dict) else "").strip()
+def _build_executive_summary_message(narrative_path_or_payload: Any) -> str:
+    """Build a concise user-facing summary from the narrative markdown file."""
+    # New model: narrative_path_or_payload is a file path string
+    full = ""
+    if isinstance(narrative_path_or_payload, str) and narrative_path_or_payload:
+        p = Path(narrative_path_or_payload)
+        if p.exists():
+            full = p.read_text(encoding="utf-8").strip()
     if not full:
         return "Executive summary is ready in the final report artifacts."
 
@@ -1486,8 +1498,15 @@ def _build_friction_reasoning_entries(
     synth_result: dict[str, Any],
 ) -> list[dict[str, str]]:
     """Curated reasoning entries for friction-analysis composite step."""
-    bucket_count = len(state.get("data_buckets", {})) if isinstance(state.get("data_buckets", {}), dict) else 0
-    bucket_count = bucket_count or 1
+    # Count buckets from manifest
+    bucket_count = 1
+    manifest_path = state.get("bucket_manifest_path", "")
+    if manifest_path and Path(manifest_path).exists():
+        try:
+            manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+            bucket_count = len(manifest.get("buckets", [])) or 1
+        except Exception:
+            pass
     entries: list[dict[str, str]] = []
     for aid in lens_ids:
         title = FRICTION_SUB_AGENTS.get(aid, {}).get("title", aid.replace("_", " ").title())
@@ -1539,26 +1558,19 @@ def _build_report_reasoning_entries() -> list[dict[str, str]]:
 
 
 def _validate_artifact_paths(result: dict[str, Any]) -> list[str]:
+    """Validate that artifacts_dir exists and contains the markdown report."""
     errors: list[str] = []
-    rpt = str(result.get("report_file_path", "")).strip()
-    dat = str(result.get("data_file_path", "")).strip()
-    md = str(result.get("markdown_file_path", "")).strip()
-
-    if not rpt:
-        errors.append("Missing report_file_path.")
-    elif not _path_exists(rpt):
-        errors.append(f"report_file_path does not exist: {rpt}")
-
-    if not dat:
-        errors.append("Missing data_file_path.")
-    elif not _path_exists(dat):
-        errors.append(f"data_file_path does not exist: {dat}")
-
-    if not md:
-        errors.append("Missing markdown_file_path.")
-    elif not _path_exists(md):
-        errors.append(f"markdown_file_path does not exist: {md}")
-
+    artifacts_dir = str(result.get("artifacts_dir", "")).strip()
+    if not artifacts_dir:
+        errors.append("Missing artifacts_dir.")
+        return errors
+    p = Path(artifacts_dir)
+    if not p.is_dir():
+        errors.append(f"artifacts_dir does not exist: {artifacts_dir}")
+        return errors
+    md = p / "complete_analysis.md"
+    if not md.exists():
+        errors.append(f"complete_analysis.md missing in artifacts_dir: {artifacts_dir}")
     return errors
 
 
@@ -1871,25 +1883,8 @@ def _persist_friction_outputs(
     lens_ids: list[str],
     results: list[dict[str, Any]],
 ) -> dict[str, str]:
-    """Persist each friction lens full_response to DataStore and return key map."""
-    data_store = cl.user_session.get("data_store")
-    output_keys: dict[str, str] = {}
-    if not data_store:
-        return output_keys
-
-    for agent_id, result in zip(lens_ids, results):
-        field = AGENT_STATE_FIELDS.get(agent_id, "")
-        if not field:
-            continue
-        agent_output = result.get(field, {})
-        full_response = agent_output.get("full_response", "") if isinstance(agent_output, dict) else ""
-        if not full_response:
-            continue
-        key = f"{agent_id}_output"
-        data_store.store_text(key, full_response, {"agent": agent_id, "type": "friction_output"})
-        output_keys[agent_id] = key
-        logger.info("  DataStore: wrote %s (%d chars)", key, len(full_response))
-    return output_keys
+    """No-op in the new file-pointer model: lens outputs are written directly to lens_outputs_dir."""
+    return {}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2649,51 +2644,52 @@ def _build_fixed_deck_blueprint(
 
 def _run_section_artifact_writer(
     state: AnalyticsState,
-    narrative_result: dict[str, Any],
-    section_blueprints: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Deterministic artifact writer using section-based PPTX builder.
 
+    Reads narrative_path and blueprint_path from state (new file-pointer model).
     OPT-4: Charts and CSV export run in parallel via threads, then PPTX
     (which needs chart paths) runs after charts complete.
     """
-    import asyncio
     import concurrent.futures
     from utils.pptx_builder import build_pptx_from_sections
 
-    # 2. Extract narrative markdown (needed before parallel work)
-    narrative_payload = narrative_result.get("narrative_output", {})
-    narrative_markdown = str(
-        narrative_payload.get("full_response", "") if isinstance(narrative_payload, dict) else ""
-    ).strip()
+    # 1. Read narrative markdown from narrative_path file
+    narrative_path = state.get("narrative_path", "")
+    narrative_markdown = ""
+    if narrative_path and Path(narrative_path).exists():
+        narrative_markdown = Path(narrative_path).read_text(encoding="utf-8").strip()
     if not narrative_markdown:
         narrative_markdown = "# Analysis Report\n\nNo narrative markdown was generated."
+
+    # 2. Read section blueprints from blueprint_path file
+    blueprint_path = state.get("blueprint_path", "")
+    section_blueprints: list[dict[str, Any]] = []
+    if blueprint_path and Path(blueprint_path).exists():
+        try:
+            section_blueprints = json.loads(Path(blueprint_path).read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, ValueError):
+            section_blueprints = []
 
     # 4. Load template catalog for visual hierarchy
     catalog_path = Path(__file__).resolve().parent.parent / "data" / "input" / "template_catalog.json"
     catalog = json.loads(catalog_path.read_text(encoding="utf-8")) if catalog_path.exists() else {}
     visual_hierarchy = catalog.get("visual_hierarchy")
 
-    # 5. Persist narrative markdown
+    # 3. Set up output directory (artifacts_dir)
     output_dir = _thread_output_dir()
     output_dir.mkdir(parents=True, exist_ok=True)
+    artifacts_dir = str(output_dir)
+
+    # 4. Write narrative markdown to artifacts_dir/complete_analysis.md
     markdown_path = str(output_dir / "complete_analysis.md")
     Path(markdown_path).write_text(narrative_markdown, encoding="utf-8")
-
-    report_key = "report_markdown"
-    data_store = cl.user_session.get("data_store")
-    if data_store is not None:
-        report_key = data_store.store_text(
-            "report_markdown",
-            narrative_markdown,
-            {"agent": "narrative_agent", "type": "report_markdown"},
-        )
 
     # OPT-4: Run charts + CSV export in parallel threads.
     # Resolve output dirs here (main thread has Chainlit context) so that
     # spawned threads don't need cl.user_session.
     _tid = state.get("thread_id", "") or str(cl.user_session.get("thread_id") or "unknown_thread")
-    _csv_output_dir = str(Path(DATA_OUTPUT_DIR) / _safe_thread_id(_tid))
+    _csv_output_dir = artifacts_dir
 
     def _generate_charts() -> dict[str, Any]:
         return _build_deterministic_dataviz_output(state)
@@ -2706,7 +2702,7 @@ def _run_section_artifact_writer(
 
     def _export_docx() -> str:
         from utils.docx_export import markdown_to_docx as _md_to_docx
-        docx_path = str(Path(_csv_output_dir) / "report.docx")
+        docx_path = str(output_dir / "report.docx")
         return _md_to_docx(narrative_markdown, docx_path)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
@@ -2721,7 +2717,7 @@ def _run_section_artifact_writer(
     if dataviz_errors:
         raise RuntimeError(f"Deterministic DataViz generation failed: {dataviz_errors}")
 
-    # 3. Build chart paths map (needs charts to be done)
+    # 5. Build chart paths map (needs charts to be done)
     dataviz_json = _extract_json(
         dataviz_result.get("dataviz_output", {}).get("full_response", "")
         if isinstance(dataviz_result.get("dataviz_output", {}), dict) else ""
@@ -2743,27 +2739,21 @@ def _run_section_artifact_writer(
     report_path = pptx_path if Path(pptx_path).exists() else ""
     logger.info("Section-based PPTX built: %s", report_path)
 
-    payload = {
-        "report_markdown_key": report_key,
-        "markdown_file_path": markdown_path,
-        "report_file_path": report_path,
-        "docx_file_path": docx_path,
-        "data_file_path": data_path,
-    }
-    payload_json = json.dumps(payload, indent=2)
-    logger.info("Section artifact writer completed: %s", payload)
+    summary_text = (
+        f"Artifacts written to {artifacts_dir}: "
+        f"PPTX={Path(pptx_path).name}, "
+        f"Word={Path(docx_path).name if docx_path else 'N/A'}, "
+        f"CSV={Path(data_path).name if data_path else 'N/A'}, "
+        f"MD=complete_analysis.md"
+    )
+    logger.info("Section artifact writer completed: %s", summary_text)
     return {
-        "messages": [AIMessage(content=payload_json)],
+        "messages": [AIMessage(content=summary_text)],
         "reasoning": [{
             "step_name": "Artifact Writer",
-            "step_text": "Built PPTX from section blueprints, generated Word report, persisted narrative markdown, and exported filtered CSV.",
+            "step_text": "Built PPTX, Word report, markdown, and exported filtered CSV.",
             "agent": "artifact_writer_node",
         }],
-        "dataviz_output": dataviz_result.get("dataviz_output", {}),
-        "report_markdown_key": report_key,
-        "markdown_file_path": markdown_path,
-        "report_file_path": report_path,
-        "docx_file_path": docx_path,
-        "data_file_path": data_path,
+        "artifacts_dir": artifacts_dir,
     }
 

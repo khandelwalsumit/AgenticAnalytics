@@ -4,7 +4,10 @@ Each node is a thin async wrapper that:
 1. Invokes the agent (pre-bound structured chain or per-call ReAct agent)
 2. Applies structured-output -> state mapping for decision agents
 3. Tracks plan progress (only for agents listed in plan_tasks)
-4. Records ExecutionTrace + reasoning for the Chainlit UI
+4. Records execution_trace for the Chainlit UI
+
+State rule enforced here: nothing large lives in state.
+Agents read files, write files, update path fields only.
 """
 
 from __future__ import annotations
@@ -14,6 +17,7 @@ import logging
 import re
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import AIMessage
@@ -25,7 +29,7 @@ from agents.schemas import (
     SupervisorOutput,
     SynthesizerOutput,
 )
-from agents.state import AnalyticsState, ExecutionTrace
+from agents.state import AnalyticsState
 from config import (
     ALL_DOMAIN_SKILLS,
     FRICTION_AGENTS,
@@ -41,20 +45,6 @@ logger = logging.getLogger("agenticanalytics.nodes")
 logger.setLevel(getattr(logging, LOG_LEVEL.upper(), logging.INFO))
 
 
-# ------------------------------------------------------------------
-# Agent -> dedicated state field
-# ------------------------------------------------------------------
-
-AGENT_STATE_FIELDS: dict[str, str] = {
-    "digital_friction_agent": "digital_analysis",
-    "operations_agent": "operations_analysis",
-    "communication_agent": "communication_analysis",
-    "policy_agent": "policy_analysis",
-    "synthesizer_agent": "synthesis_result",
-    "narrative_agent": "narrative_output",
-    "formatting_agent": "formatting_output",
-}
-
 # Supervisor decision -> next node routing
 _DECISION_TO_NEXT: dict[str, str] = {
     "answer": "__end__",
@@ -62,14 +52,9 @@ _DECISION_TO_NEXT: dict[str, str] = {
     "execute": "",  # resolved from plan_tasks
 }
 
-# Safety: max consecutive supervisor->data_analyst loops before forcing progress
 MAX_SUPERVISOR_LOOPS = 2
-ANALYSIS_START_NODES = {
-    "planner",
-    "friction_analysis",
-}
+ANALYSIS_START_NODES = {"planner", "friction_analysis"}
 ANALYSIS_CONFIRMATION_PENDING = "analysis_dimension_confirmation"
-
 
 LLM_INPUT_FIELDS: dict[str, list[str]] = {
     "supervisor": [
@@ -84,36 +69,37 @@ LLM_INPUT_FIELDS: dict[str, list[str]] = {
         "messages", "dataset_path", "dataset_schema", "analysis_objective",
     ],
     "digital_friction_agent": [
-        "messages", "data_buckets", "_focus_bucket", "filters_applied", "analysis_objective",
+        "messages", "bucket_manifest_path", "_focus_bucket_id", "filters_applied", "analysis_objective",
     ],
     "operations_agent": [
-        "messages", "data_buckets", "_focus_bucket", "filters_applied", "analysis_objective",
+        "messages", "bucket_manifest_path", "_focus_bucket_id", "filters_applied", "analysis_objective",
     ],
     "communication_agent": [
-        "messages", "data_buckets", "_focus_bucket", "filters_applied", "analysis_objective",
+        "messages", "bucket_manifest_path", "_focus_bucket_id", "filters_applied", "analysis_objective",
     ],
     "policy_agent": [
-        "messages", "data_buckets", "_focus_bucket", "filters_applied", "analysis_objective",
+        "messages", "bucket_manifest_path", "_focus_bucket_id", "filters_applied", "analysis_objective",
+    ],
+    "specialist_agent": [
+        "messages", "bucket_manifest_path", "_focus_bucket_id", "filters_applied", "analysis_objective",
     ],
     "synthesizer_agent": [
-        "messages", "friction_md_paths", "lens_synthesis_paths",
-        "selected_agents",
+        "messages", "lens_outputs_dir", "selected_agents",
+    ],
+    "solutioning_agent": [
+        "messages", "synthesis_path",
     ],
     "narrative_agent": [
-        "messages", "synthesis_result", "synthesis_output_file", "findings", "filters_applied",
-    ],
-    "formatting_agent": [
-        "messages", "narrative_output", "synthesis_result", "findings", "filters_applied",
+        "messages", "classified_solutions_path", "synthesis_path", "filters_applied",
     ],
     "report_analyst": [
-        "messages", "report_file_path", "data_file_path", "markdown_file_path",
-        "narrative_output", "formatting_output",
+        "messages", "artifacts_dir",
     ],
     "critique": [
-        "messages", "narrative_output", "formatting_output", "synthesis_result", "findings",
+        "messages", "synthesis_path",
     ],
     "qna_agent": [
-        "messages", "markdown_file_path",
+        "messages", "artifacts_dir",
     ],
 }
 
@@ -133,21 +119,21 @@ def _present_field_names(state: AnalyticsState, fields: list[str]) -> list[str]:
 
 
 def _skills_for_agent(agent_name: str, state: AnalyticsState) -> list[str]:
+    """Return skill names for a lens agent based on the focused bucket's manifest entry."""
     if agent_name not in FRICTION_AGENTS:
         return []
-    raw_buckets = state.get("data_buckets", {})
-    focus_bucket = str(state.get("_focus_bucket", "") or "")
-    skills: list[str] = []
-    if isinstance(raw_buckets, dict) and focus_bucket and isinstance(raw_buckets.get(focus_bucket), dict):
-        skills = list(raw_buckets[focus_bucket].get("assigned_skills", []) or [])
-    elif isinstance(raw_buckets, dict):
-        for binfo in raw_buckets.values():
-            if not isinstance(binfo, dict):
-                continue
-            for skill in binfo.get("assigned_skills", []) or []:
-                if isinstance(skill, str) and skill and skill not in skills:
-                    skills.append(skill)
-    return [s for s in skills if isinstance(s, str) and s]
+    focus_bucket_id = str(state.get("_focus_bucket_id", "") or "")
+    manifest_path = state.get("bucket_manifest_path", "")
+    if not manifest_path or not Path(manifest_path).exists():
+        return []
+    try:
+        manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+        for bucket in manifest.get("buckets", []):
+            if bucket.get("bucket_id") == focus_bucket_id:
+                return list(bucket.get("skills", []) or [])
+    except Exception:
+        pass
+    return []
 
 
 def _log_llm_input_signature(
@@ -162,7 +148,6 @@ def _log_llm_input_signature(
     skills = _skills_for_agent(agent_name, state)
     skills_text = ", ".join(skills) if skills else "none"
     fields_text = ", ".join(fields) if fields else "messages"
-
     logger.info("[LLM][%s] input = agent_prompt + skills[%s] + <%s>", agent_name, skills_text, fields_text)
     logger.info(
         "[LLM][%s] size  = prompt_chars=%d extra_context_chars=%d messages=%d",
@@ -175,6 +160,7 @@ def _PRELIMINARY_PLAN_TASKS() -> list[dict[str, str]]:
     return [
         {"title": "Data extraction & bucketing", "agent": "data_analyst", "status": "in_progress"},
         {"title": "Multi-dimensional friction analysis", "agent": "friction_analysis", "status": "ready"},
+        {"title": "Solution classification", "agent": "solutioning_agent", "status": "ready"},
         {"title": "Generate report drafts", "agent": "report_drafts", "status": "ready"},
         {"title": "Create report artifacts", "agent": "artifact_writer", "status": "ready"},
         {"title": "Deliver report and downloads", "agent": "report_analyst", "status": "ready"},
@@ -209,7 +195,6 @@ def _trunc(text: str, limit: int = MAX_DISPLAY_LENGTH) -> str:
 def _parse_json(text: str) -> dict[str, Any]:
     """Best-effort JSON extraction from raw LLM text."""
     text = text.strip()
-    # Try fenced code blocks first
     if "```" in text:
         for part in text.split("```")[1::2]:
             part = part.strip()
@@ -219,7 +204,6 @@ def _parse_json(text: str) -> dict[str, Any]:
                 return json.loads(part)
             except (json.JSONDecodeError, ValueError):
                 continue
-    # Try full text, then brace extraction
     for candidate in (text, text[text.find("{"):text.rfind("}") + 1] if "{" in text else ""):
         if not candidate:
             continue
@@ -236,18 +220,11 @@ def _parse_json(text: str) -> dict[str, Any]:
 
 
 def _find_next_plan_agent(plan_tasks: list[dict]) -> tuple[list[dict], str]:
-    """Find the first pending task, mark it in_progress, return (updated_tasks, agent).
-
-    Resume any existing in-progress task first.
-    Returns ("__end__", ...) if no task is actionable.
-    """
+    """Find the first pending task, mark it in_progress, return (updated_tasks, agent)."""
     updated = [dict(t) for t in plan_tasks]
-
-    # Resume interrupted work before advancing to the next ready task.
     for task in updated:
         if task.get("status") == "in_progress":
             return updated, task.get("agent", "__end__")
-
     for task in updated:
         if task.get("status") in ("ready", "todo"):
             task["status"] = "in_progress"
@@ -272,6 +249,19 @@ def _clear_checkpoint_fields() -> dict[str, Any]:
         "checkpoint_prompt": "",
         "pending_input_for": "",
     }
+
+
+def _advance_plan(agent_name: str, state: AnalyticsState, updates: dict[str, Any]) -> None:
+    """Mark the current task done and compute next step counts."""
+    tasks = [dict(t) for t in (updates.get("plan_tasks") or state.get("plan_tasks") or [])]
+    for t in tasks:
+        if t.get("agent") == agent_name and t.get("status") == "in_progress":
+            t["status"] = "done"
+            break
+    done = len([t for t in tasks if t.get("status") == "done"])
+    updates["plan_tasks"] = tasks
+    updates["plan_steps_completed"] = done
+    updates["plan_steps_total"] = len(tasks)
 
 
 # ------------------------------------------------------------------
@@ -307,9 +297,6 @@ def _verbose_details(messages: list) -> dict[str, Any]:
     return {"tool_calls": tool_calls, "ai_messages": ai_msgs, "message_count": len(messages)}
 
 
-
-
-
 # ------------------------------------------------------------------
 # Blocked response sentinel check
 # ------------------------------------------------------------------
@@ -331,7 +318,7 @@ def _check_blocked_response(agent_name: str, messages: list) -> None:
 
 
 # ------------------------------------------------------------------
-# Thin invocation helpers (replace make_agent_node factory)
+# Thin invocation helpers
 # ------------------------------------------------------------------
 
 
@@ -347,15 +334,6 @@ async def _run_structured_node(
     """Invoke a structured-output LLM chain and return mechanical base updates.
 
     Returns ``(base_updates, structured_output, last_new_msg)``.
-
-    ``base_updates`` contains the boilerplate every node needs:
-      - ``messages``         – new messages only (input messages filtered out)
-      - ``execution_trace``  – appended ExecutionTrace entry
-      - ``last_completed_node``
-      - checkpoint field resets
-
-    The CALLER writes: reasoning, next_agent, plan_tasks, and all other
-    agent-specific state fields.
     """
     from core.agent_factory import StructuredOutputAgent
 
@@ -367,8 +345,7 @@ async def _run_structured_node(
         state.get("plan_steps_completed", 0), state.get("plan_steps_total", 0),
     )
     _log_llm_input_signature(
-        agent_name,
-        state,
+        agent_name, state,
         prompt_chars=len(system_prompt),
         context_chars=len(extra_context),
     )
@@ -393,19 +370,25 @@ async def _run_structured_node(
     tools_used = [tc.get("name", "?") for m in new_msgs if hasattr(m, "tool_calls") for tc in m.tool_calls]
     input_summary = _text(state["messages"][-1].content)[:200] if state["messages"] else ""
 
+    trace_entry = {
+        "step_id": step_id,
+        "agent": agent_name,
+        "input_summary": input_summary,
+        "output_summary": summary,
+        "tools_used": tools_used,
+        "latency_ms": elapsed,
+        "success": True,
+    }
+
     base: dict[str, Any] = {
         "messages": new_msgs,
-        "execution_trace": [ExecutionTrace(
-            step_id=step_id, agent=agent_name, input_summary=input_summary,
-            output_summary=summary, tools_used=tools_used, latency_ms=elapsed, success=True,
-        )],
+        "execution_trace": [trace_entry],
         "last_completed_node": agent_name,
         **_clear_checkpoint_fields(),
     }
     logger.info(
         "[NODE][DONE ] %s elapsed_ms=%d structured=%s tools=%s new_msgs=%d",
-        agent_name,
-        elapsed,
+        agent_name, elapsed,
         type(structured).__name__ if structured else "None",
         ", ".join(tools_used) or "none",
         len(new_msgs),
@@ -422,11 +405,6 @@ async def _run_react_node(
     """Invoke a ReAct (tool-calling) agent and return mechanical base updates.
 
     Returns ``(base_updates, last_new_msg)``.
-
-    ``base_updates`` contains: messages (all new), execution_trace,
-    last_completed_node, and checkpoint field resets.
-
-    The CALLER writes: reasoning and all agent-specific state field updates.
     """
     start_ms = int(time.time() * 1000)
     step_id = str(uuid.uuid4())[:8]
@@ -437,8 +415,7 @@ async def _run_react_node(
     )
     base_prompt_chars = len(agent_factory.parse_agent_md(agent_name).system_prompt)
     _log_llm_input_signature(
-        agent_name,
-        state,
+        agent_name, state,
         prompt_chars=base_prompt_chars,
         context_chars=len(extra_context or ""),
     )
@@ -447,7 +424,6 @@ async def _run_react_node(
     result = await agent.ainvoke({"messages": state["messages"]})
     elapsed = int(time.time() * 1000) - start_ms
 
-    # Fail loudly if model response was blocked (Vertex AI safety filter)
     _check_blocked_response(agent_name, result.get("messages", []))
 
     input_ids = {m.id for m in state["messages"] if hasattr(m, "id") and m.id}
@@ -460,83 +436,38 @@ async def _run_react_node(
     tools_used = [tc.get("name", "?") for m in new_msgs if hasattr(m, "tool_calls") for tc in m.tool_calls]
     input_summary = _text(state["messages"][-1].content)[:200] if state["messages"] else ""
 
+    trace_entry = {
+        "step_id": step_id,
+        "agent": agent_name,
+        "input_summary": input_summary,
+        "output_summary": summary,
+        "tools_used": tools_used,
+        "latency_ms": elapsed,
+        "success": True,
+    }
+
     base: dict[str, Any] = {
         "messages": new_msgs,
-        "execution_trace": [ExecutionTrace(
-            step_id=step_id, agent=agent_name, input_summary=input_summary,
-            output_summary=summary, tools_used=tools_used, latency_ms=elapsed, success=True,
-        )],
+        "execution_trace": [trace_entry],
         "last_completed_node": agent_name,
         **_clear_checkpoint_fields(),
     }
     logger.info(
         "[NODE][DONE ] %s elapsed_ms=%d tools=%s new_msgs=%d",
-        agent_name,
-        elapsed,
+        agent_name, elapsed,
         ", ".join(tools_used) or "none",
         len(new_msgs),
     )
     return base, last_msg
 
 
-def _agent_output_field(agent_name: str, new_msgs: list, summary: str) -> dict[str, str]:
-    """Build the standard state-field dict stored for friction / reporting agents.
-
-    Shape: ``{"output": <summary>, "full_response": <all AI text>, "agent": <name>}``
-    Used by ``digital_analysis``, ``operations_analysis``, ``narrative_output``, etc.
-    """
-    full_response = "\n\n".join(
-        _text(m.content)
-        for m in new_msgs
-        if getattr(m, "type", "") == "ai" and _text(m.content)
-    )
-    return {"output": summary, "full_response": full_response, "agent": agent_name}
-
-
-
-# ------------------------------------------------------------------
-# Extra context builders
-# ------------------------------------------------------------------
-
-
-def _extract_agent_json(payload: Any) -> dict[str, Any]:
-    """Parse JSON payload from an agent state field."""
-    if not isinstance(payload, dict):
-        return {}
-    return _parse_json(payload.get("full_response", "")) or _parse_json(payload.get("output", ""))
-
-
-def _build_formatting_context(summary_ctx: dict[str, Any], state: AnalyticsState) -> dict[str, Any]:
-    """Build compact assembly context for formatting agent."""
-    narrative_payload = state.get("narrative_output", {})
-    narrative_markdown = ""
-    if isinstance(narrative_payload, dict):
-        narrative_markdown = str(narrative_payload.get("full_response", "")).strip()
-    elif narrative_payload:
-        narrative_markdown = str(narrative_payload)
-
-    chart_placeholders = [
-        "{{chart.friction_distribution}}",
-        "{{chart.impact_ease_scatter}}",
-        "{{chart.driver_breakdown}}",
-    ]
-
-    return {
-        "summary": summary_ctx,
-        "filters_applied": state.get("filters_applied", {}),
-        "narrative_markdown": narrative_markdown,
-        "narrative": {"full_response": narrative_markdown},
-        "chart_placeholders": chart_placeholders,
-    }
-
-
 def _write_versioned_md(base_name: str, content: str, metadata: dict) -> str:
     """Write content to a versioned markdown file in the session cache.
 
-    Uses the session DataStore (which is keyed to the thread_id) so the file
-    lands in data/.cache/<thread_id>/<base_name>_v<n>.md.
+    Uses the session DataStore (keyed to thread_id) so the file lands in
+    data/.cache/<thread_id>/<base_name>_v<n>.md.
 
-    Returns the absolute file path (use as completion flag — if it exists, step is done).
+    Returns the absolute file path (use as completion flag).
     """
     import chainlit as cl
     data_store = cl.user_session.get("data_store")
@@ -546,48 +477,79 @@ def _write_versioned_md(base_name: str, content: str, metadata: dict) -> str:
     return ""
 
 
+def _write_file(dest_path: str | Path, content: str) -> str:
+    """Write content to a fixed path (not versioned). Returns the path string."""
+    p = Path(dest_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(content, encoding="utf-8")
+    return str(p)
+
+
+# ------------------------------------------------------------------
+# Extra context builders
+# ------------------------------------------------------------------
+
+
 def _build_extra_context(
     agent_name: str,
     state: AnalyticsState,
     skill_loader: SkillLoader | None,
 ) -> str:
     """Build agent-specific context to append to the system prompt."""
-    if agent_name in FRICTION_AGENTS and skill_loader:
-        focus_bucket = state.get("_focus_bucket", "")
-        raw_buckets = state.get("data_buckets", {})
+
+    # ── Lens agents (digital, ops, comms, policy, specialist) ──────────
+    if agent_name in FRICTION_AGENTS or agent_name == "specialist_agent":
+        focus_bucket_id = str(state.get("_focus_bucket_id", "") or "")
+        manifest_path = state.get("bucket_manifest_path", "")
         bucket_context = ""
 
-        if focus_bucket and isinstance(raw_buckets, dict) and focus_bucket in raw_buckets:
-            # Single-bucket mode: load only this bucket's assigned skills
-            binfo = raw_buckets[focus_bucket]
-            skills_to_load: list[str] = binfo.get("assigned_skills", []) if isinstance(binfo, dict) else []
-            bucket_name = binfo.get("bucket_name", focus_bucket) if isinstance(binfo, dict) else focus_bucket
-            row_count = binfo.get("row_count", 0) if isinstance(binfo, dict) else 0
-            bucket_context = (
-                f"\n\n## Active Bucket\n"
-                f"You are analyzing bucket: **{bucket_name}** ({row_count} rows). "
-                f"Key: `{focus_bucket}`\n"
-                f"Use `analyze_bucket(bucket='{focus_bucket}')` for this bucket's data.\n"
-            )
-        else:
-            # All-buckets mode: union of all assigned skills across active buckets
-            skills_to_load = []
-            if isinstance(raw_buckets, dict):
-                for binfo in raw_buckets.values():
-                    if isinstance(binfo, dict):
-                        for s in binfo.get("assigned_skills", []):
-                            if s not in skills_to_load:
+        # Read bucket metadata from manifest
+        skills_to_load: list[str] = []
+        specialist_skill: str | None = None
+        if manifest_path and Path(manifest_path).exists():
+            try:
+                manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+                for bucket in manifest.get("buckets", []):
+                    if bucket.get("bucket_id") == focus_bucket_id:
+                        bucket_name = bucket.get("bucket_name", focus_bucket_id)
+                        row_count = bucket.get("row_count", 0)
+                        skills_to_load = list(bucket.get("skills", []) or [])
+                        specialist_skill = bucket.get("specialist_skill")
+                        bucket_context = (
+                            f"\n\n## Active Bucket\n"
+                            f"You are analyzing bucket: **{bucket_name}** ({row_count} rows). "
+                            f"Bucket ID: `{focus_bucket_id}`\n"
+                            f"Use `analyze_bucket(bucket='{focus_bucket_id}')` for this bucket's data.\n"
+                        )
+                        break
+                if not skills_to_load and not focus_bucket_id:
+                    # All-buckets mode: union of all skills
+                    for bucket in manifest.get("buckets", []):
+                        for s in bucket.get("skills", []) or []:
+                            if s and s not in skills_to_load:
                                 skills_to_load.append(s)
+            except Exception:
+                pass
 
-        # Fall back to full catalog only if bucketing ran without skill assignment
+        if agent_name == "specialist_agent" and specialist_skill and skill_loader:
+            loaded_skills = skill_loader.load_skill(specialist_skill)
+            return (
+                bucket_context
+                + "\n\n## Specialist Domain Knowledge\n"
+                "You are the specialist agent. Apply the deep domain knowledge below:\n\n"
+                + loaded_skills
+            )
+
         if not skills_to_load:
             skills_to_load = list(ALL_DOMAIN_SKILLS)
 
-        # Load: single skill → direct load (no list iteration); multiple → batch load
-        if len(skills_to_load) == 1:
-            loaded_skills = skill_loader.load_skill(skills_to_load[0])
+        if skill_loader:
+            if len(skills_to_load) == 1:
+                loaded_skills = skill_loader.load_skill(skills_to_load[0])
+            else:
+                loaded_skills = skill_loader.load_skills(skills_to_load)
         else:
-            loaded_skills = skill_loader.load_skills(skills_to_load)
+            loaded_skills = ""
 
         return (
             bucket_context
@@ -596,208 +558,78 @@ def _build_extra_context(
             + loaded_skills
         )
 
+    # ── Synthesizer ────────────────────────────────────────────────────
     if agent_name == "synthesizer_agent":
-        from pathlib import Path as _Path
-
-        lens_order = [
-            "digital_friction_agent",
-            "operations_agent",
-            "communication_agent",
-            "policy_agent",
-        ]
-        expected = [a for a in state.get("selected_agents", []) if a in lens_order]
-        if not expected:
-            expected = list(lens_order)
-        expected = list(dict.fromkeys([a for a in expected if a]))
-        parts = [
-            "\n\n## Friction Agent Outputs\n",
-            "Synthesize the following lens analyses into 10-12 top themes:\n",
-        ]
-        if expected:
-            parts.append(
-                "\nExpected lenses for this run: "
-                + ", ".join(expected)
-                + ". Set decision='complete' when all expected lenses have outputs.\n"
-            )
-
-        dimension_labels = {
-            "digital_friction_agent": "Digital Friction",
-            "operations_agent": "Operations",
-            "communication_agent": "Communication",
-            "policy_agent": "Policy",
-        }
-
-        # Phase 2 path: read per-lens synthesis files (one aggregated file per lens)
-        lens_synthesis_paths = state.get("lens_synthesis_paths", {})
-        if lens_synthesis_paths:
-            for agent_id, label in dimension_labels.items():
-                path = lens_synthesis_paths.get(agent_id, "")
-                if path and _Path(path).exists():
-                    content = _Path(path).read_text(encoding="utf-8")
-                    logger.info("Synthesizer context (Phase 2): read %s (%d chars)", agent_id, len(content))
-                    parts.append(f"\n### {label} Analysis\n{content}\n")
-                else:
-                    parts.append(f"\n### {label} Analysis\n(No output available)\n")
-            return "\n".join(parts)
-
-        # Nested friction_md_paths: {agent_id: {bucket_key: path}} or flat {agent_id: path}
-        friction_md = state.get("friction_md_paths", {})
-        for agent_id, label in dimension_labels.items():
-            content = ""
-            md_val = friction_md.get(agent_id, "")
-
-            if isinstance(md_val, dict):
-                # Nested: {bucket_key: md_path} — concatenate all bucket outputs
-                bucket_parts = []
-                for bk in sorted(md_val.keys()):
-                    bpath = md_val[bk]
-                    if bpath and _Path(bpath).exists():
-                        bucket_parts.append(_Path(bpath).read_text(encoding="utf-8"))
-                content = "\n\n".join(bucket_parts)
-                logger.info("Synthesizer context: read %s from %d bucket files (%d chars)",
-                            agent_id, len(bucket_parts), len(content))
-            elif isinstance(md_val, str) and md_val and _Path(md_val).exists():
-                # Flat legacy: single path string
-                content = _Path(md_val).read_text(encoding="utf-8")
-                logger.info("Synthesizer context: read %s from file (%d chars)", agent_id, len(content))
-
-            parts.append(f"\n### {label} Agent Output\n{content}\n" if content
-                         else f"\n### {label} Agent Output\n(No output available)\n")
-
+        lens_outputs_dir = state.get("lens_outputs_dir", "")
+        parts = ["\n\n## Friction Agent Outputs\nSynthesize the following lens analyses:\n"]
+        if lens_outputs_dir and Path(lens_outputs_dir).is_dir():
+            # Read per-lens synthesis files (*_synthesis.md)
+            synthesis_files = sorted(Path(lens_outputs_dir).glob("*_synthesis.md"))
+            for sf in synthesis_files:
+                content = sf.read_text(encoding="utf-8")
+                label = sf.stem.replace("_synthesis", "").replace("_", " ").title()
+                parts.append(f"\n### {label}\n{content}\n")
         return "\n".join(parts)
 
-    if agent_name in REPORTING_AGENTS:
-        synthesis = state.get("synthesis_result", {})
-        if not synthesis and state.get("synthesis_output_file"):
-            import chainlit as cl
-            data_store = cl.user_session.get("data_store")
-            if data_store:
-                loaded = data_store.get_text(state["synthesis_output_file"])
-                if loaded:
-                    synthesis = json.loads(loaded)
-        findings = state.get("findings", [])
-        retry_ctx = state.get("report_retry_context", {})
-        def _clip(value: Any, limit: int = 240) -> str:
-            text = str(value or "")
-            return text if len(text) <= limit else text[:limit] + "..."
+    # ── Solutioning agent ──────────────────────────────────────────────
+    if agent_name == "solutioning_agent":
+        from config import SOLUTIONS_REGISTRY_PATH
+        parts = []
+        synthesis_path = state.get("synthesis_path", "")
+        if synthesis_path and Path(synthesis_path).exists():
+            content = Path(synthesis_path).read_text(encoding="utf-8")
+            parts.append("\n\n## Friction Synthesis\n" + content)
+        registry_path = Path(SOLUTIONS_REGISTRY_PATH)
+        if registry_path.exists():
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            parts.append("\n\n## Solutions Registry\n" + json.dumps(registry, indent=2))
+        return "\n".join(parts)
 
-        summary_ctx = {
-            "executive_narrative": _clip(synthesis.get("executive_narrative", ""), 700),
-            "total_calls_analyzed": synthesis.get("total_calls_analyzed", 0),
-            "total_themes": synthesis.get("total_themes", 0),
-            "overall_preventability": synthesis.get("overall_preventability", 0),
-            "dominant_drivers": synthesis.get("dominant_drivers", {}),
-            "quick_wins_count": synthesis.get("quick_wins_count", 0),
-        }
-
-        compact_themes: list[dict[str, Any]] = []
-        for t in synthesis.get("themes", []) if isinstance(synthesis, dict) else []:
-            if not isinstance(t, dict):
-                continue
-            compact_themes.append({
-                "theme": t.get("theme", ""),
-                "call_count": t.get("call_count", 0),
-                "call_percentage": t.get("call_percentage", 0.0),
-                "impact_score": t.get("impact_score", 0.0),
-                "ease_score": t.get("ease_score", 0.0),
-                "priority_score": t.get("priority_score", 0.0),
-                "priority_quadrant": t.get("priority_quadrant", ""),
-                "dominant_driver": t.get("dominant_driver", ""),
-                "contributing_factors": [_clip(x, 120) for x in (t.get("contributing_factors", []) or [])[:6]],
-                "quick_wins": [_clip(x, 180) for x in (t.get("quick_wins", []) or [])[:6]],
-                "all_drivers": [
-                    {
-                        "driver": _clip(d.get("driver", ""), 180),
-                        "call_count": d.get("call_count", 0),
-                        "contribution_pct": d.get("contribution_pct", 0.0),
-                        "type": d.get("type", ""),
-                        "dimension": d.get("dimension", ""),
-                        "recommended_solution": _clip(d.get("recommended_solution", ""), 180),
-                    }
-                    for d in (t.get("all_drivers", []) or [])[:8]
-                    if isinstance(d, dict)
-                ],
-            })
-
-        compact_findings: list[dict[str, Any]] = []
-        if isinstance(findings, list):
-            for f in findings[:30]:
-                if not isinstance(f, dict):
-                    continue
-                compact_findings.append({
-                    "finding": _clip(f.get("finding", ""), 180),
-                    "theme": _clip(f.get("theme", ""), 120),
-                    "category": _clip(f.get("category", ""), 80),
-                    "call_count": f.get("call_count", 0),
-                    "call_percentage": f.get("call_percentage", 0.0),
-                    "impact_score": f.get("impact_score", 0.0),
-                    "ease_score": f.get("ease_score", 0.0),
-                    "dominant_driver": f.get("dominant_driver", ""),
-                    "priority_quadrant": f.get("priority_quadrant", ""),
-                    "recommended_action": _clip(f.get("recommended_action", ""), 180),
-                })
-
-        if agent_name == "report_analyst":
-            # Give report_analyst rich, structured context for report generation
-            ctx: dict[str, Any] = {
-                **summary_ctx,
-                "themes": compact_themes,
-                "findings": compact_findings,
-                "filters_applied": state.get("filters_applied", {}),
-                "report_file_path": state.get("report_file_path", ""),
-                "markdown_file_path": state.get("markdown_file_path", ""),
-                "data_file_path": state.get("data_file_path", ""),
-            }
-            parts = [
-                "\n\n## Analysis Context\nUse this data to verify and deliver report artifacts.\n",
-                json.dumps(ctx, indent=2, default=str),
-            ]
-            if isinstance(retry_ctx, dict) and retry_ctx.get("agent") == agent_name:
-                parts.append("\n\n## Retry Requirements (Mandatory)\n")
-                parts.append(json.dumps(retry_ctx, indent=2, default=str))
-            return "".join(parts)
-
-        ctx: dict[str, Any] = {
-            "summary": summary_ctx,
-            "themes": compact_themes,
-            "findings": compact_findings,
+    # ── Narrative agent ────────────────────────────────────────────────
+    if agent_name == "narrative_agent":
+        parts = []
+        classified_path = state.get("classified_solutions_path", "")
+        if classified_path and Path(classified_path).exists():
+            classified = json.loads(Path(classified_path).read_text(encoding="utf-8"))
+            parts.append("\n\n## Classified Solutions\n" + json.dumps(classified, indent=2, default=str))
+        synthesis_path = state.get("synthesis_path", "")
+        if synthesis_path and Path(synthesis_path).exists():
+            parts.append("\n\n## Synthesis Summary\n" + Path(synthesis_path).read_text(encoding="utf-8"))
+        ctx = {
             "filters_applied": state.get("filters_applied", {}),
         }
-        if agent_name == "formatting_agent":
-            ctx = _build_formatting_context(summary_ctx, state)
-
-        rules = ""
-        if agent_name == "narrative_agent":
-            rules = (
-                "\n\n## Tool Execution Requirements (Mandatory)\n"
-                "- Call `get_findings_summary` before final output.\n"
-                "- Final output must be pure markdown.\n"
-                "- Include explicit `<!-- SLIDE: ... -->` boundary tags for every slide.\n"
-                "- Do not return JSON.\n"
-            )
-        elif agent_name == "formatting_agent":
-            rules = (
-                "\n\n## Output Contract (Mandatory)\n"
-                "- Return ONLY valid JSON matching the structured slide blueprint schema.\n"
-                "- Include deck-level fields plus slide-level `slide_number`, `section_type`, `layout`, and `title`.\n"
-                "- Use explicit `image_prompt.placeholder_id` values from `chart_placeholders`.\n"
-                "- Do not call export tools from this agent.\n"
-            )
-
-        parts = ["\n\n## Analysis Context\n", json.dumps(ctx, indent=2, default=str), rules]
-        if isinstance(retry_ctx, dict) and retry_ctx.get("agent") == agent_name:
-            parts.append("\n\n## Retry Requirements (Mandatory)\n")
-            parts.append(json.dumps(retry_ctx, indent=2, default=str))
-            parts.append(
-                "\nRetry now. Do not provide an empty response. Satisfy all mandatory constraints before finalizing.\n"
-            )
+        parts.append("\n\n## Context\n" + json.dumps(ctx, indent=2, default=str))
         return "".join(parts)
 
+    # ── Report analyst ─────────────────────────────────────────────────
+    if agent_name == "report_analyst":
+        artifacts_dir = state.get("artifacts_dir", "")
+        parts = ["\n\n## Report Artifacts"]
+        if artifacts_dir and Path(artifacts_dir).is_dir():
+            files = list(Path(artifacts_dir).iterdir())
+            file_list = {f.name: str(f) for f in files if f.is_file()}
+            parts.append(json.dumps(file_list, indent=2))
+        else:
+            parts.append(f"Artifacts directory: {artifacts_dir or '(not yet created)'}")
+        return "\n".join(parts)
+
+    # ── QnA agent ──────────────────────────────────────────────────────
+    if agent_name == "qna_agent":
+        artifacts_dir = state.get("artifacts_dir", "")
+        md_path = Path(artifacts_dir) / "complete_analysis.md" if artifacts_dir else None
+        if md_path and md_path.exists():
+            return (
+                "\n\n## Analysis Report\n"
+                "Use ONLY the content below to answer the user's question.\n\n"
+                + md_path.read_text(encoding="utf-8")
+            )
+        return "\n\n## Analysis Report\nNo report has been generated yet."
+
+    # ── Supervisor ─────────────────────────────────────────────────────
     if agent_name == "supervisor":
         parts = []
-        # Inject available filters so supervisor can match user queries to real columns
         schema = state.get("dataset_schema", {})
-        parts.append("## Available Dataset Filters\nUse these to match user queries to actual data columns and values.\n\n")
+        parts.append("## Available Dataset Filters\n")
         for col, values in schema.items():
             if len(values) <= 20:
                 parts.append(f"- **{col}**: {values}\n")
@@ -813,13 +645,13 @@ def _build_extra_context(
             "plan_steps_completed": state.get("plan_steps_completed", 0),
             "plan_steps_total": state.get("plan_steps_total", 0),
         }
-        
-        # Flag that report exists — supervisor routes to qna for follow-up questions
-        if state.get("markdown_file_path"):
-            state_ctx["report_generated"] = True
+        if state.get("artifacts_dir") and Path(state["artifacts_dir"]).is_dir():
+            md = Path(state["artifacts_dir"]) / "complete_analysis.md"
+            state_ctx["report_generated"] = md.exists()
         parts.append(json.dumps(state_ctx, indent=2, default=str))
         return "\n\n" + "\n".join(parts)
 
+    # ── Planner ────────────────────────────────────────────────────────
     if agent_name == "planner":
         ctx: dict[str, Any] = {
             "filters_applied": state.get("filters_applied", {}),
@@ -827,54 +659,42 @@ def _build_extra_context(
             "analysis_scope_reply": state.get("analysis_scope_reply", ""),
             "critique_enabled": state.get("critique_enabled", False),
             "plan_tasks": state.get("plan_tasks", []),
-            "allowed_selected_agents": [
-                "digital_friction_agent",
-                "operations_agent",
-                "communication_agent",
-                "policy_agent",
-            ],
+            "allowed_selected_agents": list(FRICTION_AGENTS),
         }
-        # Add completed step results so planner can make informed decisions
-        if state.get("data_buckets"):
-            bucket_summary = {
-                k: {"bucket_name": v.get("bucket_name", k), "row_count": v.get("row_count", 0)}
-                for k, v in state.get("data_buckets", {}).items()
-                if isinstance(v, dict)
-            }
-            ctx["data_buckets_summary"] = bucket_summary
-        synthesis = state.get("synthesis_result", {})
-        if synthesis and isinstance(synthesis, dict):
+        manifest_path = state.get("bucket_manifest_path", "")
+        if manifest_path and Path(manifest_path).exists():
+            try:
+                manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+                ctx["bucket_summary"] = {
+                    b["bucket_id"]: {"bucket_name": b["bucket_name"], "row_count": b["row_count"]}
+                    for b in manifest.get("buckets", [])
+                }
+            except Exception:
+                pass
+        if state.get("synthesis_path") and Path(state["synthesis_path"]).exists():
             ctx["synthesis_done"] = True
-            ctx["synthesis_decision"] = synthesis.get("decision", "")
-            ctx["total_findings"] = len(state.get("findings", []))
-        critique = state.get("critique_feedback", {})
-        if critique and isinstance(critique, dict):
-            ctx["critique_decision"] = critique.get("decision", "")
-            ctx["critique_grade"] = critique.get("grade", "")
-        if state.get("narrative_output"):
+        if state.get("classified_solutions_path"):
+            ctx["solutioning_done"] = True
+        if state.get("narrative_path"):
             ctx["narrative_done"] = True
-        if state.get("formatting_output"):
+        if state.get("blueprint_path"):
             ctx["blueprint_done"] = True
         return "\n\n## Planning Context\n" + json.dumps(ctx, indent=2, default=str)
 
+    # ── Data analyst ───────────────────────────────────────────────────
     if agent_name == "data_analyst":
         parts = []
-        # Inject available filters from dataset schema
         schema = state.get("dataset_schema", {})
         if schema:
             parts.append("## Available Filters (from loaded dataset)\n")
-            parts.append("Use ONLY these exact column names and values when calling filter_data.\n")
-            parts.append("Do NOT guess column names -- use the ones listed here.\n\n")
+            parts.append("Use ONLY these exact column names and values when calling filter_data.\n\n")
             for col, values in schema.items():
                 if len(values) <= 20:
                     parts.append(f"- **{col}**: {values}\n")
                 else:
                     parts.append(f"- **{col}**: {values[:20]} ... ({len(values)} total)\n")
         else:
-            parts.append("## Available Filters\n")
-            parts.append("No filter catalog available yet. Use load_dataset first to discover the schema.\n")
-
-        # Also inject current state context
+            parts.append("## Available Filters\nNo filter catalog available yet. Use load_dataset first.\n")
         parts.append("\n## Current Data State\n")
         parts.append(json.dumps({
             "filters_applied": state.get("filters_applied", {}),
@@ -883,101 +703,36 @@ def _build_extra_context(
         }, indent=2, default=str))
         return "\n\n" + "\n".join(parts)
 
-    if agent_name == "report_analyst":
-        # Report analyst only needs file paths — it verifies and delivers
-        paths = {
-            "report_file_path": state.get("report_file_path", ""),
-            "markdown_file_path": state.get("markdown_file_path", ""),
-            "data_file_path": state.get("data_file_path", ""),
-        }
-        return "\n\n## Report Artifacts\n" + json.dumps(paths, indent=2)
+    # ── Formatting agent ───────────────────────────────────────────────
+    if agent_name == "formatting_agent":
+        parts: list[str] = []
+        synthesis_path = state.get("synthesis_path", "")
+        if synthesis_path and Path(synthesis_path).exists():
+            parts.append("\n\n## Synthesis Summary\n" + Path(synthesis_path).read_text(encoding="utf-8")[:3000])
+        narrative_path = state.get("narrative_path", "")
+        if narrative_path and Path(narrative_path).exists():
+            parts.append("\n\n## Narrative (for blueprint alignment)\n" + Path(narrative_path).read_text(encoding="utf-8")[:2000])
+        if not parts:
+            parts.append("\n\n## Formatting Context\nCreate the deck blueprint based on the synthesis in the conversation.")
+        return "".join(parts)
 
+    # ── Critique ───────────────────────────────────────────────────────
     if agent_name == "critique":
-        # Critique needs synthesis + findings for QA grading
-        synthesis = state.get("synthesis_result", {})
-        findings = state.get("findings", [])
-        ctx = {
-            "synthesis_summary": synthesis.get("summary", {}),
-            "themes": synthesis.get("themes", []),
-            "findings": findings[:20],
-        }
-        return "\n\n## Analysis Output (for QA grading)\n" + json.dumps(ctx, indent=2, default=str)
-
-    if agent_name == "qna_agent":
-        # Read the generated markdown report and inject as context
-        md_path = state.get("markdown_file_path", "")
-        if md_path:
-            from pathlib import Path as _Path
-            p = _Path(md_path)
-            if p.exists():
-                report_content = p.read_text(encoding="utf-8")
-                return (
-                    "\n\n## Analysis Report\n"
-                    "Use ONLY the content below to answer the user's question.\n\n"
-                    + report_content
-                )
-        return "\n\n## Analysis Report\nNo report has been generated yet."
+        synthesis_path = state.get("synthesis_path", "")
+        if synthesis_path and Path(synthesis_path).exists():
+            return "\n\n## Synthesis (for QA grading)\n" + Path(synthesis_path).read_text(encoding="utf-8")
+        return "\n\n## Critique Context\nNo synthesis file available yet. Validate findings from message history."
 
     return ""
 
 
+# ------------------------------------------------------------------
+# Data analyst state extraction
+# ------------------------------------------------------------------
 
 
-def _extract_formatting_state(
-    state: AnalyticsState, updates: dict[str, Any]
-) -> None:
-    """Extract report artifact paths from tool-result messages.
-
-    Used primarily by report_analyst when it performs tool-based recovery.
-    It scans tool JSON payloads and updates report/ppt/csv/markdown paths.
-    """
-    messages = updates.get("messages", [])
-    logger.info(
-        "Formatting extraction: scanning %d messages for tool result paths", len(messages),
-    )
-    for msg in messages:
-        if not hasattr(msg, "content"):
-            continue
-        content = _text(msg.content)
-        data = _parse_json(content)
-        if not data:
-            continue
-
-        logger.debug("Formatting extraction: parsed JSON keys=%s", list(data.keys()))
-
-        # export_to_pptx returns {"pptx_path": "..."}
-        if "pptx_path" in data:
-            updates["report_file_path"] = data["pptx_path"]
-            logger.info("Formatting Agent: extracted report_file_path=%s", data["pptx_path"])
-
-        # export_filtered_csv returns {"csv_path": "..."}
-        if "csv_path" in data:
-            updates["data_file_path"] = data["csv_path"]
-            logger.info("Formatting Agent: extracted data_file_path=%s", data["csv_path"])
-
-        # markdown artifact payload returns {"report_key": "...", "markdown_path": "..."}
-        if "report_key" in data:
-            updates["report_markdown_key"] = data["report_key"]
-            logger.info("Formatting Agent: extracted report_markdown_key=%s", data["report_key"])
-        if "markdown_path" in data:
-            updates["markdown_file_path"] = data["markdown_path"]
-            logger.info("Formatting Agent: extracted markdown_file_path=%s", data["markdown_path"])
-
-        # export_to_docx returns {"docx_path": "..."}
-        if "docx_path" in data:
-            updates["docx_file_path"] = data["docx_path"]
-            logger.info("Formatting Agent: extracted docx_file_path=%s", data["docx_path"])
-
-
-def _extract_data_analyst_state(
-    state: AnalyticsState, updates: dict[str, Any]
-) -> None:
-    """Extract filters_applied and themes_for_analysis from tool results.
-
-    Scans messages for tool result messages from filter_data / bucket_data
-    and populates the corresponding state fields so the supervisor knows
-    extraction is complete.
-    """
+def _extract_data_analyst_state(state: AnalyticsState, updates: dict[str, Any]) -> None:
+    """Extract filters_applied, bucket_manifest_path etc. from tool results."""
     messages = updates.get("messages", [])
     for msg in messages:
         if not hasattr(msg, "content"):
@@ -996,251 +751,128 @@ def _extract_data_analyst_state(
                 list((data.get("filters_applied") or {}).keys()),
             )
 
-        # filter_data tool returns "filters_applied" key with the applied filters
         if "filters_applied" in data:
             filters = data["filters_applied"]
             if filters and isinstance(filters, dict):
                 updates["filters_applied"] = filters
                 logger.info("[DATA][filter_data] filters_applied=%s", filters)
 
-        # filter_data returns filtered_parquet_path — completion flag for data_analyst step
         if "filtered_parquet_path" in data:
             updates["filtered_parquet_path"] = data["filtered_parquet_path"]
             logger.info("[DATA][filter_data] filtered_parquet_path=%s", data["filtered_parquet_path"])
 
-        # bucket_data returns themes and bucket paths
-        if "themes" in data:
-            updates["themes_for_analysis"] = data["themes"]
-            logger.info("[DATA][bucket_data] themes_for_analysis=%s", data["themes"])
-        if "buckets" in data:
-            updates["data_buckets"] = data["buckets"]
-            updates["analysis_scope_reply"] = ""
-            # Top-level theme names for supervisor quick-answers
+        # bucket_data returns bucket_manifest_path + buckets summary
+        if "bucket_manifest_path" in data:
+            updates["bucket_manifest_path"] = data["bucket_manifest_path"]
+            logger.info("[DATA][bucket_data] bucket_manifest_path=%s", data["bucket_manifest_path"])
+
+        if "buckets" in data and isinstance(data["buckets"], dict):
+            # Extract theme names for supervisor context (from bucket_id -> metadata dict)
             bucket_names = [
-                info.get("bucket_name", key)
-                for key, info in data["buckets"].items()
+                info.get("bucket_name", bid)
+                for bid, info in data["buckets"].items()
                 if isinstance(info, dict)
             ]
-            if bucket_names and "themes_for_analysis" not in updates:
-                updates["themes_for_analysis"] = bucket_names
-            updates["top_themes"] = bucket_names
-            bucket_rows: list[tuple[str, int]] = []
-            for key, info in data["buckets"].items():
-                if not isinstance(info, dict):
-                    continue
-                name = str(info.get("bucket_name", key))
-                count_raw = info.get("row_count", info.get("count", 0))
-                try:
-                    count = int(count_raw)
-                except (TypeError, ValueError):
-                    count = 0
-                bucket_rows.append((name, count))
-            bucket_rows.sort(key=lambda x: x[1], reverse=True)
-            calls_by_theme = ", ".join([f"{name}:{count}" for name, count in bucket_rows]) or "none"
-            logger.info(
-                "[DATA][bucket_data] themes=%d calls_by_theme=%s",
-                len(bucket_rows),
-                calls_by_theme,
-            )
-        if "bucket_paths" in data:
-            updates["bucket_paths"] = data["bucket_paths"]
-            logger.info("[DATA][bucket_data] bucket_paths=%s", list(data["bucket_paths"].keys()))
+            updates["themes_for_analysis"] = bucket_names
+            logger.info("[DATA][bucket_data] themes_for_analysis=%d buckets", len(bucket_names))
 
-    # If no tool results found, still mark that data_analyst ran
-    # by setting a minimal filters_applied so the supervisor knows.
     if "filters_applied" not in updates and not state.get("filters_applied"):
         updates["filters_applied"] = {"status": "extraction_attempted"}
         logger.info("[DATA][filter_data] no filter results found, marking extraction_attempted")
 
 
+# ------------------------------------------------------------------
+# Artifact path extraction (for report_analyst recovery)
+# ------------------------------------------------------------------
+
+
+def _extract_formatting_state(state: AnalyticsState, updates: dict[str, Any]) -> None:
+    """Extract artifact paths from tool-result messages (report_analyst recovery path)."""
+    messages = updates.get("messages", [])
+    for msg in messages:
+        if not hasattr(msg, "content"):
+            continue
+        content = _text(msg.content)
+        data = _parse_json(content)
+        if not data:
+            continue
+        # New model: all artifacts go to artifacts_dir
+        for key in ("pptx_path", "csv_path", "markdown_path", "docx_path"):
+            if key in data:
+                p = Path(data[key])
+                artifacts_dir = str(p.parent)
+                if not updates.get("artifacts_dir"):
+                    updates["artifacts_dir"] = artifacts_dir
+                    logger.info("Formatting extraction: artifacts_dir=%s", artifacts_dir)
+
+
+# ------------------------------------------------------------------
+# Supervisor applier
+# ------------------------------------------------------------------
+
+
+def _apply_supervisor(
+    structured: SupervisorOutput,
+    state: AnalyticsState,
+    base: dict[str, Any],
+) -> None:
+    """Apply structured supervisor output to base updates."""
+    decision = structured.decision
+    base["supervisor_decision"] = decision
+    base["reasoning"] = [{"step_name": "Supervisor", "step_text": structured.reasoning}]
+
+    if decision == "answer":
+        if structured.response:
+            base["messages"] = [AIMessage(content=structured.response)]
+        base["next_agent"] = "__end__"
+        return
+
+    if decision == "plan":
+        if structured.proposed_filters:
+            base["proposed_filters"] = structured.proposed_filters
+        # Route to data_analyst if no filtered data yet
+        if not state.get("filtered_parquet_path"):
+            base["next_agent"] = "data_analyst"
+            base["analysis_objective"] = (
+                state.get("analysis_objective", "")
+                or _text(state["messages"][-1].content) if state.get("messages") else ""
+            )
+        else:
+            base["next_agent"] = "planner"
+        return
+
+    if decision == "execute":
+        tasks = state.get("plan_tasks", [])
+        if tasks:
+            _, next_agent = _find_next_plan_agent(tasks)
+            base["next_agent"] = next_agent
+        else:
+            base["next_agent"] = "planner"
+        return
+
+    base["next_agent"] = "__end__"
+
+
+# ------------------------------------------------------------------
+# Guard helpers
+# ------------------------------------------------------------------
+
+
 def _has_bucketed_output(state: AnalyticsState) -> bool:
-    buckets = state.get("data_buckets", {})
+    manifest_path = state.get("bucket_manifest_path", "")
     themes = state.get("themes_for_analysis", [])
-    has_buckets = isinstance(buckets, dict) and bool(buckets)
+    has_manifest = bool(manifest_path) and Path(manifest_path).exists()
     has_themes = isinstance(themes, list) and bool(themes)
-    return has_buckets or has_themes
-
-
-def _should_gate_analysis_start(next_agent: str) -> bool:
-    return next_agent in ANALYSIS_START_NODES
+    return has_manifest or has_themes
 
 
 def _enforce_analysis_start_guard(state: AnalyticsState, updates: dict[str, Any]) -> None:
-    """Prevent analysis start before bucketed data exists.
-
-    Dimension confirmation is handled inline by data_analyst_node (interrupt),
-    so this guard only redirects to data_analyst when no buckets exist.
-    """
+    """Prevent analysis start before bucketed data exists."""
     next_agent = str(updates.get("next_agent", "") or "")
-    if not _should_gate_analysis_start(next_agent):
+    if next_agent not in ANALYSIS_START_NODES:
         return
-
     if not _has_bucketed_output(state):
-        logger.warning(
-            "Supervisor guard: blocked %s because bucketed output is not available yet.",
-            next_agent,
-        )
+        logger.warning("Supervisor guard: blocked %s - no bucket data yet.", next_agent)
         updates["next_agent"] = "data_analyst"
         updates["supervisor_decision"] = "plan"
         updates["analysis_scope_reply"] = ""
-        return
-
-    if state.get("analysis_scope_reply"):
-        return
-
-    logger.info("Supervisor guard: buckets exist, scope not yet confirmed -- data_analyst will handle it.")
-
-
-def _enforce_synthesis_completeness_guard(
-    state: AnalyticsState,
-    updates: dict[str, Any],
-    planned_next_agent: str,
-) -> bool:
-    """Before report_drafts, reroute if synthesis is incomplete.
-
-    Returns True if routing was overridden.
-    """
-    if planned_next_agent not in ("report_drafts", "report_generation"):
-        return False
-
-    lens_order = [
-        "digital_friction_agent",
-        "operations_agent",
-        "communication_agent",
-        "policy_agent",
-    ]
-    expected = [a for a in state.get("selected_agents", []) if a in lens_order]
-    if not expected:
-        expected = list(lens_order)
-    expected = list(dict.fromkeys([a for a in expected if a]))
-
-    # Primary source: per-lens synthesis files produced by friction_analysis phase 1.
-    available = list((state.get("lens_synthesis_paths", {}) or {}).keys())
-    if not available:
-        available = list((state.get("friction_output_files", {}) or {}).keys())
-
-    missing = [a for a in expected if a not in available]
-    missing = list(dict.fromkeys([a for a in missing if a]))
-
-    # Deterministic gate: if all expected lens outputs are present, allow progress.
-    if not missing:
-        return False
-
-    updates["next_agent"] = "friction_analysis"
-    updates["selected_agents"] = missing
-    updates["plan_tasks"] = state.get("plan_tasks", [])
-    updates["reasoning"] = [{
-        "step_name": "Supervisor",
-        "step_text": f"Synthesis incomplete. Re-running missing friction lenses: {', '.join(missing)}.",
-    }]
-    logger.warning(
-        "Supervisor guard: blocked report_drafts due incomplete synthesis; rerouting to friction_analysis with missing=%s",
-        missing,
-    )
-    return True
-
-
-def _apply_supervisor(s: SupervisorOutput, state: AnalyticsState, updates: dict) -> None:
-    """Map SupervisorOutput -> state updates.
-
-    Simplified to 3 decisions: answer, plan, execute.
-    """
-    updates["supervisor_decision"] = s.decision
-    updates["reasoning"] = [{"step_name": "Supervisor", "step_text": s.reasoning}]
-    suppress_model_response = False
-
-    target_agent = _DECISION_TO_NEXT.get(s.decision, "__end__")
-
-    # Deterministic handoff: once user has confirmed analysis scope and a plan exists,
-    # proceed with plan execution instead of asking for dimensions again.
-    if state.get("analysis_scope_reply") and not state.get("analysis_complete"):
-        next_planned = _peek_next_plan_agent(state.get("plan_tasks", []))
-        if next_planned != "__end__" and s.decision == "answer":
-            s = SupervisorOutput(
-                decision="execute",
-                confidence=max(int(getattr(s, "confidence", 80)), 80),
-                reasoning="Analysis scope already confirmed; continuing with next planned step.",
-                response="",
-            )
-            updates["supervisor_decision"] = s.decision
-            updates["reasoning"] = [{"step_name": "Supervisor", "step_text": s.reasoning}]
-            target_agent = _DECISION_TO_NEXT.get(s.decision, "__end__")
-
-    if s.decision == "execute":
-        plan, agent = _find_next_plan_agent(state.get("plan_tasks", []))
-        updates["next_agent"] = agent
-        updates["plan_tasks"] = plan
-        if _enforce_synthesis_completeness_guard(state, updates, agent):
-            suppress_model_response = True
-    elif s.decision == "plan":
-        updates["next_agent"] = target_agent
-        # Store confirmed filters and analysis objective for the data_analyst
-        if s.proposed_filters:
-            updates["proposed_filters"] = s.proposed_filters
-        if s.response:
-            updates["analysis_objective"] = s.response
-        # Bootstrap preliminary tasks if no plan exists yet
-        if not state.get("plan_tasks"):
-            updates["plan_tasks"] = _PRELIMINARY_PLAN_TASKS()
-            updates["plan_steps_total"] = len(updates["plan_tasks"])
-    else:
-        # answer — route to qna for genuine user follow-up questions when
-        # the report exists. The supervisor only sees user questions when
-        # this is the FIRST node in a new graph invocation (START -> supervisor).
-        # If we got here via report_analyst -> supervisor (pipeline finishing),
-        # the last message won't be a user question — just end the graph.
-        if (
-            state.get("markdown_file_path")
-            and s.decision == "answer"
-            and state.get("analysis_complete")
-        ):
-            from langchain_core.messages import HumanMessage as _HM
-            msgs = state.get("messages", [])
-            # Route to QnA only if the very last message is from the user
-            if msgs and isinstance(msgs[-1], _HM):
-                updates["next_agent"] = "qna"
-            else:
-                updates["next_agent"] = target_agent
-        else:
-            updates["next_agent"] = target_agent
-
-    _enforce_analysis_start_guard(state, updates)
-
-    # Emit supervisor chat text for answers and plan acknowledgments.
-    if s.response and not suppress_model_response and s.decision in ("answer", "plan"):
-        updates["messages"] = [AIMessage(content=s.response)]
-
-    logger.info("Supervisor (structured): %s -> %s (confidence=%d)", s.decision, updates.get("next_agent", "?"), s.confidence)
-
-
-# ------------------------------------------------------------------
-# Plan progress
-# ------------------------------------------------------------------
-
-
-def _advance_plan(agent_name: str, state: AnalyticsState, updates: dict) -> None:
-    """Mark the agent's task done and check pipeline completion."""
-    tasks = [dict(t) for t in updates.get("plan_tasks", state.get("plan_tasks", []))]
-    status_changed = False
-    for t in tasks:
-        if t.get("agent") == agent_name and t.get("status") != "done":
-            t["status"] = "done"
-            status_changed = True
-            break
-    updates["plan_tasks"] = tasks
-
-    total = max(state.get("plan_steps_total", 0), len(tasks))
-    done_count = len([t for t in tasks if t.get("status") == "done"])
-    completed = max(state.get("plan_steps_completed", 0), done_count)
-
-    updates["plan_steps_total"] = total
-    updates["plan_steps_completed"] = completed
-    logger.info(
-        "Plan progress: %d/%d (agent=%s%s)",
-        completed, total, agent_name, "" if status_changed else ", no status change",
-    )
-
-    if total > 0 and completed >= total:
-        updates["analysis_complete"] = True
-        updates["phase"] = "qa"
-        logger.info("Pipeline complete -- entering Q&A mode.")

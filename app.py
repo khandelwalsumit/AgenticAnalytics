@@ -82,12 +82,6 @@ AGENT_ID_TO_LABEL = {
 }
 AGENT_LABEL_TO_ID = {v: k for k, v in AGENT_ID_TO_LABEL.items()}
 DEFAULT_SELECTED_AGENTS = list(FRICTION_AGENT_IDS)
-FRICTION_STATE_FIELDS = {
-    "digital_friction_agent": "digital_analysis",
-    "operations_agent": "operations_analysis",
-    "communication_agent": "communication_analysis",
-    "policy_agent": "policy_analysis",
-}
 
 # Ensure auth secret is long enough
 if len(os.environ.get("CHAINLIT_AUTH_SECRET", "")) < 32:
@@ -289,14 +283,13 @@ async def _restore_resume_ui(thread_id: str, state: dict[str, Any]) -> None:
             state.get("analysis_complete"),
         )
 
-    # Download elements are ephemeral (cl.File path= lives in memory).
-    # Sending during on_chat_resume causes flash-and-vanish because Chainlit
-    # settles the UI after the handler returns, invalidating in-memory files.
-    # Instead, defer to the first on_message interaction.
-    if _collect_output_files(thread_id):
-        state["downloads_sent"] = False
-        state["_downloads_pending_resume"] = True
-        log.info("Resume UI: deferred download buttons to first interaction")
+    # Send download buttons immediately on resume if analysis is complete
+    if state.get("analysis_complete"):
+        output_files = _collect_output_files(thread_id)
+        if output_files:
+            state["downloads_sent"] = False
+            await _maybe_send_downloads(thread_id, state)
+            log.info("Resume UI: sent download buttons (%d files)", len(output_files))
 
 
 async def _maybe_send_downloads(thread_id: str, state: dict[str, Any]) -> bool:
@@ -366,27 +359,22 @@ def make_initial_state() -> dict[str, Any]:
         "execution_trace": [], "reasoning": [],
         "last_completed_node": "",
         "dataset_path": "", "dataset_schema": {},
-        "data_buckets": {},
-        "filtered_parquet_path": "", "bucket_paths": {},
-        "top_themes": [], "analytics_insights": {},
-        "findings": [],
-        "digital_analysis": {}, "operations_analysis": {},
-        "communication_analysis": {}, "policy_analysis": {},
-        "friction_output_files": {}, "friction_md_paths": {},
-        "lens_synthesis_paths": {},
-        "synthesis_result": {}, "synthesis_output_file": "", "synthesis_path": "",
-        "narrative_output": {}, "narrative_path": "",
-        "dataviz_output": {}, "formatting_output": {},
-        "report_markdown_key": "", "report_file_path": "", "data_file_path": "", "markdown_file_path": "",
+        "filtered_parquet_path": "",
+        "bucket_manifest_path": "",
+        "themes_for_analysis": [],
+        "lens_outputs_dir": "",
+        "synthesis_path": "",
+        "classified_solutions_path": "",
+        "narrative_path": "",
+        "blueprint_path": "",
+        "artifacts_dir": "",
         "critique_feedback": {}, "quality_score": 0.0,
         "next_agent": "", "supervisor_decision": "",
         "analysis_complete": False, "phase": "analysis",
         "downloads_sent": False,
         "proposed_filters": {},
-        "filters_applied": {}, "themes_for_analysis": [],
+        "filters_applied": {},
         "analysis_objective": "",
-        "error_count": 0, "recoverable_error": "",
-        "fault_injection": {"next_error": "", "target": "any"},
     }
 
 
@@ -402,82 +390,6 @@ def _setup_session(thread_id: str, state: dict[str, Any]) -> None:
 
 
 
-def _rehydrate_friction_outputs(state: dict[str, Any]) -> None:
-    """Re-register friction/synthesis markdown files into the DataStore on resume.
-
-    On resume the DataStore is a fresh instance but the .md files already exist
-    in data/.cache/<thread_id>/ (because DataStore uses thread_id as session key).
-    We just need to update friction_md_paths / synthesis_path in state if the
-    files are on disk — the DataStore registry will be rebuilt from the files.
-    """
-    data_store: DataStore | None = cl.user_session.get("data_store")
-    if not data_store:
-        return
-
-    # Restore friction markdown paths from disk — files are already there.
-    md_paths = state.get("friction_md_paths", {})
-    rebuilt_md: dict[str, Any] = {}
-    rebuilt_ds: dict[str, str] = {}
-    for agent_id, md_value in md_paths.items():
-        # New shape: {agent_id: {bucket_key: md_path}}
-        if isinstance(md_value, dict):
-            kept_bucket_paths: dict[str, str] = {}
-            combined_parts: list[str] = []
-            for bucket_key, bucket_path in md_value.items():
-                if isinstance(bucket_path, str) and bucket_path and Path(bucket_path).exists():
-                    kept_bucket_paths[str(bucket_key)] = bucket_path
-                    combined_parts.append(Path(bucket_path).read_text(encoding="utf-8"))
-            if kept_bucket_paths:
-                rebuilt_md[agent_id] = kept_bucket_paths
-                key = f"{agent_id}_output"
-                data_store.store_text(
-                    key,
-                    "\n\n".join(combined_parts),
-                    {"agent": agent_id, "type": "friction_output"},
-                )
-                rebuilt_ds[agent_id] = key
-            continue
-
-        # Legacy flat shape: {agent_id: md_path}
-        if isinstance(md_value, str) and md_value and Path(md_value).exists():
-            rebuilt_md[agent_id] = md_value
-            # Also register in DataStore so legacy code using friction_output_files works.
-            key = f"{agent_id}_output"
-            content = Path(md_value).read_text(encoding="utf-8")
-            data_store.store_text(key, content, {"agent": agent_id, "type": "friction_output"})
-            rebuilt_ds[agent_id] = key
-
-    if not rebuilt_md:
-        # Legacy path: rebuild from state dict full_response fields
-        for agent_id, field in FRICTION_STATE_FIELDS.items():
-            payload = state.get(field, {})
-            if not isinstance(payload, dict):
-                continue
-            full_response = str(payload.get("full_response", "")).strip()
-            if not full_response:
-                continue
-            _key, path = data_store.store_versioned_md(
-                agent_id, full_response, {"agent": agent_id, "type": "friction_output"}
-            )
-            rebuilt_md[agent_id] = path
-            rebuilt_ds[agent_id] = _key
-
-    if rebuilt_md:
-        state["friction_md_paths"] = rebuilt_md
-        state["friction_output_files"] = rebuilt_ds
-        log.info("Rehydrated friction md_paths: %s", list(rebuilt_md.keys()))
-
-    # Restore synthesis path / DataStore entry
-    synthesis_path = state.get("synthesis_path", "")
-    if synthesis_path and Path(synthesis_path).exists():
-        content = Path(synthesis_path).read_text(encoding="utf-8")
-        key = data_store.store_text("synthesis_output", content, {"agent": "synthesizer_agent", "type": "synthesis_output"})
-        state["synthesis_output_file"] = key
-        log.info("Rehydrated synthesis from %s", synthesis_path)
-    elif state.get("synthesis_result"):
-        content = json.dumps(state["synthesis_result"])
-        key = data_store.store_text("synthesis_output", content, {"agent": "synthesizer_agent", "type": "synthesis_output"})
-        state["synthesis_output_file"] = key
 
 
 def _apply_agent_selection(state: dict[str, Any], selected: list[str]) -> None:
@@ -826,9 +738,6 @@ async def on_chat_resume(thread: dict):
         if state.get("dataset_path"):
             state["dataset_schema"] = LLM_ANALYSIS_CONTEXT
             log.info("Resume: dataset_schema restored from config")
-
-        # Rehydrate friction outputs so synthesizer/reporting can continue without re-running prior agents.
-        _rehydrate_friction_outputs(state)
 
         # Seed graph checkpoint state from restored state so next run continues from checkpoint.
         graph = cl.user_session.get("graph")

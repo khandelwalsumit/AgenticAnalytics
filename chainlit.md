@@ -11,7 +11,7 @@ Welcome! This system turns **raw customer call data** into **actionable friction
    - ⚙️ **Operations** — Process breakdowns, SLA issues, handoff failures
    - 💬 **Communication** — Notification gaps, unclear messaging
    - 📜 **Policy** — Regulatory constraints, fee disputes
-4. Four specialist AI agents analyze the data **in parallel**, then a Synthesizer merges their findings into a ranked, scored report.
+4. Four specialist AI agents analyze the data **in parallel** with access to skill based on the primary_domin of the call/theme.. so based on theme Primary_domin it lodas the skills in context and generate insights... skill tells the agent exactly what to focus on based of th detailed prompt for each primary_domina. then a Synthesizer merges their findings into a ranked, scored report.
 5. A **Narrative + Formatting** pipeline auto-generates an executive slide deck (`.pptx`) you can download instantly.
 
 ---
@@ -39,6 +39,18 @@ START → Supervisor ─┬─→ Planner ────────────�
 | 3 | **Data Analyst** | Loads dataset, applies filters (product / call_reason), buckets themes. |
 | 4 | **Lens Confirmation** | Pauses the graph — asks you which friction dimensions to run before proceeding. |
 | 5 | **Friction Analysis** *(subgraph)* | Fans out to 4 lens agents **in parallel** (Digital, Operations, Communication, Policy) × each data bucket, then feeds all outputs into the **Synthesizer** which merges findings, ranks them, and scores preventability. |
+|5.1| **Skills** | **Friction Analysis** | each agent loads the skills based on primary_domain making it a speceliast on the domain for that bucket.. CALL_REASONS_TO_SKILLS = {
+        "Payments & Transfers":["payment_transfer","fraud_dispute"],
+        "Dispute & Fraud":["fraud_dispute","payment_transfer"],
+        "Products & Offers":["promotions_offers"],
+        "Sign On":["authentication"],
+        "Profile & Settings":["profile_settings","authentication"],
+        "Replace Card":["card_replacement","profile_settings"],
+        "Transactions & Statements":["transaction_statement"],
+        "Other":["general_inquiry"],
+        "Rewards":["rewards","promotions_offers"]
+}
+
 | 6 | **Report Generation** *(subgraph)* | Runs **Narrative Agent** (writes executive story, theme dives, recommendations) → **Formatting Agent** (builds slide-by-slide blueprint) → **Artifact Writer** (renders `.pptx`, `.md`, `.csv` files). |
 | 7 | **Report Analyst** | Verifies all artifacts exist, presents download links. |
 | 8 | **Critique** *(optional)* | QA pass — grades synthesis quality, flags gaps, can trigger revisions. |

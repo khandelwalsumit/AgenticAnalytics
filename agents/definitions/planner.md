@@ -30,6 +30,7 @@ Given completed step results and the current state, produce the next ordered lis
 |-------------------|-------------|
 | `data_analyst` | Loads dataset, applies filters, buckets themes (includes dimension confirmation interrupt) |
 | `friction_analysis` | Runs 4 parallel friction lens agents (Digital, Operations, Communication, Policy) + Synthesizer |
+| `solutioning_agent` | Classifies friction findings against solutions registry (effectiveness gaps, enhancements, net-new) |
 | `report_drafts` | Narrative agent + fixed deck blueprint (no artifacts yet) |
 | `artifact_writer` | Generates charts, PPTX, CSV, markdown files |
 | `critique` | QA validation (only if critique_enabled is True) |
@@ -39,19 +40,20 @@ Given completed step results and the current state, produce the next ordered lis
 
 1. **Include data_analyst as first step** if no filters have been applied yet
 2. **After data_analyst completes** -> add friction_analysis
-3. **After friction_analysis completes** -> add report_drafts
-4. **If critique_enabled** -> add critique between report_drafts and artifact_writer
-5. **After critique passes (or if disabled)** -> add artifact_writer
-6. **If critique says needs_revision** -> route back to report_drafts (track retry via plan_tasks status)
-7. **Always end with report_analyst** for final delivery
-8. **friction_analysis is a single step** -- it handles all 4 agents + synthesizer internally
-9. **Select friction lenses from analysis_scope_reply** -- return `selected_agents` using only:
+3. **After friction_analysis completes** -> add solutioning_agent
+4. **After solutioning_agent completes** -> add report_drafts
+5. **If critique_enabled** -> add critique between report_drafts and artifact_writer
+6. **After critique passes (or if disabled)** -> add artifact_writer
+7. **If critique says needs_revision** -> route back to report_drafts (track retry via plan_tasks status)
+8. **Always end with report_analyst** for final delivery
+9. **friction_analysis is a single step** -- it handles all 4 agents + synthesizer internally
+10. **Select friction lenses from analysis_scope_reply** -- return `selected_agents` using only:
    - `digital_friction_agent`
    - `operations_agent`
    - `communication_agent`
    - `policy_agent`
    If the reply is ambiguous, return all 4.
-10. **Preserve done steps** -- keep completed tasks in the plan, only add/update pending ones
+11. **Preserve done steps** -- keep completed tasks in the plan, only add/update pending ones
 
 ## Standard Plan (critique disabled)
 
@@ -60,11 +62,12 @@ Given completed step results and the current state, produce the next ordered lis
   "plan_tasks": [
     {"title": "Data extraction & bucketing", "agent": "data_analyst", "status": "ready"},
     {"title": "Multi-dimensional friction analysis", "agent": "friction_analysis", "status": "ready"},
+    {"title": "Classify findings against solutions registry", "agent": "solutioning_agent", "status": "ready"},
     {"title": "Generate report drafts", "agent": "report_drafts", "status": "ready"},
     {"title": "Create report artifacts", "agent": "artifact_writer", "status": "ready"},
     {"title": "Deliver report and downloads", "agent": "report_analyst", "status": "ready"}
   ],
-  "plan_steps_total": 5
+  "plan_steps_total": 6
 }
 ```
 

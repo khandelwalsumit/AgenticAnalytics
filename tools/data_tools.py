@@ -3,8 +3,11 @@
 Pipeline:
   load_dataset  → reads input parquet in-place (no copy)
   filter_data   → writes data/.cache/<thread_id>/filtered.parquet
-  bucket_data   → writes data/.cache/<thread_id>/bucket_*.parquet
-  analyze_bucket → reads bucket parquets for LLM analysis
+  bucket_data   → writes data/.cache/<thread_id>/buckets/*.parquet
+                  + data/.cache/<thread_id>/bucket_manifest.json
+  analyze_bucket → reads bucket parquets from manifest
+  sample_data   → returns sample rows for LLM context
+  get_distribution → returns value counts for a column
 
 File paths returned in every tool response double as completion flags:
 if the path exists on disk, that step is done.
@@ -14,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +25,7 @@ import pandas as pd
 from langchain_core.tools import tool
 
 from config import (
+    BUCKETING_MODE,
     CALL_REASONS_TO_SKILLS,
     DATA_FILTER_COLUMNS,
     GROUP_BY_COLUMNS,
@@ -28,6 +33,8 @@ from config import (
     MAX_BUCKET_SIZE,
     MAX_SAMPLE_SIZE,
     MIN_BUCKET_SIZE,
+    SPECIALIST_DOMAIN_TRIGGERS,
+    SPECIALIST_MIN_BUCKET_SIZE,
     TAIL_BUCKET_ENABLED,
     DEFAULT_PARQUET_PATH,
 )
@@ -36,7 +43,6 @@ from tools.metrics import MetricsEngine
 
 # Module-level references — set by the graph at session init
 _data_store: DataStore | None = None
-# Path to the input parquet file — set by load_dataset; never written, only read.
 _input_parquet_path: Path | None = None
 
 
@@ -47,7 +53,6 @@ def set_data_store(store: DataStore) -> None:
     _input_parquet_path = None  # reset on new session
 
 
-
 def _get_store() -> DataStore:
     if _data_store is None:
         raise RuntimeError("DataStore not initialized. Call set_data_store() first.")
@@ -55,8 +60,24 @@ def _get_store() -> DataStore:
 
 
 def _safe_key(name: str) -> str:
-    """Convert a bucket name to a safe DataStore key."""
+    """Convert a bucket name to a safe DataStore key / file stem."""
     return re.sub(r"[^a-z0-9_]", "_", str(name).lower().strip())[:80]
+
+
+def _bucket_id_from_name(name: str, existing_ids: list[str] | None = None) -> str:
+    """Generate a short uppercase bucket ID from a name, e.g. 'PAY-POST-001'.
+
+    Ensures uniqueness vs existing_ids by appending a counter if needed.
+    """
+    parts = re.split(r"[^a-zA-Z0-9]+", name.strip())
+    parts = [p[:4].upper() for p in parts if p][:3]
+    base = "-".join(parts) if parts else _safe_key(name).upper()[:12]
+    if not existing_ids or base not in existing_ids:
+        return base
+    counter = 1
+    while f"{base}-{counter:03d}" in existing_ids:
+        counter += 1
+    return f"{base}-{counter:03d}"
 
 
 @tool
@@ -113,7 +134,6 @@ def filter_data(filters: dict[str, Any]) -> str:
 
     for col, val in filters.items():
         if col not in df.columns:
-            # Find close matches to suggest
             from difflib import get_close_matches
             close = get_close_matches(col, list(df.columns), n=3, cutoff=0.4)
             skipped[col] = {
@@ -123,7 +143,6 @@ def filter_data(filters: dict[str, Any]) -> str:
             }
             continue
         if isinstance(val, list):
-            # Check which values actually exist in the column
             existing = set(df[col].dropna().unique().astype(str))
             missing_vals = [v for v in val if str(v) not in existing]
             mask &= df[col].isin(val)
@@ -158,19 +177,25 @@ def filter_data(filters: dict[str, Any]) -> str:
 
     store.store_dataframe("filter_data", filtered, metadata=metadata)
 
+    # Write filtered parquet to a stable named path so bucket_data can read it
+    filtered_path = store.base_dir / "filtered.parquet"
+    filtered.to_parquet(filtered_path, index=False)
+    metadata["filtered_parquet_path"] = str(filtered_path)
+
     return json.dumps(metadata, indent=2)
 
 
 @tool
 def bucket_data(group_by: str = "", focus: str = "") -> str:
-    """Intelligently group data into analysis buckets.
+    """Intelligently group data into analysis buckets using tree partitioning.
 
     Uses the GROUP_BY_COLUMNS hierarchy from config. Groups by each column
     in sequence, enforcing MIN_BUCKET_SIZE and MAX_BUCKET_SIZE. Small
-    buckets are merged into an "Other" tail bucket when TAIL_BUCKET_ENABLED.
+    buckets are merged into a tail bucket when TAIL_BUCKET_ENABLED.
 
-    Buckets larger than MAX_BUCKET_SIZE are automatically sub-bucketed by
-    the next column in the hierarchy.
+    Writes individual bucket parquets to data/.cache/<thread_id>/buckets/ and
+    a bucket_manifest.json that replaces all legacy data_buckets state.
+    Assigns skills and specialist_skill from config mappings.
 
     Args:
         group_by: Column name to group by. If empty, uses the first
@@ -178,7 +203,7 @@ def bucket_data(group_by: str = "", focus: str = "") -> str:
         focus: Optional column to compute top-N values within each bucket.
 
     Returns:
-        JSON string with bucket names, sizes, config used, and top values.
+        JSON string with bucket_manifest_path, bucket_count, and bucket summary.
     """
     store = _get_store()
 
@@ -211,7 +236,7 @@ def bucket_data(group_by: str = "", focus: str = "") -> str:
     available_cols = [c for c in GROUP_BY_COLUMNS if c in df.columns]
     current_idx = available_cols.index(group_by) if group_by in available_cols else -1
 
-    # --- Group and apply min/max logic (recursive sub-bucketing) ---
+    # --- Tree partitioning algorithm (greedy top-down) ---
     grouped = df.groupby(group_by, dropna=False)
     regular_buckets: dict[str, pd.DataFrame] = {}
     tail_rows: list[pd.DataFrame] = []
@@ -242,7 +267,6 @@ def bucket_data(group_by: str = "", focus: str = "") -> str:
                 if TAIL_BUCKET_ENABLED and len(sub_df) < MIN_BUCKET_SIZE:
                     sub_tail.append(sub_df)
                 elif len(sub_df) > MAX_BUCKET_SIZE and deeper_cols:
-                    # Still oversized — recurse into next level
                     _sub_bucket(sub_bucket_name, sub_df, deeper_cols)
                 else:
                     regular_buckets[sub_bucket_name] = sub_df
@@ -256,7 +280,6 @@ def bucket_data(group_by: str = "", focus: str = "") -> str:
         else:
             regular_buckets[parent_name] = parent_df
 
-    # Columns available for deeper splits after the current group_by
     deeper_cols = available_cols[current_idx + 1:] if current_idx >= 0 else []
 
     for name, group_df in grouped:
@@ -268,64 +291,117 @@ def bucket_data(group_by: str = "", focus: str = "") -> str:
         other_df = pd.concat(tail_rows, ignore_index=True)
         regular_buckets["Other"] = other_df
 
-    # --- Build per-bucket metadata and combine into one parquet ---
-    buckets_info: dict[str, Any] = {}
-    frames: list[pd.DataFrame] = []
-    for bucket_name, bucket_df in regular_buckets.items():
-        bucket_key = f"bucket_{_safe_key(bucket_name)}"
+    # --- Write individual bucket parquets + build manifest ---
+    buckets_dir = store.base_dir / "buckets"
+    buckets_dir.mkdir(parents=True, exist_ok=True)
 
-        # Build LLM-relevant summary (only LLM_ANALYSIS_FOCUS)
+    manifest_buckets: list[dict[str, Any]] = []
+    existing_ids: list[str] = []
+    total_rows = len(df)
+
+    for bucket_name, bucket_df in regular_buckets.items():
+        # Determine primary_domain and sub_theme from the bucket name
+        parts_split = bucket_name.split(" > ")
+        primary_domain = parts_split[0].strip()
+        sub_theme = parts_split[1].strip() if len(parts_split) > 1 else primary_domain
+        is_tail = bucket_name == "Other"
+
+        # Generate stable bucket_id (unique)
+        bucket_id = _bucket_id_from_name(bucket_name, existing_ids)
+        existing_ids.append(bucket_id)
+
+        # Write individual parquet
+        bucket_parquet_path = buckets_dir / f"{bucket_id}.parquet"
+        bucket_df.to_parquet(bucket_parquet_path, index=False)
+
+        # Resolve skills from CALL_REASONS_TO_SKILLS
+        assigned_skills: list[str] = (
+            CALL_REASONS_TO_SKILLS.get(primary_domain)
+            or CALL_REASONS_TO_SKILLS.get(bucket_name)
+            or ["general_inquiry"]
+        )
+
+        # Resolve specialist skill
+        specialist_skill: str | None = None
+        if (
+            primary_domain in SPECIALIST_DOMAIN_TRIGGERS
+            and len(bucket_df) >= SPECIALIST_MIN_BUCKET_SIZE
+        ):
+            specialist_skill = SPECIALIST_DOMAIN_TRIGGERS[primary_domain]
+
+        # LLM-relevant summary
         llm_cols = [c for c in LLM_ANALYSIS_FOCUS if c in bucket_df.columns]
         llm_summary: dict[str, Any] = {}
         for col in llm_cols:
             top = MetricsEngine.top_n(bucket_df, col, n=5)
             llm_summary[col] = top
 
-        # Resolve skills for this bucket from the CALL_REASONS_TO_SKILLS mapping.
-        # For sub-buckets ("Parent > Sub"), use only the parent part for lookup.
-        parent_reason = bucket_name.split(" > ")[0].strip()
-        assigned_skills: list[str] = (
-            CALL_REASONS_TO_SKILLS.get(parent_reason)
-            or CALL_REASONS_TO_SKILLS.get(bucket_name)
-            or []
-        )
-
-        meta: dict[str, Any] = {
-            "bucket_name": bucket_name,
-            "row_count": len(bucket_df),
-            "group_by": group_by,
-            "llm_field_summary": llm_summary,
-            "assigned_skills": assigned_skills,
-        }
-
-        if len(bucket_df) < MIN_BUCKET_SIZE:
-            meta["warning"] = f"Small bucket ({len(bucket_df)} rows)"
-
         if focus and focus in bucket_df.columns:
-            meta["top_values"] = MetricsEngine.top_n(bucket_df, focus, n=5)
+            llm_summary[f"top_{focus}"] = MetricsEngine.top_n(bucket_df, focus, n=5)
 
-        tagged = bucket_df.copy()
-        tagged["_bucket_key"] = bucket_key
-        frames.append(tagged)
-        buckets_info[bucket_key] = meta
+        manifest_buckets.append({
+            "bucket_id": bucket_id,
+            "bucket_name": bucket_name,
+            "primary_domain": primary_domain,
+            "sub_theme": sub_theme,
+            "row_count": len(bucket_df),
+            "bucket_path": str(bucket_parquet_path),
+            "skills": assigned_skills,
+            "specialist_skill": specialist_skill,
+            "is_tail": is_tail,
+            "llm_field_summary": llm_summary,
+        })
 
-    # Store all buckets in one combined parquet
+    manifest: dict[str, Any] = {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "total_calls": total_rows,
+        "filtered_calls": total_rows,
+        "bucketing_mode": BUCKETING_MODE,
+        "group_by": group_by,
+        "bucket_count": len(manifest_buckets),
+        "config": {
+            "min_bucket_size": MIN_BUCKET_SIZE,
+            "max_bucket_size": MAX_BUCKET_SIZE,
+            "tail_enabled": TAIL_BUCKET_ENABLED,
+            "group_by_columns": GROUP_BY_COLUMNS,
+        },
+        "buckets": manifest_buckets,
+    }
+
+    # Write manifest JSON and register in DataStore
+    manifest_path = store.store_json("bucket_manifest", manifest)
+
+    # Also store the combined bucketed dataframe for analyze_bucket / sample_data tools
+    frames = []
+    for bucket_entry in manifest_buckets:
+        bdf = pd.read_parquet(bucket_entry["bucket_path"])
+        bdf = bdf.copy()
+        bdf["_bucket_id"] = bucket_entry["bucket_id"]
+        bdf["_bucket_key"] = _safe_key(bucket_entry["bucket_name"])
+        frames.append(bdf)
     combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-    store.store_dataframe("bucketed_data", combined, metadata={"buckets": buckets_info})
+    store.store_dataframe("bucketed_data", combined, metadata={"manifest_path": manifest_path})
+
+    # Build compact bucket summary for LLM context (no parquet paths)
+    bucket_summary = {
+        b["bucket_id"]: {
+            "bucket_name": b["bucket_name"],
+            "primary_domain": b["primary_domain"],
+            "sub_theme": b["sub_theme"],
+            "row_count": b["row_count"],
+            "skills": b["skills"],
+            "specialist_skill": b["specialist_skill"],
+            "is_tail": b["is_tail"],
+        }
+        for b in manifest_buckets
+    }
 
     return json.dumps(
         {
-            "group_by": group_by,
-            "bucket_count": len(buckets_info),
-            "total_rows": len(df),
-            "config": {
-                "min_bucket_size": MIN_BUCKET_SIZE,
-                "max_bucket_size": MAX_BUCKET_SIZE,
-                "tail_enabled": TAIL_BUCKET_ENABLED,
-                "group_by_columns": GROUP_BY_COLUMNS,
-                "llm_analysis_focus": LLM_ANALYSIS_FOCUS,
-            },
-            "buckets": buckets_info,
+            "bucket_manifest_path": manifest_path,
+            "bucket_count": len(manifest_buckets),
+            "total_rows": total_rows,
+            "buckets": bucket_summary,
         },
         indent=2,
     )
@@ -335,11 +411,8 @@ def bucket_data(group_by: str = "", focus: str = "") -> str:
 def sample_data(bucket: str, n: int = 5) -> str:
     """Get a sample of rows from a data bucket — only LLM-relevant columns.
 
-    Returns only the LLM_ANALYSIS_COLUMNS plus grouping columns to keep
-    context small for downstream LLM agents.
-
     Args:
-        bucket: DataStore key for the bucket (e.g., 'bucket_payments').
+        bucket: Bucket ID (e.g., 'PAY-POST-001') or legacy bucket key.
         n: Number of rows to sample (max 50).
 
     Returns:
@@ -349,14 +422,21 @@ def sample_data(bucket: str, n: int = 5) -> str:
     n = min(n, MAX_SAMPLE_SIZE)
 
     df_all = store.get_dataframe("bucketed_data")
-    df = df_all[df_all["_bucket_key"] == bucket] if bucket else df_all
+    # Support both bucket_id and legacy bucket_key
+    if "_bucket_id" in df_all.columns:
+        df = df_all[df_all["_bucket_id"] == bucket]
+        if df.empty and "_bucket_key" in df_all.columns:
+            df = df_all[df_all["_bucket_key"] == bucket]
+    elif "_bucket_key" in df_all.columns:
+        df = df_all[df_all["_bucket_key"] == bucket]
+    else:
+        df = df_all
 
-    # Only include LLM_ANALYSIS_FOCUS columns + grouping columns for context
-    relevant_cols = list(dict.fromkeys(
-        LLM_ANALYSIS_FOCUS + GROUP_BY_COLUMNS
-    ))
+    relevant_cols = list(dict.fromkeys(LLM_ANALYSIS_FOCUS + GROUP_BY_COLUMNS))
     available_cols = [c for c in relevant_cols if c in df.columns]
-    df_slim = df[available_cols] if available_cols else df.drop(columns=["_bucket_key"], errors="ignore")
+    df_slim = df[available_cols] if available_cols else df.drop(
+        columns=[c for c in ["_bucket_key", "_bucket_id"] if c in df.columns], errors="ignore"
+    )
 
     sample = df_slim.sample(n=min(n, len(df_slim)), random_state=42) if len(df_slim) > 0 else df_slim
 
@@ -382,7 +462,7 @@ def get_distribution(column: str, bucket: str = "") -> str:
 
     Args:
         column: Column name to analyze.
-        bucket: Optional DataStore key. If empty, uses filtered/main dataset.
+        bucket: Optional bucket ID or key. If empty, uses filtered/main dataset.
 
     Returns:
         JSON string with value counts and percentages.
@@ -391,7 +471,14 @@ def get_distribution(column: str, bucket: str = "") -> str:
 
     if bucket:
         df_all = store.get_dataframe("bucketed_data")
-        df = df_all[df_all["_bucket_key"] == bucket]
+        if "_bucket_id" in df_all.columns:
+            df = df_all[df_all["_bucket_id"] == bucket]
+            if df.empty and "_bucket_key" in df_all.columns:
+                df = df_all[df_all["_bucket_key"] == bucket]
+        elif "_bucket_key" in df_all.columns:
+            df = df_all[df_all["_bucket_key"] == bucket]
+        else:
+            df = df_all
     else:
         df = store.get_dataframe("filter_data")
 

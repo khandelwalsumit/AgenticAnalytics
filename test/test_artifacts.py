@@ -216,7 +216,7 @@ def generate_charts(state: dict, output_dir: Path) -> dict[str, str]:
             chart_paths[spec["type"]] = str(out_path)
             logger.info("Chart OK: %s -> %s", spec["type"], out_path)
         except Exception as e:
-            logger.error("Chart FAILED: %s — %s", spec["type"], e)
+            logger.error("Chart FAILED: %s - %s", spec["type"], e)
 
     return chart_paths
 

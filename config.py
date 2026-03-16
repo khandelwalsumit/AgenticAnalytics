@@ -40,18 +40,28 @@ VERBOSE = False
 
 DEFAULT_PARQUET_PATH = DATA_INPUT_DIR / "adf.parquet"
 PPTX_TEMPLATE_PATH = os.getenv("PPTX_TEMPLATE_PATH", str(DATA_INPUT_DIR / "template.pptx"))
+SOLUTIONS_REGISTRY_PATH = DATA_INPUT_DIR / "solutions_registry.json"
 
 LLM_ANALYSIS_FOCUS: list[str] = ["exact_actionable_problem"]
 
-MIN_BUCKET_SIZE = 5     # Buckets smaller than this get merged into "Other"
-MAX_BUCKET_SIZE = 200   # Buckets larger than this get sub-bucketed by next column
+# Bucketing
+BUCKETING_MODE = "tree"             # "tree" | "semantic"
+MIN_BUCKET_SIZE = 30                # Buckets smaller than this get merged into tail
+MAX_BUCKET_SIZE = 200               # Buckets larger than this get sub-bucketed
 TAIL_BUCKET_ENABLED = True
 
 GROUP_BY_COLUMNS: list[str] = [
-    "call_reason",        # L1 — broadest grouping
-    "broad_theme_l3",     # L3 — mid-level theme
+    "call_reason",        # L1 — broadest grouping (maps to primary_domain)
+    "broad_theme_l3",     # L3 — mid-level theme (maps to sub_theme)
     "granular_theme_l5",  # L5 — most granular
 ]
+
+# Specialist routing
+SPECIALIST_DOMAIN_TRIGGERS: dict[str, str] = {
+    "Payments & Transfers": "payment_specialist",
+    # "Dispute & Fraud": "dispute_specialist",   # add when ready
+}
+SPECIALIST_MIN_BUCKET_SIZE = 50
 
 LLM_ANALYSIS_CONTEXT: dict[str, list[str]] = {
     "product": ["Costco", "Rewards", "AAdvantage", "Cash", "others","Non Rewards","ATT"],
@@ -84,7 +94,6 @@ FRICTION_AGENTS = {
 }
 REPORTING_AGENTS = {
     "narrative_agent",
-    "formatting_agent",
     "report_analyst",
 }
 ALL_DOMAIN_SKILLS = [

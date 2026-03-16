@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
@@ -41,14 +42,14 @@ class DataStore:
             json.dumps(self._registry, indent=2, default=str), encoding="utf-8"
         )
 
-    def store_dataframe(self, key: str, df: pd.DataFrame, metadata: dict) -> str:
+    def store_dataframe(self, key: str, df: pd.DataFrame, metadata: dict | None = None) -> str:
         """Store DataFrame to parquet, return reference key."""
         path = self.base_dir / f"{key}.parquet"
         df.to_parquet(path, index=False)
         self._registry[key] = {
             "type": "dataframe",
             "path": str(path),
-            "metadata": metadata,
+            "metadata": metadata or {},
         }
         self._save_registry()
         return key
@@ -60,14 +61,36 @@ class DataStore:
             raise KeyError(f"DataFrame '{key}' not found in DataStore")
         return pd.read_parquet(entry["path"])
 
-    def store_text(self, key: str, content: str, metadata: dict) -> str:
+    def store_json(self, key: str, obj: Any, metadata: dict | None = None) -> str:
+        """Store a JSON-serialisable object to ``{key}.json`` and register it.
+
+        Returns the absolute file path (use as completion flag).
+        """
+        path = self.base_dir / f"{key}.json"
+        path.write_text(json.dumps(obj, indent=2, default=str), encoding="utf-8")
+        self._registry[key] = {
+            "type": "json",
+            "path": str(path),
+            "metadata": metadata or {},
+        }
+        self._save_registry()
+        return str(path)
+
+    def get_json(self, key: str) -> Any:
+        """Retrieve a JSON object by key."""
+        entry = self._registry.get(key)
+        if not entry or entry["type"] != "json":
+            raise KeyError(f"JSON '{key}' not found in DataStore")
+        return json.loads(Path(entry["path"]).read_text(encoding="utf-8"))
+
+    def store_text(self, key: str, content: str, metadata: dict | None = None) -> str:
         """Store large text to file (.txt extension, legacy)."""
         path = self.base_dir / f"{key}.txt"
         path.write_text(content, encoding="utf-8")
         self._registry[key] = {
             "type": "text",
             "path": str(path),
-            "metadata": metadata,
+            "metadata": metadata or {},
         }
         self._save_registry()
         return key
